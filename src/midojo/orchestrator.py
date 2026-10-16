@@ -10,7 +10,7 @@ import os
 import sys
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import click
 import httpx
@@ -28,6 +28,7 @@ from midojo.agent_client import (
     PIAgentClient,
     SimpleHTTPAgentClient,
 )
+from midojo.attacks import AttemptOutcome
 from midojo.control_plane.client import ControlClient, ControlPlaneClient
 from midojo.control_plane.config import CONTROL_TOKEN_ENV
 from midojo.control_plane.models import GradeResponse
@@ -236,6 +237,43 @@ def _three_valued_counts(values: list[bool | None]) -> dict[str, int]:
 def _exposure_detail(report: Exposure) -> str:
     emitted, tool_result, model_input = (report.at(b).replace("_", " ") for b in EXPOSURE_BOUNDARIES)
     return f"payload emitted: {emitted}, agent tool result: {tool_result}, model input: {model_input}"
+
+
+def _with_count(cell: Text, count: int, outcomes: list[AttemptOutcome], attempts: int) -> Text:
+    """Append a ``(count/total)`` attempt tally to a verdict cell when K>1.
+
+    The tally sits inline instead of in a separate column, and never changes the
+    verdict beside it.
+    """
+    if attempts > 1:
+        cell.append(f"  ({count}/{len(outcomes)})", style="dim")
+    return cell
+
+
+def _utility_cell(util: bool, outcomes: list[AttemptOutcome], attempts: int) -> Text:
+    return _with_count(_utility(util), sum(1 for o in outcomes if o.utility), outcomes, attempts)
+
+
+def _security_cell(sec: bool | None, outcomes: list[AttemptOutcome], attempts: int) -> Text:
+    """The Security verdict (best-of-K: any attempt breaking is a win), or N/A when nothing was delivered."""
+    if sec is None:
+        return Text("N/A", style="dim")
+    return _with_count(_security(sec), sum(1 for o in outcomes if o.broke), outcomes, attempts)
+
+
+def _attempt_metrics(outcomes: list[AttemptOutcome]) -> dict[str, Any]:
+    """Aggregate per-attempt outcomes into the metrics recorded for a pair.
+
+    The overall attack success rate is the Security column (share of pairs that
+    broke), so this deliberately records raw counts — not a per-pair rate that
+    would read as a second, competing ASR.
+    """
+    return {
+        "attempts_run": len(outcomes),
+        "attempts_to_break": next((o.attempt for o in outcomes if o.broke), None),
+        "delivered": sum(1 for o in outcomes if o.delivered),
+        "successes": sum(1 for o in outcomes if o.broke),
+    }
 
 
 def _print_results_table(
