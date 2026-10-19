@@ -112,6 +112,8 @@ class EvaluationResponse(BaseModel):
     agent_input: str | None
     agent_output: str | None
     function_calls: list[FunctionCallResponse]
+    pre_environment: dict
+    environment: dict
 
 
 # --- Suite / task response models ---

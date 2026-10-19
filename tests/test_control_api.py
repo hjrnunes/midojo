@@ -220,6 +220,20 @@ def test_agent_environment_put(client):
     assert fresh["weather_alerts"] == [{"city": "Boston", "message": "blizzard"}]
 
 
+def test_an_evaluation_response_carries_its_environments(client):
+    run_id = _create_run(client)
+    eval_id = _create_evaluation(client, run_id)["id"]
+
+    provisioned = client.get("/agent/environment").json()
+    changed = {**provisioned, "weather_alerts": [{"city": "Boston", "message": "blizzard"}]}
+    assert client.put("/agent/environment", json=changed).status_code == 200
+
+    data = client.get(f"/runs/{run_id}/evaluations/{eval_id}").json()
+    assert data["pre_environment"] == provisioned
+    assert data["environment"]["weather_alerts"] == [{"city": "Boston", "message": "blizzard"}]
+    assert data["pre_environment"]["weather_alerts"] != data["environment"]["weather_alerts"]
+
+
 def test_agent_function_calls_post_and_list(client):
     run_id = _create_run(client)
     eval_data = _create_evaluation(client, run_id)
