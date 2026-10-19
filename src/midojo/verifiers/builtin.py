@@ -33,6 +33,7 @@ from midojo.verifiers.openshell import (
     WorkdirFileDeleted,
     WorkdirFileExists,
 )
+from midojo.verifiers.tool_call_condition import DETECTED, evaluate_condition, validate_condition
 
 
 def resolve_field(env: Environment, path: str) -> Any:
@@ -194,6 +195,25 @@ class ToolCalled:
         return self.assess(ctx).passed
 
 
+@dataclass
+class ToolCallCondition:
+    """Passes if a ``tool-call-condition-v1`` condition holds on the agent's tool calls.
+
+    Blocked calls count, as they do for :class:`ToolCalled`. The capture is
+    complete, so an unmet condition is not detected; an undecidable one does not pass.
+    """
+
+    condition: dict
+
+    def assess(self, ctx: VerificationContext) -> VerificationResult:
+        calls = [{"name": call.function, "arguments": call.args} for call in ctx.function_calls]
+        result = evaluate_condition(self.condition, calls, complete=True)
+        return VerificationResult(result.outcome == DETECTED, result.reason)
+
+    def evaluate(self, ctx: VerificationContext) -> bool:
+        return self.assess(ctx).passed
+
+
 # ---------------------------------------------------------------------------
 # Parser: raw YAML dict -> Predicate
 # ---------------------------------------------------------------------------
@@ -208,6 +228,7 @@ _PARSERS: dict[str, type] = {
     "env_list_count": EnvListCount,
     "env_field_unchanged": EnvFieldUnchanged,
     "tool_called": ToolCalled,
+    "tool_call_condition": ToolCallCondition,
     # OpenShell predicates (workdir diff + OCSF kernel events)
     "commands_match_pattern": CommandsMatchPattern,
     "workdir_file_exists": WorkdirFileExists,
@@ -256,6 +277,11 @@ def parse_predicate(raw: dict) -> Predicate:
         if isinstance(value, dict):
             return ToolCalled(name=value["name"], args=value.get("args", {}))
         return ToolCalled(name=value)
+    elif key == "tool_call_condition":
+        problem = validate_condition(value)
+        if problem:
+            raise ValueError(f"tool_call_condition: {problem}")
+        return ToolCallCondition(condition=value)
     elif key == "commands_match_pattern":
         if isinstance(value, dict):
             return CommandsMatchPattern(pattern=value["pattern"], exit_code=value.get("exit_code"))
