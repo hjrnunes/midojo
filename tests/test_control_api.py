@@ -638,8 +638,27 @@ def test_records_stay_in_start_order(client, route):
 
     calls = _evaluation(client, run_id, eval_id).function_calls
     assert [(c.call_id, c.complete) for c in calls] == [("first", True), ("second", True)]
-    # A call recorded after an unfinished one chains from that call's pre-env.
-    assert calls[1].pre_environment == calls[0].pre_environment
+
+
+@pytest.mark.parametrize("route", _RECORD_ROUTES)
+def test_record_after_an_unfinished_call_does_not_take_its_changes(client, route):
+    """A's changes since its start stay out of B's record: B's pre-env is the live environment."""
+    run_id = _create_run(client)
+    eval_id = _create_evaluation(client, run_id)["id"]
+    env = client.get(_env_url(route, run_id, eval_id)).json()
+    client.post(_start_url(route, run_id, eval_id), json={**_START, "call_id": "a"})
+    alert = [{"city": "Boston", "message": "from a"}]
+    client.put(_env_url(route, run_id, eval_id), json={**env, "weather_alerts": alert})
+
+    blocked = {"call_id": "b", "function": "send_email", "args": {}, "result": "blocked", "blocked": True}
+    client.post(_record_url(route, run_id, eval_id), json=blocked)
+
+    a, b = _evaluation(client, run_id, eval_id).function_calls
+    assert (a.complete, b.complete) == (False, True)
+    assert a.pre_environment.model_dump()["weather_alerts"] == env["weather_alerts"]
+    assert b.pre_environment.model_dump()["weather_alerts"] == alert
+    assert b.post_environment == b.pre_environment
+    assert b.pre_environment is not b.post_environment  # separate snapshots
 
 
 def test_start_spans_both_routes(client):

@@ -278,12 +278,15 @@ class InMemoryStore:
         # Each call's pre-env is the previous call's post-env, chaining from the
         # eval's initial environment; post-env is a deep copy so later mutations
         # don't retroactively change the recorded snapshot. An unfinished
-        # previous call has no post-env yet, so chain from its pre-env.
-        if evaluation.function_calls:
-            previous = evaluation.function_calls[-1]
-            pre_env = previous.post_environment if previous.post_environment is not None else previous.pre_environment
-        else:
+        # previous call has no post-env, and changes made since its start may be
+        # its own, so the pre-env is the live environment: this call's record
+        # then shows only what changed while it was being recorded.
+        if not evaluation.function_calls:
             pre_env = evaluation.pre_environment
+        elif (previous_post := evaluation.function_calls[-1].post_environment) is not None:
+            pre_env = previous_post
+        else:
+            pre_env = evaluation.environment.model_copy(deep=True)
         record = FunctionCallRecord(
             **req.model_dump(exclude={"call_id"}),
             call_id=req.call_id or str(uuid.uuid4()),
