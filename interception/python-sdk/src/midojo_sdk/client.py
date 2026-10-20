@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import uuid
 from typing import Any
 
@@ -25,13 +26,22 @@ class CallIds:
     so it can't collide with another SDK instance's records in the same
     evaluation. A missing harness ID, one this instance has already used, or one
     too long for the control plane gets a fresh UUID instead.
+
+    The instance UUID is chosen on first use in each process, so workers forked
+    from a process that built the instance don't share it.
     """
 
     def __init__(self, prefix: str) -> None:
-        self._namespace = f"{prefix}:{uuid.uuid4()}"
+        self._prefix = prefix
+        self._pid: int | None = None
+        self._namespace = ""
         self._used: set[str] = set()
 
     def for_call(self, harness_id: str | None) -> str:
+        if self._pid != os.getpid():
+            self._pid = os.getpid()
+            self._namespace = f"{self._prefix}:{uuid.uuid4()}"
+            self._used.clear()
         if harness_id:
             call_id = f"{self._namespace}:{harness_id}"
             if len(call_id) <= CALL_ID_MAX_LENGTH and call_id not in self._used:

@@ -234,6 +234,8 @@ async def get_function_call(
     response_model=FunctionCallResponse,
     status_code=status.HTTP_201_CREATED,
     responses=RECORD_FUNCTION_CALL_RESPONSES,
+    # The ID FastAPI generated before this handler was renamed: keep it stable for API clients.
+    operation_id="record_function_call_runs__run_id__evaluations__eval_id__function_calls_post",
 )
 async def record_run_function_call(
     eval_id: str,

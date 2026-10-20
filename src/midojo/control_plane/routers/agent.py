@@ -55,6 +55,8 @@ async def put_environment(
     response_model=FunctionCallResponse,
     status_code=201,
     responses=RECORD_FUNCTION_CALL_RESPONSES,
+    # The ID FastAPI generated before this handler was renamed: keep it stable for API clients.
+    operation_id="record_function_call_agent_function_calls_post",
 )
 async def record_agent_function_call(
     req: CreateFunctionCallRecord,

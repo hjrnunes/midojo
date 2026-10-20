@@ -302,6 +302,71 @@ def test_record_function_call_conflicting_body_is_409(client, route):
     assert stored.result == "72°F"
 
 
+_BASE_BODY = {"call_id": "call-1", "function": "get_weather", "result": "72°F"}
+
+
+@pytest.mark.parametrize("route", _RECORD_ROUTES)
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        ({"flag": True}, {"flag": 1}),
+        ({"flag": False}, {"flag": 0}),
+        ({"opts": {"units": [True]}}, {"opts": {"units": [1]}}),
+        ({"count": 1}, {"count": 1.0}),  # int and float are different bodies too
+    ],
+)
+def test_record_function_call_args_compare_type_for_type(client, route, first, second):
+    run_id = _create_run(client)
+    eval_id = _create_evaluation(client, run_id)["id"]
+    url = _record_url(route, run_id, eval_id)
+    assert client.post(url, json={**_BASE_BODY, "args": first}).status_code == 201
+
+    assert client.post(url, json={**_BASE_BODY, "args": second}).status_code == 409
+    assert len(_evaluation(client, run_id, eval_id).function_calls) == 1
+
+
+@pytest.mark.parametrize("route", _RECORD_ROUTES)
+def test_record_function_call_result_is_compared_as_sent(client, route):
+    run_id = _create_run(client)
+    eval_id = _create_evaluation(client, run_id)["id"]
+    url = _record_url(route, run_id, eval_id)
+    assert client.post(url, json={**_BASE_BODY, "args": {}, "result": "true"}).status_code == 201
+
+    # result is a string: "1" is a different body, and a JSON true or 1 isn't a valid one.
+    assert client.post(url, json={**_BASE_BODY, "args": {}, "result": "1"}).status_code == 409
+    assert client.post(url, json={**_BASE_BODY, "args": {}, "result": True}).status_code == 422
+    assert client.post(url, json={**_BASE_BODY, "args": {}, "result": 1}).status_code == 422
+    assert len(_evaluation(client, run_id, eval_id).function_calls) == 1
+
+
+@pytest.mark.parametrize("route", _RECORD_ROUTES)
+def test_record_function_call_replay_ignores_args_key_order(client, route):
+    run_id = _create_run(client)
+    eval_id = _create_evaluation(client, run_id)["id"]
+    url = _record_url(route, run_id, eval_id)
+    assert (
+        client.post(url, json={**_BASE_BODY, "args": {"city": "Boston", "opts": {"a": 1, "b": 2}}}).status_code == 201
+    )
+
+    replay = client.post(url, json={**_BASE_BODY, "args": {"opts": {"b": 2, "a": 1}, "city": "Boston"}})
+
+    assert replay.status_code == 200
+    assert len(_evaluation(client, run_id, eval_id).function_calls) == 1
+
+
+@pytest.mark.parametrize("route", _RECORD_ROUTES)
+def test_record_function_call_replay_fills_in_defaults(client, route):
+    run_id = _create_run(client)
+    eval_id = _create_evaluation(client, run_id)["id"]
+    url = _record_url(route, run_id, eval_id)
+    assert client.post(url, json={**_BASE_BODY, "args": {}}).status_code == 201
+
+    replay = client.post(url, json={**_BASE_BODY, "args": {}, "error": None, "blocked": False})
+
+    assert replay.status_code == 200
+    assert len(_evaluation(client, run_id, eval_id).function_calls) == 1
+
+
 def test_record_function_call_replay_spans_both_routes(client):
     """The two routes record into one evaluation, so they share its call_ids."""
     run_id = _create_run(client)
@@ -327,6 +392,15 @@ def test_record_function_call_documents_status_codes(client):
     paths = client.get("/openapi.json").json()["paths"]
     for path in ["/agent/function-calls", "/runs/{run_id}/evaluations/{eval_id}/function-calls"]:
         assert {"200", "201", "409"} <= set(paths[path]["post"]["responses"]), path
+
+
+def test_record_function_call_keeps_its_operation_ids(client):
+    paths = client.get("/openapi.json").json()["paths"]
+    assert paths["/agent/function-calls"]["post"]["operationId"] == "record_function_call_agent_function_calls_post"
+    assert (
+        paths["/runs/{run_id}/evaluations/{eval_id}/function-calls"]["post"]["operationId"]
+        == "record_function_call_runs__run_id__evaluations__eval_id__function_calls_post"
+    )
 
 
 def test_create_evaluation_substitutes_prompt_probe_placeholder(client):

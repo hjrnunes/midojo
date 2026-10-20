@@ -97,3 +97,15 @@ def test_call_ids_fall_back_when_a_harness_id_repeats():
     again = call_ids.for_call("call-0")
     assert again != first
     assert ":" not in again
+
+
+def test_call_ids_pick_a_new_namespace_in_a_forked_process(monkeypatch):
+    call_ids = CallIds("langchain")
+    parent = call_ids.for_call("call-1")
+
+    monkeypatch.setattr(sdk_client.os, "getpid", lambda: -1)  # as in a worker forked after the instance was built
+    child = call_ids.for_call("call-1")
+
+    assert child.endswith(":call-1")  # the used-ID set starts empty again, so it isn't a UUID fallback
+    assert child.rsplit(":", 1)[0] != parent.rsplit(":", 1)[0]
+    assert call_ids.for_call("call-1") != child  # and the new namespace's IDs are tracked
