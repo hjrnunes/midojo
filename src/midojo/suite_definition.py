@@ -73,8 +73,12 @@ class UserTaskDefinition(_DefinitionModel):
 
     @model_validator(mode="after")
     def exactly_one_prompt_or_turns(self) -> Self:
-        if (self.prompt is None) == (self.turns is None):
+        # Check the keys given, not their values, so an explicit null counts as given.
+        given = sorted({"prompt", "turns"} & self.model_fields_set)
+        if len(given) != 1:
             raise ValueError("exactly one of 'prompt' or 'turns' is required")
+        if getattr(self, given[0]) is None:
+            raise ValueError(f"'{given[0]}' must not be null")
         return self
 
     @property

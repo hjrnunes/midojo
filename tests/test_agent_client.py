@@ -175,9 +175,19 @@ class TestOpenAIResponsesAgentClient:
                 n = len(calls)
                 return MagicMock(id=f"resp_{n}", output_text=f"reply {n}")
 
+        clients: list[FakeAsyncOpenAI] = []
+
         class FakeAsyncOpenAI:
             def __init__(self, **kwargs):
                 self.responses = FakeResponses()
+                self.closed = False
+                clients.append(self)
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                self.closed = True
 
         client = OpenAIResponsesAgentClient(
             base_url="http://localhost:8321/v1",
@@ -191,7 +201,12 @@ class TestOpenAIResponsesAgentClient:
         with patch.dict(sys.modules, {"openai": MagicMock(AsyncOpenAI=FakeAsyncOpenAI)}):
             conversation = client.start_conversation(session_token="session-a")
             replies = [await conversation.send(message) for message in ["first", "second", "third"]]
+            # One client serves every turn and stays open until the conversation closes.
+            assert len(clients) == 1
+            assert not clients[0].closed
+            await conversation.aclose()
 
+        assert clients[0].closed
         assert replies == ["reply 1", "reply 2", "reply 3"]
         assert [call["input"] for call in calls] == ["first", "second", "third"]
         assert "previous_response_id" not in calls[0]
@@ -209,7 +224,9 @@ class TestOpenAIResponsesAgentClient:
 
         create = AsyncMock(return_value=MagicMock(id="resp_1", output_text="reply"))
         openai_module = MagicMock()
-        openai_module.AsyncOpenAI.return_value.responses.create = create
+        openai_instance = openai_module.AsyncOpenAI.return_value
+        openai_instance.__aenter__ = AsyncMock(return_value=openai_instance)
+        openai_instance.responses.create = create
         client = OpenAIResponsesAgentClient(
             base_url="http://localhost:8321/v1", model="m", mcp_server_url="http://localhost:8082/mcp", api_key="x"
         )
@@ -220,6 +237,9 @@ class TestOpenAIResponsesAgentClient:
         assert all("previous_response_id" not in call.kwargs for call in create.call_args_list)
         headers = [call.kwargs["tools"][0]["headers"]["X-Midojo-Session"] for call in create.call_args_list]
         assert headers == ["a", "b", "c"]
+        # One client per conversation; send_task closes its own.
+        assert openai_module.AsyncOpenAI.call_count == 3
+        assert openai_instance.__aexit__.await_count == 1
 
 
 class _OneShotAgent(AgentClient):
