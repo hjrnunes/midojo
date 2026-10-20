@@ -16,6 +16,7 @@ from midojo.runtimes import AgentRuntime, build_runtime
 from midojo.suite_definition import OpenShellRuntimeDefinition, ProbeDefinition, SuiteDefinition
 from midojo.types import Environment, FunctionCallRecord, SuiteName
 from midojo.verifier import Check, VerificationContext, parse_check
+from midojo.verifiers import ConversationTurn
 from midojo.verifiers.openshell import reads_openshell_observations
 
 # ``${env.VAR}`` references (OGX-style), expanded from the process environment in
@@ -134,6 +135,7 @@ class YAMLTaskSuite:
         post_environment: Environment,
         function_calls: list[FunctionCallRecord],
         observations: dict[str, BaseModel] | None = None,
+        turns: list[ConversationTurn] | None = None,
     ) -> dict[str, bool | str | None]:
         ctx = VerificationContext(
             agent_output=agent_output,
@@ -141,6 +143,7 @@ class YAMLTaskSuite:
             post_environment=post_environment,
             function_calls=function_calls,
             observations=observations or {},
+            turns=turns or [],
         )
 
         utility = self.user_tasks[user_task_id].check.evaluate(ctx)
