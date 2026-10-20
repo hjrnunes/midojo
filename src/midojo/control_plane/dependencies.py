@@ -3,18 +3,19 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Annotated
 
-from fastapi import Depends, HTTPException, Request
+from fastapi import Depends, HTTPException, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ValidationError
 
 from midojo.observations import observation_type
-from midojo.types import Environment, SuiteName
+from midojo.types import Environment, FunctionCallRecord, SuiteName
 from midojo.yaml_task_suite import YAMLTaskSuite
 
 from .config import AppConfig
+from .models import CreateFunctionCallRecord
 from .state import Evaluation, Run
-from .store import Store
+from .store import FunctionCallConflictError, Store
 
 
 async def get_store(request: Request) -> Store:
@@ -92,3 +93,33 @@ def validate_observations(source: str, data: dict) -> BaseModel:
     except ValidationError as exc:
         errors = [{**error, "loc": ("body", "data", *error["loc"])} for error in exc.errors()]
         raise RequestValidationError(errors) from exc
+
+
+RECORD_FUNCTION_CALL_RESPONSES: dict[int | str, dict] = {
+    status.HTTP_200_OK: {"description": "Replay: the call_id is already recorded with this body. Nothing is appended."},
+    status.HTTP_201_CREATED: {"description": "The call is recorded."},
+    status.HTTP_409_CONFLICT: {
+        "description": "The call_id is already recorded with a different body. Nothing is appended."
+    },
+}
+
+
+def record_function_call(
+    store: Store, run_id: str, eval_id: str, req: CreateFunctionCallRecord, response: Response
+) -> FunctionCallRecord | None:
+    """Record a function call idempotently by ``call_id``, for both record routes.
+
+    Returns the new record (201), or the stored one when ``req`` replays its
+    ``call_id`` with the same body (200); raises a 409 when the body differs.
+    Returns None if the evaluation is unknown.
+    """
+    try:
+        appended = store.append_function_call(run_id, eval_id, req)
+    except FunctionCallConflictError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    if appended is None:
+        return None
+    record, created = appended
+    if not created:
+        response.status_code = status.HTTP_200_OK
+    return record

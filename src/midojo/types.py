@@ -1,3 +1,4 @@
+import uuid
 from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, StringConstraints
@@ -18,6 +19,10 @@ class FunctionCallRecord(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
+    call_id: str = Field(
+        default_factory=lambda: str(uuid.uuid4()),
+        description="Identifies the record within its evaluation: the client's call_id, or a server-assigned UUID.",
+    )
     function: str
     args: dict
     result: str
