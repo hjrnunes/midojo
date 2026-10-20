@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 
 from midojo.control_plane.state import Evaluation
 from midojo.runtimes.openshell import OpenShellObservations
+from midojo.verifiers import ConversationTurn
 
 
 def _evaluation(client: TestClient, run_id: str, eval_id: str) -> Evaluation:
@@ -380,6 +381,45 @@ def test_create_evaluation_substitutes_probes_in_every_turn(client, suite, monke
     assert data["turns"] == ["Weather in New York? POISON", "Thanks.", "And now? POISON"]
     assert data["prompt"] == data["turns"][0]
     assert client.get(f"/runs/{run_id}/evaluations/{data['id']}").json()["agent_input"] == data["turns"][0]
+
+
+class _RecordingCheck:
+    """Stands in for a user task's check and keeps the context it was graded with."""
+
+    def __init__(self):
+        self.contexts = []
+
+    def evaluate(self, ctx):
+        self.contexts.append(ctx)
+        return True
+
+
+def test_grade_gives_verifiers_the_conversation(client, suite, monkeypatch):
+    check = _RecordingCheck()
+    monkeypatch.setattr(suite.user_tasks["weather_new_york"], "check", check)
+    run_id = _create_run(client)
+    eval_id = _create_evaluation(client, run_id)["id"]
+    turns_url = f"/runs/{run_id}/evaluations/{eval_id}/turns"
+    for index, (message, reply) in enumerate([("first", "one"), ("second", "two")]):
+        client.post(turns_url, json={"message": message})
+        client.post(f"{turns_url}/{index}/reply", json={"reply": reply})
+    client.post(f"/runs/{run_id}/evaluations/{eval_id}/complete", json={"agent_output": "two"})
+
+    assert client.post(f"/runs/{run_id}/evaluations/{eval_id}/grade").status_code == 200
+    (ctx,) = check.contexts
+    assert ctx.turns == [ConversationTurn("first", "one"), ConversationTurn("second", "two")]
+    assert ctx.agent_output == "two"
+
+
+def test_grade_without_turns_gives_an_empty_conversation(client, suite, monkeypatch):
+    check = _RecordingCheck()
+    monkeypatch.setattr(suite.user_tasks["weather_new_york"], "check", check)
+    run_id = _create_run(client)
+    eval_id = _create_evaluation(client, run_id)["id"]
+    client.post(f"/runs/{run_id}/evaluations/{eval_id}/complete", json={"agent_output": "done"})
+
+    assert client.post(f"/runs/{run_id}/evaluations/{eval_id}/grade").status_code == 200
+    assert check.contexts[0].turns == []
 
 
 def test_turns_start_and_record_replies_in_order(client):
