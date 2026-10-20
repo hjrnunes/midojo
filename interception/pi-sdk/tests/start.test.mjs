@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ControlPlaneError, RECORD_ATTEMPTS, createMidojoExtension } from "../src/index.ts";
+import { BLOCKED_REASON, ControlPlaneError, RECORD_ATTEMPTS, createMidojoExtension } from "../src/index.ts";
 
 const START = "/agent/function-calls/start";
 const FINISH = "/agent/function-calls";
@@ -148,19 +148,40 @@ test("a start that fails throws, so PI blocks the call, and the tool doesn't run
 	});
 });
 
-test("a call without a tool call ID isn't started, and is recorded once", async () => {
-	await withControlPlane({}, async (sent) => {
-		const { emit } = load({ reportTools: ["get_weather"] });
+for (const kind of ["hooks", "reportTools"]) {
+	test(`a ${kind} call without a tool call ID throws, so PI blocks it before the tool runs`, async () => {
+		await withControlPlane({}, async (sent) => {
+			const config =
+				kind === "hooks"
+					? { hooks: [{ toolName: "get_weather", execute: async (_args, real) => real }] }
+					: { reportTools: ["get_weather"] };
+			const { emit } = load(config);
 
-		await emit("tool_call", { toolName: "get_weather", input });
-		await emit("tool_result", { toolName: "get_weather", input, content });
+			await assert.rejects(emit("tool_call", { toolName: "get_weather", input }), /no tool call ID/);
 
-		assert.deepEqual(
-			sent.map(([path]) => path),
-			[FINISH],
-		);
+			assert.deepEqual(sent, []);
+		});
 	});
-});
+
+	test(`a ${kind} tool that is also blocked is recorded once, as blocked, without a start`, async () => {
+		await withControlPlane({}, async (sent) => {
+			const config =
+				kind === "hooks"
+					? { hooks: [{ toolName: "send_email", execute: async (_args, real) => real }] }
+					: { reportTools: ["send_email"] };
+			const { emit } = load({ ...config, blockTools: ["send_email"] });
+
+			const results = await emit("tool_call", { toolName: "send_email", toolCallId: "call-1", input });
+
+			assert.deepEqual(results.filter(Boolean), [{ block: true, reason: BLOCKED_REASON }]);
+			assert.equal(sent.length, 1);
+			const [[path, body]] = sent;
+			assert.equal(path, FINISH);
+			assert.equal(body.blocked, true);
+			assert.match(body.call_id, /^pi:[0-9a-f-]{36}:call-1$/);
+		});
+	});
+}
 
 test("other tools and blocked tools aren't started", async () => {
 	await withControlPlane({}, async (sent) => {

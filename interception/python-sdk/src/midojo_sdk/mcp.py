@@ -95,22 +95,17 @@ class MidojoMCP:
                 ctx = ToolContext(agent, self._upstream.call_tool if self._upstream else None)
                 call_id = str(uuid.uuid4())
                 await agent.start_function_call(function=fn.__name__, args=kwargs, call_id=call_id)
-                result: str = ""
-                error: str | None = None
+                # Finish the call when the tool returns or raises. A cancelled
+                # tool (or any other BaseException) gave the agent no result,
+                # so the call stays unfinished.
                 try:
                     result = await fn(ctx, **kwargs)
                 except Exception as e:
-                    error = str(e)
-                    result = error
-                    raise
-                finally:
                     await agent.record_function_call(
-                        function=fn.__name__,
-                        args=kwargs,
-                        result=result,
-                        error=error,
-                        call_id=call_id,
+                        function=fn.__name__, args=kwargs, result=str(e), error=str(e), call_id=call_id
                     )
+                    raise
+                await agent.record_function_call(function=fn.__name__, args=kwargs, result=result, call_id=call_id)
                 return result
 
             setattr(wrapper, "__signature__", user_sig)

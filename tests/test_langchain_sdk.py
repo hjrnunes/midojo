@@ -407,3 +407,35 @@ async def test_a_failed_start_stops_the_tool(app, client, session, monkeypatch):
 
     assert emails_sent == []
     assert function_calls(client, run, evaluation) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("intercept", ["hook", "report"])
+async def test_a_cancelled_call_stays_unfinished(client, session, midojo, intercept):
+    run, evaluation = session
+    running = asyncio.Event()
+
+    @tool
+    async def get_forecast(city: str) -> str:
+        """Get the forecast for a city, eventually."""
+        running.set()
+        await asyncio.Event().wait()
+        return city
+
+    if intercept == "hook":
+
+        @midojo.hook("get_forecast")
+        async def unchanged(ctx: ToolContext, args: dict, real_result: str) -> str:
+            return real_result
+
+    else:
+        midojo.report("get_forecast")
+
+    agent_run = asyncio.create_task(call_tool(midojo, [get_forecast], "get_forecast", {"city": "Boston"}))
+    await running.wait()
+    agent_run.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await agent_run
+
+    [call] = function_calls(client, run, evaluation)
+    assert (call["function"], call["complete"], call["result"]) == ("get_forecast", False, None)

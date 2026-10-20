@@ -107,3 +107,30 @@ async def test_midojo_mcp_leaves_an_unfinished_call_when_the_finish_fails(client
         False,
         None,
     )
+
+
+@pytest.mark.asyncio
+async def test_midojo_mcp_leaves_a_cancelled_call_unfinished(client, monkeypatch, app):
+    run = client.post("/runs", json={"suite_name": "weather"}).json()
+    evaluation = client.post(f"/runs/{run['id']}/evaluations", json={"user_task_id": "weather_new_york"}).json()
+    monkeypatch.setenv("MIDOJO_SESSION_TOKEN", evaluation["session_token"])
+    running = asyncio.Event()
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app)) as http:
+        mcp = MidojoMCP("test", control_plane_url="http://control", http=http)
+
+        @mcp.tool()
+        async def my_tool(ctx: ToolContext, name: str) -> str:
+            """A test tool that never returns."""
+            running.set()
+            await asyncio.Event().wait()
+            return name
+
+        call = asyncio.create_task(mcp._fastmcp.call_tool("my_tool", {"name": "Ada"}))
+        await running.wait()
+        call.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await call
+
+    [recorded] = client.get(f"/runs/{run['id']}/evaluations/{evaluation['id']}/function-calls").json()
+    assert (recorded["function"], recorded["complete"], recorded["result"]) == ("my_tool", False, None)
