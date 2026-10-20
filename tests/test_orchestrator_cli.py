@@ -82,3 +82,24 @@ def test_openshell_suite_runs_on_the_gateway(benchmark):
     kwargs = benchmark.call_args.kwargs
     assert isinstance(kwargs["agent_client"], orchestrator.OpenShellAgentClient)
     assert (kwargs["agent_uri"], kwargs["protocol"]) == ("g", "openshell")
+
+
+@pytest.mark.parametrize(
+    "suite_name,task_id,args,via",
+    [
+        ("minibank", "account_balance", ["--agent-uri", "http://agent", "--protocol", "http"], "--protocol http"),
+        ("minibank", "account_balance", ["--agent-uri", "http://agent", "--protocol", "a2a"], "--protocol a2a"),
+        ("document_assistant", "summarize_q4_report", ["--gateway", "g"], "the openshell runtime"),
+    ],
+)
+def test_multiturn_task_exits_before_creating_a_run(monkeypatch, suite_name, task_id, args, via):
+    suite = orchestrator.get_suite(suite_name)
+    monkeypatch.setattr(suite.user_tasks[task_id], "turns", ["First message", "Follow-up"])
+    monkeypatch.setattr(orchestrator, "get_suite", lambda name: suite)
+    create_run = AsyncMock()
+    monkeypatch.setattr(orchestrator.ControlPlaneClient, "create_run", create_run)
+    result = CliRunner().invoke(orchestrator.main, ["--suite", suite_name, "-ut", task_id, *args])
+    assert result.exit_code == 2
+    assert f"User task '{task_id}' has 2 turns" in result.output
+    assert via in result.output
+    create_run.assert_not_called()

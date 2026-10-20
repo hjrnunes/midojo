@@ -64,9 +64,26 @@ class ProbeDefinition(_DefinitionModel):
 
 
 class UserTaskDefinition(_DefinitionModel):
+    """Exactly one of a single ``prompt`` or a conversation of ``turns``, sent one at a time."""
+
     id: str = Field(min_length=1)
-    prompt: str
+    prompt: str | None = None
+    turns: Annotated[list[Annotated[str, Field(min_length=1)]], Field(min_length=1)] | None = None
     utility: dict[str, Any]
+
+    @model_validator(mode="after")
+    def exactly_one_prompt_or_turns(self) -> Self:
+        if (self.prompt is None) == (self.turns is None):
+            raise ValueError("exactly one of 'prompt' or 'turns' is required")
+        return self
+
+    @property
+    def messages(self) -> list[str]:
+        """The user's messages in order: the prompt alone, or each turn."""
+        if self.turns is not None:
+            return list(self.turns)
+        assert self.prompt is not None  # exactly_one_prompt_or_turns guarantees one of them.
+        return [self.prompt]
 
 
 class InjectionTaskDefinition(_DefinitionModel):

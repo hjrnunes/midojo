@@ -26,6 +26,7 @@ async def get_user_task(task_id: str, suite: Annotated[YAMLTaskSuite, Depends(ge
         id=task_id,
         type="user",
         prompt=task.prompt,
+        turns=task.turns,
     )
 
 
