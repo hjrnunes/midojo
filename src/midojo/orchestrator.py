@@ -228,13 +228,16 @@ async def run_task(
                 )
             conversation = agent_client.start_conversation(session_token=session_token)
             turns: list[Exchange] = []
-            for idx, message in enumerate(messages):
-                running = "running the agent" if len(messages) == 1 else f"running turn {idx + 1}/{len(messages)}"
-                with console.status(f"[dim]{pair} · {running}…[/dim]", spinner="dots"):
-                    turn = await control.start_turn(run_id, eval_id, message)
-                    reply = await conversation.send(message)
-                    await control.record_turn_reply(run_id, eval_id, turn.index, reply)
-                turns.append(Exchange(message, reply))
+            try:
+                for idx, message in enumerate(messages):
+                    running = "running the agent" if len(messages) == 1 else f"running turn {idx + 1}/{len(messages)}"
+                    with console.status(f"[dim]{pair} · {running}…[/dim]", spinner="dots"):
+                        turn = await control.start_turn(run_id, eval_id, message)
+                        reply = await conversation.send(message)
+                        await control.record_turn_reply(run_id, eval_id, turn.index, reply)
+                    turns.append(Exchange(message, reply))
+            finally:
+                await conversation.aclose()
             with console.status(f"[dim]{pair} · collecting runtime observations…[/dim]", spinner="dots"):
                 observations = await asyncio.to_thread(runtime.observe)
             for source, observed in observations.items():

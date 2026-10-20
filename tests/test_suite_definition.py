@@ -154,6 +154,10 @@ def test_openshell_predicates_require_the_openshell_runtime(tmp_path, raw):
         ({"turns": []}, "at least 1 item"),
         ({"turns": ["Read the text", ""]}, "at least 1 character"),
         ({"turns": "Read the text"}, "valid list"),
+        ({"prompt": None, "turns": ["Read the text"]}, "exactly one of 'prompt' or 'turns'"),
+        ({"prompt": "Read the text", "turns": None}, "exactly one of 'prompt' or 'turns'"),
+        ({"prompt": None}, "'prompt' must not be null"),
+        ({"turns": None}, "'turns' must not be null"),
     ],
 )
 def test_user_task_needs_a_prompt_or_non_empty_turns(tmp_path, raw, fields, message):

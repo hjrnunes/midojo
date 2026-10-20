@@ -360,6 +360,7 @@ class ConversingAgent(AgentClient):
     def __init__(self):
         self.tokens = []
         self.messages = []
+        self.closed = 0
 
     def start_conversation(self, *, session_token):
         self.tokens.append(session_token)
@@ -384,6 +385,9 @@ class ReportingConversation(Conversation):
             )
             response.raise_for_status()
         return f"reply {len(self.agent.messages)}: New York is 72°F and sunny"
+
+    async def aclose(self):
+        self.agent.closed += 1
 
 
 def _only_evaluation(client):
@@ -412,6 +416,7 @@ async def test_benchmark_runs_each_turn_in_one_evaluation_and_session(
     )
     assert agent.messages == turns
     assert len(agent.tokens) == 1
+    assert agent.closed == 1
     evaluation = _only_evaluation(client)
     assert [(t["index"], t["message"], t["reply"]) for t in evaluation["turns"]] == [
         (0, turns[0], "reply 1: New York is 72°F and sunny"),
