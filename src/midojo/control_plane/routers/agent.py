@@ -6,12 +6,20 @@ Each callback's session token authorizes access to one evaluation.
 from collections.abc import Mapping
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 
 from midojo.types import SuiteName
 from midojo.yaml_task_suite import YAMLTaskSuite
 
-from ..dependencies import get_session_token, get_store, get_suites, resolve_suite, validate_environment
+from ..dependencies import (
+    RECORD_FUNCTION_CALL_RESPONSES,
+    get_session_token,
+    get_store,
+    get_suites,
+    record_function_call,
+    resolve_suite,
+    validate_environment,
+)
 from ..models import CreateFunctionCallRecord, FunctionCallResponse
 from ..store import Store
 
@@ -42,16 +50,27 @@ async def put_environment(
     return env.model_dump()
 
 
-@router.post("/function-calls", response_model=FunctionCallResponse, status_code=201)
-async def record_function_call(
+@router.post(
+    "/function-calls",
+    response_model=FunctionCallResponse,
+    status_code=201,
+    responses=RECORD_FUNCTION_CALL_RESPONSES,
+)
+async def record_agent_function_call(
     req: CreateFunctionCallRecord,
+    response: Response,
     session_token: Annotated[str, Depends(get_session_token)],
     store: Annotated[Store, Depends(get_store)],
 ) -> FunctionCallResponse:
+    """Record a call in the session's evaluation, at most once per ``call_id``.
+
+    201 when recorded; 200 with the stored record when ``call_id`` is already
+    recorded with the same body; 409 when it's recorded with another body.
+    """
     evaluation = store.session_evaluation(session_token)
-    updated = store.append_function_call(evaluation.run_id, evaluation.id, req)
-    assert updated is not None
-    return FunctionCallResponse.model_validate(updated.function_calls[-1])
+    record = record_function_call(store, evaluation.run_id, evaluation.id, req, response)
+    assert record is not None
+    return FunctionCallResponse.model_validate(record)
 
 
 @router.get("/function-calls", response_model=list[FunctionCallResponse])

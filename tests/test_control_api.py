@@ -1,3 +1,5 @@
+import uuid
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -241,6 +243,90 @@ def test_agent_function_calls_post_and_list(client):
     # Same records should be visible via the nested URL.
     nested = client.get(f"/runs/{run_id}/evaluations/{eval_id}/function-calls").json()
     assert len(nested) == 2
+
+
+# --- idempotent function-call records (call_id) ---
+
+_RECORD_ROUTES = ["agent", "runs"]
+
+
+def _record_url(route: str, run_id: str, eval_id: str) -> str:
+    return "/agent/function-calls" if route == "agent" else f"/runs/{run_id}/evaluations/{eval_id}/function-calls"
+
+
+@pytest.mark.parametrize("route", _RECORD_ROUTES)
+def test_record_function_call_assigns_call_id_when_omitted(client, route):
+    run_id = _create_run(client)
+    eval_id = _create_evaluation(client, run_id)["id"]
+    body = {"function": "get_weather", "args": {"city": "New York"}, "result": "72°F"}
+
+    first = client.post(_record_url(route, run_id, eval_id), json=body)
+    second = client.post(_record_url(route, run_id, eval_id), json=body)
+
+    assert (first.status_code, second.status_code) == (201, 201)
+    first_id, second_id = first.json()["call_id"], second.json()["call_id"]
+    assert str(uuid.UUID(first_id)) == first_id
+    assert first_id != second_id
+    listed = client.get(f"/runs/{run_id}/evaluations/{eval_id}/function-calls").json()
+    assert [c["call_id"] for c in listed] == [first_id, second_id]
+
+
+@pytest.mark.parametrize("route", _RECORD_ROUTES)
+def test_record_function_call_replay_returns_stored_record(client, route):
+    run_id = _create_run(client)
+    eval_id = _create_evaluation(client, run_id)["id"]
+    body = {"call_id": "pi:run-1:call-1", "function": "get_weather", "args": {"city": "New York"}, "result": "72°F"}
+
+    created = client.post(_record_url(route, run_id, eval_id), json=body)
+    replayed = client.post(_record_url(route, run_id, eval_id), json=body)
+
+    assert created.status_code == 201
+    assert replayed.status_code == 200
+    assert replayed.json() == created.json()
+    assert created.json()["call_id"] == "pi:run-1:call-1"
+    assert len(_evaluation(client, run_id, eval_id).function_calls) == 1
+
+
+@pytest.mark.parametrize("route", _RECORD_ROUTES)
+def test_record_function_call_conflicting_body_is_409(client, route):
+    run_id = _create_run(client)
+    eval_id = _create_evaluation(client, run_id)["id"]
+    body = {"call_id": "call-1", "function": "get_weather", "args": {"city": "New York"}, "result": "72°F"}
+    client.post(_record_url(route, run_id, eval_id), json=body)
+
+    resp = client.post(_record_url(route, run_id, eval_id), json={**body, "result": "65°F"})
+
+    assert resp.status_code == 409
+    assert "call-1" in resp.json()["detail"]
+    [stored] = _evaluation(client, run_id, eval_id).function_calls
+    assert stored.result == "72°F"
+
+
+def test_record_function_call_replay_spans_both_routes(client):
+    """The two routes record into one evaluation, so they share its call_ids."""
+    run_id = _create_run(client)
+    eval_id = _create_evaluation(client, run_id)["id"]
+    body = {"call_id": "call-1", "function": "get_weather", "args": {}, "result": "72°F"}
+
+    assert client.post("/agent/function-calls", json=body).status_code == 201
+    assert client.post(f"/runs/{run_id}/evaluations/{eval_id}/function-calls", json=body).status_code == 200
+    assert len(_evaluation(client, run_id, eval_id).function_calls) == 1
+
+
+@pytest.mark.parametrize("call_id", ["", "x" * 257])
+def test_record_function_call_rejects_call_id_length(client, call_id):
+    run_id = _create_run(client)
+    _create_evaluation(client, run_id)
+    body = {"call_id": call_id, "function": "get_weather", "args": {}, "result": "72°F"}
+
+    assert client.post("/agent/function-calls", json=body).status_code == 422
+    assert client.post("/agent/function-calls", json={**body, "call_id": "x" * 256}).status_code == 201
+
+
+def test_record_function_call_documents_status_codes(client):
+    paths = client.get("/openapi.json").json()["paths"]
+    for path in ["/agent/function-calls", "/runs/{run_id}/evaluations/{eval_id}/function-calls"]:
+        assert {"200", "201", "409"} <= set(paths[path]["post"]["responses"]), path
 
 
 def test_create_evaluation_substitutes_prompt_probe_placeholder(client):

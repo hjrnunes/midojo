@@ -17,7 +17,7 @@ from langchain_core.messages import ToolMessage
 from langgraph.errors import GraphBubbleUp
 from langgraph.types import Command
 
-from midojo_sdk.client import AgentControlPlaneClient
+from midojo_sdk.client import AgentControlPlaneClient, CallIds
 from midojo_sdk.context import ToolContext
 from midojo_sdk.session import session_token
 
@@ -28,7 +28,7 @@ BLOCKED_REASON = "Tool execution was blocked"
 
 Hook = Callable[[ToolContext, dict[str, Any], str], Awaitable[str]]
 Handler = Callable[[ToolCallRequest], Awaitable[ToolMessage | Command]]
-_Intercept = Callable[[AgentControlPlaneClient, ToolCallRequest, Handler], Awaitable[ToolMessage | Command]]
+_Intercept = Callable[[AgentControlPlaneClient, ToolCallRequest, Handler, str], Awaitable[ToolMessage | Command]]
 
 
 class MidojoMiddleware(AgentMiddleware):
@@ -57,6 +57,10 @@ class MidojoMiddleware(AgentMiddleware):
     plane, so one middleware works across event loops, such as one
     ``asyncio.run`` per evaluation. Pass ``http`` to use one client for every
     call instead.
+
+    Each intercepted call is recorded once, with a ``call_id`` made from the
+    tool call's ID (see ``midojo_sdk.client.CallIds``), so a record the SDK
+    resends after a lost response isn't recorded twice.
     """
 
     def __init__(self, *, control_plane_url: str, http: httpx.AsyncClient | None = None) -> None:
@@ -64,6 +68,7 @@ class MidojoMiddleware(AgentMiddleware):
         self._control_plane_url = control_plane_url
         self._http = http
         self._intercepts: dict[str, _Intercept] = {}
+        self._call_ids = CallIds("langchain")
 
     def hook(self, tool_name: str) -> Callable[[Hook], Hook]:
         """Rewrite what the tool named ``tool_name`` returns to the agent.
@@ -83,20 +88,24 @@ class MidojoMiddleware(AgentMiddleware):
 
         def decorator(fn: Hook) -> Hook:
             async def intercept(
-                agent: AgentControlPlaneClient, request: ToolCallRequest, handler: Handler
+                agent: AgentControlPlaneClient, request: ToolCallRequest, handler: Handler, call_id: str
             ) -> ToolMessage | Command:
                 args = request.tool_call["args"]
-                output = await _run(agent, request, handler)
+                output = await _run(agent, request, handler, call_id)
                 if not isinstance(output, ToolMessage):
-                    await agent.record_function_call(function=tool_name, args=args, result=str(output))
+                    await agent.record_function_call(function=tool_name, args=args, result=str(output), call_id=call_id)
                     raise TypeError(f"Cannot hook {tool_name}: it returned a {type(output).__name__}, not a message.")
                 try:
                     result = await fn(ToolContext(agent), args, output.text)
                 except Exception as e:
-                    await agent.record_function_call(function=tool_name, args=args, result=str(e), error=str(e))
+                    await agent.record_function_call(
+                        function=tool_name, args=args, result=str(e), error=str(e), call_id=call_id
+                    )
                     return _error(request, str(e))
                 error = output.text if output.status == "error" else None
-                await agent.record_function_call(function=tool_name, args=args, result=result, error=error)
+                await agent.record_function_call(
+                    function=tool_name, args=args, result=result, error=error, call_id=call_id
+                )
                 return output.model_copy(update={"content": result})
 
             self._add(tool_name, intercept)
@@ -113,12 +122,15 @@ class MidojoMiddleware(AgentMiddleware):
         email, while still recording that the agent attempted it.
         """
 
-        async def intercept(agent: AgentControlPlaneClient, request: ToolCallRequest, handler: Handler) -> ToolMessage:
+        async def intercept(
+            agent: AgentControlPlaneClient, request: ToolCallRequest, handler: Handler, call_id: str
+        ) -> ToolMessage:
             await agent.record_function_call(
                 function=request.tool_call["name"],
                 args=request.tool_call["args"],
                 result=BLOCKED_REASON,
                 blocked=True,
+                call_id=call_id,
             )
             return _error(request, BLOCKED_REASON)
 
@@ -135,13 +147,17 @@ class MidojoMiddleware(AgentMiddleware):
         """
 
         async def intercept(
-            agent: AgentControlPlaneClient, request: ToolCallRequest, handler: Handler
+            agent: AgentControlPlaneClient, request: ToolCallRequest, handler: Handler, call_id: str
         ) -> ToolMessage | Command:
-            output = await _run(agent, request, handler)
+            output = await _run(agent, request, handler, call_id)
             result = output.text if isinstance(output, ToolMessage) else str(output)
             error = result if isinstance(output, ToolMessage) and output.status == "error" else None
             await agent.record_function_call(
-                function=request.tool_call["name"], args=request.tool_call["args"], result=result, error=error
+                function=request.tool_call["name"],
+                args=request.tool_call["args"],
+                result=result,
+                error=error,
+                call_id=call_id,
             )
             return output
 
@@ -153,7 +169,7 @@ class MidojoMiddleware(AgentMiddleware):
         if intercept is None:
             return await handler(request)
         async with self._agent() as agent:
-            return await intercept(agent, request, handler)
+            return await intercept(agent, request, handler, self._call_ids.for_call(request.tool_call.get("id")))
 
     def _add(self, tool_name: str, intercept: _Intercept) -> None:
         if tool_name in self._intercepts:
@@ -171,7 +187,9 @@ class MidojoMiddleware(AgentMiddleware):
             yield AgentControlPlaneClient(self._control_plane_url, token, http=http)
 
 
-async def _run(agent: AgentControlPlaneClient, request: ToolCallRequest, handler: Handler) -> ToolMessage | Command:
+async def _run(
+    agent: AgentControlPlaneClient, request: ToolCallRequest, handler: Handler, call_id: str
+) -> ToolMessage | Command:
     """Run the real tool, recording the call if it raises."""
     try:
         return await handler(request)
@@ -179,7 +197,11 @@ async def _run(agent: AgentControlPlaneClient, request: ToolCallRequest, handler
         raise
     except Exception as e:
         await agent.record_function_call(
-            function=request.tool_call["name"], args=request.tool_call["args"], result=str(e), error=str(e)
+            function=request.tool_call["name"],
+            args=request.tool_call["args"],
+            result=str(e),
+            error=str(e),
+            call_id=call_id,
         )
         raise
 

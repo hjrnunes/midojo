@@ -19,12 +19,15 @@ test("blocked tools are recorded as blocked and stopped", async () => {
 			},
 		});
 		const input = { to: "bookings@travel-sync.example" };
-		assert.deepEqual(await handlers.tool_call({ toolName: "send_email", input }), {
+		assert.deepEqual(await handlers.tool_call({ toolName: "send_email", toolCallId: "call-1", input }), {
 			block: true,
 			reason: BLOCKED_REASON,
 		});
 		assert.equal(await handlers.tool_call({ toolName: "get_weather", input: {} }), undefined);
-		assert.deepEqual(recorded, [{ function: "send_email", args: input, result: BLOCKED_REASON, blocked: true }]);
+		const [{ call_id, ...entry }] = recorded;
+		assert.equal(recorded.length, 1);
+		assert.match(call_id, /^pi:[0-9a-f-]{36}:call-1$/);
+		assert.deepEqual(entry, { function: "send_email", args: input, result: BLOCKED_REASON, blocked: true });
 	} finally {
 		globalThis.fetch = originalFetch;
 		if (previousToken === undefined) delete process.env.MIDOJO_SESSION_TOKEN;

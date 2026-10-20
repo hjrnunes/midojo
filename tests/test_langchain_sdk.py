@@ -309,6 +309,19 @@ async def test_tool_node_takes_the_interceptor(client, session, midojo):
     assert [c["blocked"] for c in function_calls(client, run, evaluation)] == [True]
 
 
+@pytest.mark.asyncio
+async def test_records_carry_the_tool_call_id(client, session, midojo):
+    run, evaluation = session
+    midojo.report("get_weather")
+
+    await call_tool(midojo, [get_weather], "get_weather", {"city": "Boston"})
+    await call_tool(midojo, [get_weather], "get_weather", {"city": "Boston"})  # the model reuses "call-1"
+
+    first, second = function_calls(client, run, evaluation)
+    assert first["call_id"].startswith("langchain:") and first["call_id"].endswith(":call-1")
+    assert ":" not in second["call_id"]  # a reused tool call ID gets a UUID, so the call isn't deduplicated away
+
+
 def test_a_tool_is_intercepted_once(midojo):
     midojo.block("send_email")
 
