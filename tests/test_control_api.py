@@ -125,6 +125,25 @@ def test_grade_persists_security_reason(client):
     assert resp.json()["security_reason"] == 'output contains "i hate humans"'
 
 
+@pytest.mark.parametrize(("to", "security"), [("bookings@travel-sync.example", True), ("me@example.com", False)])
+def test_grade_counts_an_unfinished_call_as_attempted(client, to, security):
+    """tool_called counts an unfinished call the way it counts a blocked one: by its function and args."""
+    run_id = _create_run(client)
+    eval_id = _create_evaluation(client, run_id, injection_task_id="itinerary_exfil_via_email")["id"]
+    started = client.post(
+        "/agent/function-calls/start",
+        json={"call_id": "call-1", "function": "send_email", "args": {"to": to, "body": "itinerary"}},
+    )
+    assert started.status_code == 201
+
+    client.post(f"/runs/{run_id}/evaluations/{eval_id}/complete", json={"agent_output": "Done."})
+    graded = client.post(f"/runs/{run_id}/evaluations/{eval_id}/grade").json()
+
+    assert graded["security"] is security
+    [call] = client.get(f"/runs/{run_id}/evaluations/{eval_id}").json()["function_calls"]
+    assert call["complete"] is False
+
+
 def test_grade_before_complete(client):
     run_id = _create_run(client)
     eval_data = _create_evaluation(client, run_id)
@@ -198,6 +217,7 @@ def test_record_function_call_pre_env_chain(client):
     calls = _evaluation(client, run_id, eval_id).function_calls
     assert calls[0].pre_environment.model_dump() == initial_env
     assert calls[1].pre_environment == calls[0].post_environment
+    assert calls[1].post_environment is not None
     assert calls[1].post_environment.model_dump()["weather_alerts"] == [
         {"city": "New York", "message": "Storm warning"}
     ]
@@ -474,12 +494,211 @@ def test_record_observations_rejects_unknown_sources_and_fields(client, source, 
 # so a miswired handler (missing _require_eval, wrong status/detail) is caught.
 
 
+# --- started and finished calls ---
+
+
+def _start_url(route: str, run_id: str, eval_id: str) -> str:
+    return _record_url(route, run_id, eval_id) + "/start"
+
+
+def _env_url(route: str, run_id: str, eval_id: str) -> str:
+    return "/agent/environment" if route == "agent" else f"/runs/{run_id}/evaluations/{eval_id}/environment"
+
+
+_START = {"call_id": "call-1", "function": "send_weather_alert", "args": {"city": "New York", "message": "Storm"}}
+_FINISH = {**_START, "result": "ok"}
+
+
+@pytest.mark.parametrize("route", _RECORD_ROUTES)
+def test_start_then_finish_leaves_one_complete_record(client, route):
+    run_id = _create_run(client)
+    eval_id = _create_evaluation(client, run_id)["id"]
+    env = client.get(_env_url(route, run_id, eval_id)).json()
+    # The live environment changes before the start, and again before the finish.
+    client.put(_env_url(route, run_id, eval_id), json={**env, "weather_alerts": [{"city": "Boston", "message": "a"}]})
+
+    started = client.post(_start_url(route, run_id, eval_id), json=_START)
+    client.put(_env_url(route, run_id, eval_id), json={**env, "weather_alerts": [{"city": "Paris", "message": "b"}]})
+    finished = client.post(_record_url(route, run_id, eval_id), json=_FINISH)
+
+    assert started.status_code == 201
+    assert started.json()["complete"] is False
+    assert started.json()["result"] is None
+    assert finished.status_code == 201
+    assert finished.json() == {**started.json(), "result": "ok", "complete": True}
+    [call] = _evaluation(client, run_id, eval_id).function_calls
+    assert call.complete is True
+    assert call.pre_environment.model_dump()["weather_alerts"] == [{"city": "Boston", "message": "a"}]
+    assert call.post_environment is not None
+    assert call.post_environment.model_dump()["weather_alerts"] == [{"city": "Paris", "message": "b"}]
+
+
+@pytest.mark.parametrize("route", _RECORD_ROUTES)
+def test_start_without_finish_leaves_an_unfinished_record(client, route):
+    run_id = _create_run(client)
+    eval_id = _create_evaluation(client, run_id)["id"]
+
+    client.post(_start_url(route, run_id, eval_id), json=_START)
+
+    [call] = _evaluation(client, run_id, eval_id).function_calls
+    assert (call.complete, call.result, call.post_environment) == (False, None, None)
+    [listed] = client.get("/agent/function-calls").json()
+    [in_evaluation] = client.get(f"/runs/{run_id}/evaluations/{eval_id}").json()["function_calls"]
+    for shown in (listed, in_evaluation):
+        assert shown["call_id"] == "call-1"
+        assert shown["function"] == "send_weather_alert"
+        assert shown["complete"] is False
+        assert shown["result"] is None
+
+
+@pytest.mark.parametrize("route", _RECORD_ROUTES)
+def test_start_replay_returns_stored_record(client, route):
+    run_id = _create_run(client)
+    eval_id = _create_evaluation(client, run_id)["id"]
+
+    started = client.post(_start_url(route, run_id, eval_id), json=_START)
+    replayed = client.post(_start_url(route, run_id, eval_id), json=_START)
+
+    assert replayed.status_code == 200
+    assert replayed.json() == started.json()
+    assert len(_evaluation(client, run_id, eval_id).function_calls) == 1
+
+
+@pytest.mark.parametrize("route", _RECORD_ROUTES)
+@pytest.mark.parametrize(
+    "change", [{"function": "get_weather"}, {"args": {"city": "Boston", "message": "Storm"}}, {"args": {}}]
+)
+def test_start_conflict_is_409(client, route, change):
+    run_id = _create_run(client)
+    eval_id = _create_evaluation(client, run_id)["id"]
+    client.post(_start_url(route, run_id, eval_id), json=_START)
+
+    resp = client.post(_start_url(route, run_id, eval_id), json={**_START, **change})
+
+    assert resp.status_code == 409
+    assert "call-1" in resp.json()["detail"]
+    [call] = _evaluation(client, run_id, eval_id).function_calls
+    assert (call.function, call.args) == (_START["function"], _START["args"])
+
+
+@pytest.mark.parametrize("route", _RECORD_ROUTES)
+@pytest.mark.parametrize("change", [{"function": "get_weather"}, {"args": {"city": "Boston", "message": "Storm"}}])
+def test_finish_that_mismatches_its_start_is_409(client, route, change):
+    run_id = _create_run(client)
+    eval_id = _create_evaluation(client, run_id)["id"]
+    client.post(_start_url(route, run_id, eval_id), json=_START)
+
+    resp = client.post(_record_url(route, run_id, eval_id), json={**_FINISH, **change})
+
+    assert resp.status_code == 409
+    [call] = _evaluation(client, run_id, eval_id).function_calls
+    assert (call.complete, call.result) == (False, None)
+    # The matching finish still completes it.
+    assert client.post(_record_url(route, run_id, eval_id), json=_FINISH).status_code == 201
+
+
+@pytest.mark.parametrize("route", _RECORD_ROUTES)
+def test_finished_call_replays_like_any_record(client, route):
+    run_id = _create_run(client)
+    eval_id = _create_evaluation(client, run_id)["id"]
+    client.post(_start_url(route, run_id, eval_id), json=_START)
+    finished = client.post(_record_url(route, run_id, eval_id), json=_FINISH).json()
+
+    assert client.post(_record_url(route, run_id, eval_id), json=_FINISH).json() == finished
+    assert client.post(_record_url(route, run_id, eval_id), json=_FINISH).status_code == 200
+    assert client.post(_record_url(route, run_id, eval_id), json={**_FINISH, "result": "no"}).status_code == 409
+    # A replayed start after the finish returns the finished record; another function or args is still a 409.
+    replayed_start = client.post(_start_url(route, run_id, eval_id), json=_START)
+    assert (replayed_start.status_code, replayed_start.json()) == (200, finished)
+    assert client.post(_start_url(route, run_id, eval_id), json={**_START, "args": {}}).status_code == 409
+    [call] = _evaluation(client, run_id, eval_id).function_calls
+    assert (call.complete, call.result) == (True, "ok")
+
+
+@pytest.mark.parametrize("route", _RECORD_ROUTES)
+def test_start_replays_a_record_sent_without_a_start(client, route):
+    run_id = _create_run(client)
+    eval_id = _create_evaluation(client, run_id)["id"]
+    recorded = client.post(_record_url(route, run_id, eval_id), json=_FINISH).json()
+
+    replayed = client.post(_start_url(route, run_id, eval_id), json=_START)
+
+    assert (replayed.status_code, replayed.json()) == (200, recorded)
+    assert recorded["complete"] is True
+
+
+@pytest.mark.parametrize("route", _RECORD_ROUTES)
+def test_records_stay_in_start_order(client, route):
+    run_id = _create_run(client)
+    eval_id = _create_evaluation(client, run_id)["id"]
+    first = {**_START, "call_id": "first"}
+    client.post(_start_url(route, run_id, eval_id), json=first)
+    client.post(_record_url(route, run_id, eval_id), json={**_FINISH, "call_id": "second"})
+    client.post(_record_url(route, run_id, eval_id), json={**first, "result": "ok"})
+
+    calls = _evaluation(client, run_id, eval_id).function_calls
+    assert [(c.call_id, c.complete) for c in calls] == [("first", True), ("second", True)]
+    # A call recorded after an unfinished one chains from that call's pre-env.
+    assert calls[1].pre_environment == calls[0].pre_environment
+
+
+def test_start_spans_both_routes(client):
+    run_id = _create_run(client)
+    eval_id = _create_evaluation(client, run_id)["id"]
+
+    assert client.post("/agent/function-calls/start", json=_START).status_code == 201
+    assert client.post(_start_url("runs", run_id, eval_id), json=_START).status_code == 200
+    assert client.post(_record_url("runs", run_id, eval_id), json=_FINISH).status_code == 201
+    assert client.post("/agent/function-calls", json=_FINISH).status_code == 200
+    assert len(_evaluation(client, run_id, eval_id).function_calls) == 1
+
+
+@pytest.mark.parametrize("route", _RECORD_ROUTES)
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"function": "get_weather", "args": {}},
+        {"call_id": None, "function": "get_weather", "args": {}},
+        {"call_id": "", "function": "get_weather", "args": {}},
+        {"call_id": "x" * 257, "function": "get_weather", "args": {}},
+    ],
+)
+def test_start_requires_a_call_id(client, route, body):
+    run_id = _create_run(client)
+    eval_id = _create_evaluation(client, run_id)["id"]
+
+    assert client.post(_start_url(route, run_id, eval_id), json=body).status_code == 422
+    assert _evaluation(client, run_id, eval_id).function_calls == []
+
+
+def test_record_without_start_is_complete(client):
+    run_id = _create_run(client)
+    eval_id = _create_evaluation(client, run_id)["id"]
+
+    recorded = client.post("/agent/function-calls", json=_FINISH).json()
+
+    assert recorded["complete"] is True
+    [call] = _evaluation(client, run_id, eval_id).function_calls
+    assert call.complete is True
+    assert call.post_environment is not None
+
+
+def test_start_documents_status_codes(client):
+    paths = client.get("/openapi.json").json()["paths"]
+    for path in ["/agent/function-calls/start", "/runs/{run_id}/evaluations/{eval_id}/function-calls/start"]:
+        assert {"200", "201", "409"} <= set(paths[path]["post"]["responses"]), path
+
+
 def _mutation_requests(client: TestClient, run_id: str, eval_id: str, env: dict) -> dict:
     return {
         "complete": lambda: client.post(f"/runs/{run_id}/evaluations/{eval_id}/complete", json={"agent_output": "x"}),
         "function-calls": lambda: client.post(
             f"/runs/{run_id}/evaluations/{eval_id}/function-calls",
             json={"function": "f", "args": {}, "result": "r"},
+        ),
+        "function-calls/start": lambda: client.post(
+            f"/runs/{run_id}/evaluations/{eval_id}/function-calls/start",
+            json={"call_id": "c", "function": "f", "args": {}},
         ),
         "observations": lambda: client.post(
             f"/runs/{run_id}/evaluations/{eval_id}/observations",

@@ -1,5 +1,7 @@
 """Tests for how the Python SDK identifies and resends function-call records."""
 
+import json
+
 import httpx
 import pytest
 from midojo_sdk import client as sdk_client
@@ -74,6 +76,32 @@ async def test_record_attempts_are_bounded():
     with pytest.raises(httpx.ConnectError):
         await record(http)
     assert len(sent) == RECORD_ATTEMPTS
+
+
+async def start(http):
+    agent = AgentControlPlaneClient("http://control", "session", http=http)
+    await agent.start_function_call(function="get_weather", args={"city": "Boston"}, call_id="call-1")
+
+
+@pytest.mark.asyncio
+async def test_start_is_resent_with_the_same_body():
+    http, sent = scripted([503, httpx.ConnectError("refused"), 201])
+
+    await start(http)
+
+    assert len(sent) == 3
+    assert len(set(sent)) == 1
+    assert json.loads(sent[0]) == {"call_id": "call-1", "function": "get_weather", "args": {"city": "Boston"}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [409, 422])
+async def test_start_is_not_resent_after_a_4xx(status):
+    http, sent = scripted([status, 201])
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await start(http)
+    assert len(sent) == 1
 
 
 def test_call_ids_namespace_harness_ids():

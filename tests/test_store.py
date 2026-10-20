@@ -7,7 +7,7 @@ import uuid
 
 import pytest
 
-from midojo.control_plane.models import CreateFunctionCallRecord
+from midojo.control_plane.models import CreateFunctionCallRecord, CreateFunctionCallStart
 from midojo.control_plane.store import FunctionCallConflictError, InMemoryStore
 from midojo.types import Environment
 
@@ -193,6 +193,59 @@ def test_append_function_call_call_ids_are_per_evaluation(store):
     assert appended is not None
     assert appended[1] is True
     assert len(second.function_calls) == 1
+
+
+def test_start_function_call_snapshots_the_live_environment(store):
+    run = store.create_run("test")
+    env = _Env(counter=3)
+    ev = _make_eval(store, run.id, pre_environment=_Env(counter=0), environment=env)
+    started = store.start_function_call(run.id, ev.id, CreateFunctionCallStart(call_id="c1", function="a", args={}))
+    assert started is not None
+    record, created = started
+    env.counter = 4  # the start's snapshot is a deep copy
+    assert created is True
+    assert (record.complete, record.result, record.post_environment) == (False, None, None)
+    assert isinstance(record.pre_environment, _Env)
+    assert record.pre_environment.counter == 3
+    assert ev.function_calls == [record]
+
+
+def test_finish_completes_the_started_record_in_place(store):
+    run = store.create_run("test")
+    ev = _make_eval(store, run.id)
+    store.start_function_call(run.id, ev.id, CreateFunctionCallStart(call_id="c1", function="a", args={"x": 1}))
+    store.set_environment(run.id, ev.id, _Env(counter=5))
+    finish = CreateFunctionCallRecord(call_id="c1", function="a", args={"x": 1}, result="r", error="e", blocked=True)
+    finished = store.append_function_call(run.id, ev.id, finish)
+    assert finished is not None
+    record, created = finished
+    assert created is True
+    assert ev.function_calls == [record]
+    assert (record.complete, record.result, record.error, record.blocked) == (True, "r", "e", True)
+    assert isinstance(record.post_environment, _Env)
+    assert record.post_environment.counter == 5
+    assert store.append_function_call(run.id, ev.id, finish.model_copy()) == (record, False)
+
+
+@pytest.mark.parametrize("change", [{"function": "b"}, {"args": {"x": 2}}])
+def test_start_and_finish_conflicts_raise(store, change):
+    run = store.create_run("test")
+    ev = _make_eval(store, run.id)
+    start = CreateFunctionCallStart(call_id="c1", function="a", args={"x": 1})
+    store.start_function_call(run.id, ev.id, start)
+    with pytest.raises(FunctionCallConflictError, match="c1"):
+        store.start_function_call(run.id, ev.id, start.model_copy(update=change))
+    finish = CreateFunctionCallRecord(call_id="c1", function="a", args={"x": 1}, result="r")
+    with pytest.raises(FunctionCallConflictError, match="c1"):
+        store.append_function_call(run.id, ev.id, finish.model_copy(update=change))
+    [record] = ev.function_calls
+    assert record.complete is False
+
+
+def test_start_function_call_unknown_returns_none(store):
+    assert (
+        store.start_function_call("nope", "nope", CreateFunctionCallStart(call_id="c", function="a", args={})) is None
+    )
 
 
 # --- environment / observations / grade / complete ---

@@ -13,14 +13,16 @@ from midojo.yaml_task_suite import YAMLTaskSuite
 
 from ..dependencies import (
     RECORD_FUNCTION_CALL_RESPONSES,
+    START_FUNCTION_CALL_RESPONSES,
     get_session_token,
     get_store,
     get_suites,
     record_function_call,
     resolve_suite,
+    start_function_call,
     validate_environment,
 )
-from ..models import CreateFunctionCallRecord, FunctionCallResponse
+from ..models import CreateFunctionCallRecord, CreateFunctionCallStart, FunctionCallResponse
 from ..store import Store
 
 router = APIRouter(prefix="/agent")
@@ -66,11 +68,37 @@ async def record_agent_function_call(
 ) -> FunctionCallResponse:
     """Record a call in the session's evaluation, at most once per ``call_id``.
 
-    201 when recorded; 200 with the stored record when ``call_id`` is already
-    recorded with the same body; 409 when it's recorded with another body.
+    201 when recorded, or when it finishes a started ``call_id`` in place; 200
+    with the stored record when ``call_id`` is already finished with the same
+    body; 409 when it's finished with another body, or was started with
+    another function or args.
     """
     evaluation = store.session_evaluation(session_token)
     record = record_function_call(store, evaluation.run_id, evaluation.id, req, response)
+    assert record is not None
+    return FunctionCallResponse.model_validate(record)
+
+
+@router.post(
+    "/function-calls/start",
+    response_model=FunctionCallResponse,
+    status_code=201,
+    responses=START_FUNCTION_CALL_RESPONSES,
+)
+async def start_agent_function_call(
+    req: CreateFunctionCallStart,
+    response: Response,
+    session_token: Annotated[str, Depends(get_session_token)],
+    store: Annotated[Store, Depends(get_store)],
+) -> FunctionCallResponse:
+    """Start a call in the session's evaluation: an unfinished record that ``POST /function-calls`` finishes.
+
+    201 when started; 200 with the stored record when ``call_id`` is already
+    recorded, finished or not, with the same function and args; 409 when it's
+    recorded with another function or args.
+    """
+    evaluation = store.session_evaluation(session_token)
+    record = start_function_call(store, evaluation.run_id, evaluation.id, req, response)
     assert record is not None
     return FunctionCallResponse.model_validate(record)
 
