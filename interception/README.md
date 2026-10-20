@@ -1,6 +1,6 @@
 # Interception SDKs
 
-An interception layer sits between an agent and its tools during an evaluation. It decides what the agent's tool calls return, which is where MiDojo places injections, and it reports every call to the MiDojo control plane so verifiers can grade the run. Suite authors build one per agent with an SDK:
+An interception layer sits between an agent and its tools during an evaluation. It decides what the agent's tool calls return, which is where MiDojo places injections, and it attempts to record every call it intercepts on the MiDojo control plane so verifiers can grade the run. Suite authors build one per agent with an SDK:
 
 | SDK | Package | Intercepts |
 |---|---|---|
