@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CallIds, ControlPlaneClient, RECORD_ATTEMPTS, createMidojoExtension } from "../src/index.ts";
+import { CallIds, ControlPlaneClient, ControlPlaneError, RECORD_ATTEMPTS, createMidojoExtension } from "../src/index.ts";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -98,3 +98,35 @@ test("each tool kind records the tool call ID", async () => {
 		);
 	});
 });
+
+/** The `tool_call` handler of an extension that blocks `send_email`. */
+function blockingHandler() {
+	const handlers = {};
+	createMidojoExtension({ controlPlaneUrl: "http://control", blockTools: ["send_email"] })({
+		on: (event, callback) => {
+			handlers[event] = callback;
+		},
+	});
+	return (toolCallId) => handlers.tool_call({ toolName: "send_email", toolCallId, input: { to: "eve@example.com" } });
+}
+
+test("a blocked call's record is resent with the same call_id", async () => {
+	await withFetch([503, 201], async (sent) => {
+		assert.equal((await blockingHandler()("call-1")).block, true);
+		assert.equal(sent.length, 2);
+		assert.match(sent[0].call_id, /^pi:[0-9a-f-]{36}:call-1$/);
+		assert.deepEqual(sent[1], sent[0]);
+	});
+});
+
+for (const [name, responses, sends] of [
+	["after its resends run out", Array(RECORD_ATTEMPTS).fill(503), RECORD_ATTEMPTS],
+	["after a 4xx", [409, 201], 1],
+]) {
+	test(`a blocked call whose record fails ${name} still throws, so PI blocks it`, async () => {
+		await withFetch(responses, async (sent) => {
+			await assert.rejects(blockingHandler()("call-1"), ControlPlaneError);
+			assert.equal(sent.length, sends);
+		});
+	});
+}

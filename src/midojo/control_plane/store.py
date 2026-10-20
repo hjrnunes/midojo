@@ -28,6 +28,7 @@ contract with transactions.
 from __future__ import annotations
 
 import hashlib
+import json
 import secrets
 import time
 import uuid
@@ -96,6 +97,17 @@ class FunctionCallConflictError(ValueError):
 
 
 _BODY_FIELDS = set(FunctionCallBody.model_fields)
+
+
+def _canonical_body(call: FunctionCallBody | FunctionCallRecord) -> str:
+    """A call's body as canonical JSON, so a replay must match it type for type.
+
+    Plain ``==`` would let ``true`` match ``1``. JSON keeps them apart, and ``1``
+    and ``1.0`` too: they're different bodies. Object keys are sorted, so their
+    order doesn't matter, and an omitted field and its explicit default are the
+    same body because the model has filled in the default by now.
+    """
+    return json.dumps(call.model_dump(mode="json", include=_BODY_FIELDS), sort_keys=True, separators=(",", ":"))
 
 
 def _token_hash(token: str) -> str:
@@ -214,7 +226,7 @@ class InMemoryStore:
             for existing in evaluation.function_calls:
                 if existing.call_id != req.call_id:
                     continue
-                if existing.model_dump(include=_BODY_FIELDS) != req.model_dump(include=_BODY_FIELDS):
+                if _canonical_body(existing) != _canonical_body(req):
                     raise FunctionCallConflictError(f"call_id {req.call_id!r} is already recorded with another body")
                 return existing, False
         # Each call's pre-env is the previous call's post-env, chaining from the
