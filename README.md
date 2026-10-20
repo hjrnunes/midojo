@@ -231,6 +231,6 @@ user_tasks:
       output_contains: "meeting"
 ```
 
-Output checks read the last reply. The evaluation record lists each turn's message and reply, and each recorded tool call names the turn it happened in. Only `--protocol openai` supports more than one turn for now; with other protocols or the openshell runtime, `midojo-run` refuses a multi-turn task before the run starts.
+Output checks read the last reply, and a verifier can read the whole conversation in `VerificationContext.turns` (each message and its reply). The evaluation record lists each turn's message and reply, and each recorded tool call names the turn it happened in. Only `--protocol openai` supports more than one turn for now; with other protocols or the openshell runtime, `midojo-run` refuses a multi-turn task before the run starts.
 
 Licensed under [Apache 2.0](LICENSE).

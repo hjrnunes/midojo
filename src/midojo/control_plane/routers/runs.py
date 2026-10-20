@@ -6,6 +6,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 
 from midojo.types import FunctionCallRecord, SuiteName
+from midojo.verifiers import ConversationTurn
 from midojo.yaml_task_suite import YAMLTaskSuite
 
 from ..config import AppConfig
@@ -171,6 +172,7 @@ async def grade_evaluation(
         post_environment=evaluation.environment,
         function_calls=evaluation.function_calls,
         observations=evaluation.observations,
+        turns=[ConversationTurn(message=turn.message, reply=turn.reply) for turn in evaluation.turns],
     )
     graded = GradeResponse.model_validate(result)
     store.set_grade(
