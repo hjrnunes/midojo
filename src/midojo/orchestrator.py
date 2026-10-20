@@ -53,11 +53,17 @@ class TaskPair(NamedTuple):
     injection_task_id: str
 
 
+class Exchange(NamedTuple):
+    message: str
+    reply: str
+
+
 class TaskResult(NamedTuple):
     eval_id: str
     prompt: str
     agent_output: str
     grade: GradeResponse
+    turns: list[Exchange]
 
 
 def _utility(value: bool) -> Text:
@@ -141,12 +147,17 @@ def _print_results_table(
     console.print(f"\nResults saved to [cyan]{results_file}[/cyan]")
 
 
+def _turn_label(label: str, idx: int, count: int) -> str:
+    """Name a turn's message or reply; a single-turn task keeps the plain label."""
+    return f"turn {idx + 1} {label}" if count > 1 else label
+
+
 async def _injection_reached_agent(
     control: ControlPlaneClient, run_id: str, eval_id: str, injections: dict[str, str]
 ) -> list[str]:
     """Return channels through which an injection payload reached the agent.
 
-    Checks both the agent input (prompt) and function call results (tool output).
+    Checks every turn's user message and the function call results (tool output).
     """
     evaluation = await control.evaluation(run_id, eval_id)
     payloads = [v for v in injections.values() if v]
@@ -158,14 +169,31 @@ async def _injection_reached_agent(
 
     normalized_payloads = [_normalize(p) for p in payloads]
     hits: list[str] = []
-    agent_input = evaluation.agent_input or ""
-    if agent_input and any(p in _normalize(agent_input) for p in normalized_payloads):
-        hits.append("agent input")
+    messages = [turn.message for turn in evaluation.turns] or [evaluation.agent_input or ""]
+    for idx, message in enumerate(messages):
+        if message and any(p in _normalize(message) for p in normalized_payloads):
+            hits.append(_turn_label("agent input", idx, len(messages)))
     for call in evaluation.function_calls:
         result = _normalize(call.result)
         if any(p in result for p in normalized_payloads):
             hits.append(call.function)
     return hits
+
+
+def _check_turns_supported(
+    suite: YAMLTaskSuite, user_task_ids: list[str], agent_client: AgentClient, protocol: str
+) -> None:
+    """Refuse multi-turn user tasks the agent client can't hold a conversation for."""
+    if agent_client.supports_multiturn:
+        return
+    via = "the openshell runtime" if protocol == "openshell" else f"--protocol {protocol}"
+    for user_task_id in user_task_ids:
+        task = suite.user_tasks.get(user_task_id)
+        if task is not None and len(task.turns) > 1:
+            raise click.UsageError(
+                f"User task {user_task_id!r} has {len(task.turns)} turns, but {via} sends one message per "
+                "evaluation. Only --protocol openai supports more than one turn."
+            )
 
 
 async def run_task(
@@ -178,9 +206,13 @@ async def run_task(
     *,
     runtime: AgentRuntime,
 ) -> TaskResult:
-    """Run a single evaluation, with the runtime set up around the agent's execution."""
+    """Run a single evaluation, with the runtime set up around the agent's execution.
+
+    Each turn is started in the control plane, sent to the agent and its reply
+    recorded, all in one conversation on the evaluation's session.
+    """
     evaluation = await control.create_evaluation(run_id, user_task_id, injection_task_id, injections)
-    eval_id, prompt, session_token = evaluation.id, evaluation.prompt, evaluation.session_token
+    eval_id, messages, session_token = evaluation.id, evaluation.turns, evaluation.session_token
     pair = f"{user_task_id} x {injection_task_id}" if injection_task_id else user_task_id
 
     try:
@@ -194,8 +226,18 @@ async def run_task(
                     user_task_id=user_task_id,
                     injection_task_id=injection_task_id,
                 )
-            with console.status(f"[dim]{pair} · running the agent…[/dim]", spinner="dots"):
-                agent_output = await agent_client.send_task(prompt, session_token=session_token)
+            conversation = agent_client.start_conversation(session_token=session_token)
+            turns: list[Exchange] = []
+            try:
+                for idx, message in enumerate(messages):
+                    running = "running the agent" if len(messages) == 1 else f"running turn {idx + 1}/{len(messages)}"
+                    with console.status(f"[dim]{pair} · {running}…[/dim]", spinner="dots"):
+                        turn = await control.start_turn(run_id, eval_id, message)
+                        reply = await conversation.send(message)
+                        await control.record_turn_reply(run_id, eval_id, turn.index, reply)
+                    turns.append(Exchange(message, reply))
+            finally:
+                await conversation.aclose()
             with console.status(f"[dim]{pair} · collecting runtime observations…[/dim]", spinner="dots"):
                 observations = await asyncio.to_thread(runtime.observe)
             for source, observed in observations.items():
@@ -204,9 +246,10 @@ async def run_task(
             with console.status(f"[dim]{pair} · tearing down the {runtime.name} runtime…[/dim]", spinner="dots"):
                 await asyncio.to_thread(runtime.teardown)
 
+        agent_output = turns[-1].reply
         await control.complete_evaluation(run_id, eval_id, agent_output)
         grade = await control.grade_evaluation(run_id, eval_id)
-        return TaskResult(eval_id=eval_id, prompt=prompt, agent_output=agent_output, grade=grade)
+        return TaskResult(eval_id=eval_id, prompt=turns[0].message, agent_output=agent_output, grade=grade, turns=turns)
     except BaseException:
         with contextlib.suppress(httpx.HTTPError):
             await control.revoke_session(run_id, eval_id)
@@ -236,6 +279,7 @@ async def _run_benchmark(
         # -ut without -it: utility-only run
         injection_tasks_to_run = []
 
+    _check_turns_supported(suite, user_tasks_to_run, agent_client, protocol)
     run_id = (await control.create_run(suite_name)).id
     _print_banner(suite_name, agent_uri, protocol, user_tasks_to_run, injection_tasks_to_run)
     console.print(f"  [dim]run[/dim] [cyan underline]{run_id}[/cyan underline]\n")
@@ -270,8 +314,9 @@ async def _run_benchmark(
                 eval_url = f"{control_url}/runs/{run_id}/evaluations/{eval_id}"
                 label = f"[bold]{ut_id}[/bold] x [bold]{it_id}[/bold]" if it_id else f"[bold]{ut_id}[/bold]"
                 console.print(f"  [dim]\\[eval: [link={eval_url}][cyan]{eval_id}[/cyan][/link]][/dim] {label}")
-                _print_agent_text("agent input", result.prompt)
-                _print_agent_text("agent output", result.agent_output)
+                for idx, (message, reply) in enumerate(result.turns):
+                    _print_agent_text(_turn_label("agent input", idx, len(result.turns)), message)
+                    _print_agent_text(_turn_label("agent output", idx, len(result.turns)), reply)
                 console.print("    ", _utility(grade.utility))
                 if it_id:
                     hit_channels = await _injection_reached_agent(control, run_id, eval_id, injections)
