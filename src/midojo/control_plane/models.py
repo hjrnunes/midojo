@@ -9,8 +9,11 @@ from midojo.types import Environment, SuiteName
 # --- Run / Evaluation request/response models ---
 
 
-class CreateFunctionCallRecord(BaseModel):
-    """Request body for recording a function call (server fills in timestamp + env snapshots)."""
+CALL_ID_MAX_LENGTH = 256
+
+
+class FunctionCallBody(BaseModel):
+    """The fields a client records for a function call. A replayed ``call_id`` must repeat them exactly."""
 
     function: str
     args: dict
@@ -22,7 +25,22 @@ class CreateFunctionCallRecord(BaseModel):
     )
 
 
-class FunctionCallResponse(CreateFunctionCallRecord):
+class CreateFunctionCallRecord(FunctionCallBody):
+    """Request body for recording a function call (server fills in timestamp + env snapshots)."""
+
+    call_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=CALL_ID_MAX_LENGTH,
+        description=(
+            "Client-chosen ID for this record, unique within the evaluation. Resending a record with the same "
+            "call_id and body returns the stored record instead of appending a duplicate; the same call_id with "
+            "a different body is a 409. When omitted, the server assigns a UUID and the record isn't deduplicated."
+        ),
+    )
+
+
+class FunctionCallResponse(FunctionCallBody):
     """Public shape of a recorded function call.
 
     Excludes the internal pre/post environment snapshots that the domain
@@ -32,6 +50,7 @@ class FunctionCallResponse(CreateFunctionCallRecord):
 
     model_config = ConfigDict(from_attributes=True)
 
+    call_id: str = Field(description="The client's call_id, or a UUID the server assigned when the client sent none.")
     timestamp: str
 
 

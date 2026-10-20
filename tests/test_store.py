@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import re
+import uuid
 
 import pytest
 
 from midojo.control_plane.models import CreateFunctionCallRecord
-from midojo.control_plane.store import InMemoryStore
+from midojo.control_plane.store import FunctionCallConflictError, InMemoryStore
 from midojo.types import Environment
 
 
@@ -111,8 +112,9 @@ def test_append_function_call_first_call_chains_from_pre_environment(store):
     # pre_environment and the live environment differ so the assertion can tell
     # which one the first call's pre-env is taken from.
     ev = _make_eval(store, run.id, pre_environment=_Env(counter=7), environment=_Env(counter=9))
-    assert store.append_function_call(run.id, ev.id, _fc("a", "r0")) is ev  # returns the mutated eval
+    appended = store.append_function_call(run.id, ev.id, _fc("a", "r0"))
     rec = ev.function_calls[-1]
+    assert appended == (rec, True)  # returns the new record, and that it was created
     assert isinstance(rec.pre_environment, _Env)
     assert rec.pre_environment.counter == 7  # first call chains from pre_environment, not the live env
     assert isinstance(rec.post_environment, _Env)
@@ -144,6 +146,53 @@ def test_append_function_call_post_env_is_deep_copy(store):
     # The recorded snapshot is a deep copy, so it doesn't track later mutations.
     assert isinstance(rec.post_environment, _Env)
     assert rec.post_environment.counter == 0
+
+
+def test_append_function_call_without_call_id_assigns_a_uuid(store):
+    run = store.create_run("test")
+    ev = _make_eval(store, run.id)
+    store.append_function_call(run.id, ev.id, _fc("a", "r"))
+    store.append_function_call(run.id, ev.id, _fc("a", "r"))
+    first, second = ev.function_calls  # no call_id, no dedupe: identical bodies both append
+    assert str(uuid.UUID(first.call_id)) == first.call_id
+    assert first.call_id != second.call_id
+
+
+def test_append_function_call_replay_returns_stored_record(store):
+    run = store.create_run("test")
+    ev = _make_eval(store, run.id)
+    req = CreateFunctionCallRecord(call_id="c1", function="a", args={"x": 1}, result="r")
+    appended = store.append_function_call(run.id, ev.id, req)
+    assert appended is not None
+    record, created = appended
+    assert created is True
+    assert record.call_id == "c1"
+    assert store.append_function_call(run.id, ev.id, req.model_copy()) == (record, False)
+    assert ev.function_calls == [record]
+
+
+@pytest.mark.parametrize(
+    "change", [{"function": "b"}, {"args": {"x": 2}}, {"result": "other"}, {"error": "boom"}, {"blocked": True}]
+)
+def test_append_function_call_conflicting_body_raises(store, change):
+    run = store.create_run("test")
+    ev = _make_eval(store, run.id)
+    req = CreateFunctionCallRecord(call_id="c1", function="a", args={"x": 1}, result="r")
+    store.append_function_call(run.id, ev.id, req)
+    with pytest.raises(FunctionCallConflictError, match="c1"):
+        store.append_function_call(run.id, ev.id, req.model_copy(update=change))
+    assert len(ev.function_calls) == 1
+
+
+def test_append_function_call_call_ids_are_per_evaluation(store):
+    run = store.create_run("test")
+    first, second = _make_eval(store, run.id), _make_eval(store, run.id)
+    req = CreateFunctionCallRecord(call_id="c1", function="a", args={}, result="r")
+    store.append_function_call(run.id, first.id, req)
+    appended = store.append_function_call(run.id, second.id, req)
+    assert appended is not None
+    assert appended[1] is True
+    assert len(second.function_calls) == 1
 
 
 # --- environment / observations / grade / complete ---

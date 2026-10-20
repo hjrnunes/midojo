@@ -71,6 +71,10 @@ agent = create_agent(model, tools=[get_alerts, read_file, send_email], middlewar
 
 Calls to these tools are recorded on the control plane, and the agent's other tools run as usual. Run the agent with `ainvoke` or `astream`: the middleware is asynchronous. For a [LangGraph](https://docs.langchain.com/oss/python/langgraph/overview) graph with its own `ToolNode`, pass `ToolNode(tools, awrap_tool_call=midojo.awrap_tool_call)`. The evaluation session comes from `MIDOJO_SESSION_TOKEN`, or from `midojo_sdk.session.session_context()` for an agent that serves several evaluations.
 
+## Records
+
+Each record carries a `call_id`: the LangChain tool call's ID, namespaced as `langchain:<UUID>:<id>`, or a fresh UUID for a fake MCP server tool, a call without an ID, or an ID the middleware has already used. A record that fails with a transport error or a 5xx is resent with the same `call_id`, up to 3 sends in all, so the control plane records it at most once. A 4xx, including a 409, is raised without a resend. The [interception README](https://github.com/asago-ai/midojo/blob/main/interception/README.md#record-ids-and-retries) describes the guarantee.
+
 ## More
 
 The weather suite's [`fake_mcp.py`](https://github.com/asago-ai/midojo/blob/main/suites/weather/sandbox_pi/fake_mcp.py) is a complete example, and the [interception README](https://github.com/asago-ai/midojo/blob/main/interception/README.md) describes the control plane API the SDK calls.

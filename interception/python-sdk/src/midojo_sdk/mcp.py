@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import functools
 import inspect
+import uuid
 from typing import Any
 
 import httpx
@@ -55,6 +56,9 @@ class MidojoMCP:
 
     The ``ctx: ToolContext`` first parameter is injected by the SDK and
     stripped from the MCP tool schema exposed to agents.
+
+    Each call is recorded with a fresh UUID ``call_id``: an MCP request ID only
+    numbers the requests of one connection, so it isn't unique per evaluation.
     """
 
     def __init__(
@@ -99,6 +103,7 @@ class MidojoMCP:
                         args=kwargs,
                         result=result,
                         error=error,
+                        call_id=str(uuid.uuid4()),
                     )
                 return result
 
