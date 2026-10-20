@@ -151,8 +151,10 @@ export class ControlPlaneClient {
 	 * Record a call, at most once per `callId` (a UUID when not given). A lost
 	 * request or a 5xx is resent with the same `call_id`, up to
 	 * `RECORD_ATTEMPTS` sends in all, so resending a record that reached the
-	 * control plane doesn't record it twice. A 4xx, including a 409 for a
-	 * `call_id` recorded with another body, is thrown at once.
+	 * control plane doesn't record it twice. This is at most one record per
+	 * `call_id`, not exactly-once: a record whose sends all fail is missing.
+	 * A 4xx, including a 409 for a `call_id` recorded with another body, is
+	 * thrown at once.
 	 */
 	async recordFunctionCall(entry: {
 		function: string;

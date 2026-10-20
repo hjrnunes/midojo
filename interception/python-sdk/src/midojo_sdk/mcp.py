@@ -57,8 +57,10 @@ class MidojoMCP:
     The ``ctx: ToolContext`` first parameter is injected by the SDK and
     stripped from the MCP tool schema exposed to agents.
 
-    Each call is recorded with a fresh UUID ``call_id``: an MCP request ID only
-    numbers the requests of one connection, so it isn't unique per evaluation.
+    The SDK attempts to record each call, with a fresh UUID ``call_id``: an MCP
+    request ID only numbers the requests of one connection, so it isn't unique
+    per evaluation. Resends create at most one record per ``call_id``; a record
+    that never reaches the control plane is still missing.
     """
 
     def __init__(

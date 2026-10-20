@@ -1,6 +1,6 @@
 # midojo-sdk
 
-Build [MiDojo](https://github.com/asago-ai/midojo) interception layers in Python. An interception layer stands between an agent and its tools during an evaluation: it reads and updates the evaluation's environment on the MiDojo control plane, and records every call the agent makes.
+Build [MiDojo](https://github.com/asago-ai/midojo) interception layers in Python. An interception layer stands between an agent and its tools during an evaluation: it reads and updates the evaluation's environment on the MiDojo control plane, and attempts to record every call the agent makes.
 
 ```sh
 pip install "midojo-sdk[mcp]"        # fake MCP servers
@@ -37,7 +37,7 @@ if __name__ == "__main__":
 - `await ctx.env(field)` and `await ctx.env_update(field, value)` read and write a field of the evaluation's environment
 - `await ctx.forward(tool, args)` calls the tool on the upstream MCP server and returns its text
 
-The SDK records each call with its arguments and the result the agent saw. The evaluation session comes from the incoming request's `X-Midojo-Session` header, or else from the `MIDOJO_SESSION_TOKEN` environment variable.
+The SDK attempts to record each call with its arguments and the result the agent saw. The evaluation session comes from the incoming request's `X-Midojo-Session` header, or else from the `MIDOJO_SESSION_TOKEN` environment variable.
 
 ## LangChain agents
 

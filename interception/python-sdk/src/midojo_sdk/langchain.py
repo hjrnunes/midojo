@@ -58,9 +58,10 @@ class MidojoMiddleware(AgentMiddleware):
     ``asyncio.run`` per evaluation. Pass ``http`` to use one client for every
     call instead.
 
-    Each intercepted call is recorded once, with a ``call_id`` made from the
-    tool call's ID (see ``midojo_sdk.client.CallIds``), so a record the SDK
-    resends after a lost response isn't recorded twice.
+    The SDK attempts to record each intercepted call, with a ``call_id`` made
+    from the tool call's ID (see ``midojo_sdk.client.CallIds``). Resends after
+    a lost response create at most one record per ``call_id``; a record that
+    never reaches the control plane is still missing.
     """
 
     def __init__(self, *, control_plane_url: str, http: httpx.AsyncClient | None = None) -> None:
