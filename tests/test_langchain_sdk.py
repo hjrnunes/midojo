@@ -17,6 +17,7 @@ from langchain_core.tools import BaseTool, InjectedToolCallId, ToolException, to
 from langgraph.graph import MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
 from langgraph.types import Command
+from midojo_sdk import client as sdk_client
 from midojo_sdk.langchain import BLOCKED_REASON, MidojoMiddleware, ToolContext
 from midojo_sdk.session import MissingSessionError, session_context
 from pydantic import Field
@@ -200,6 +201,7 @@ async def test_blocked_tool_never_runs_and_is_recorded_as_blocked(client, sessio
     assert call["args"] == {"to": "eve@example.com", "body": "hi"}
     assert call["result"] == BLOCKED_REASON
     assert call["blocked"] is True
+    assert call["complete"] is True
 
 
 @pytest.mark.asyncio
@@ -327,3 +329,81 @@ def test_a_tool_is_intercepted_once(midojo):
 
     with pytest.raises(ValueError, match="send_email is already intercepted"):
         midojo.report("send_email")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("intercept", ["hook", "report"])
+async def test_a_call_is_started_before_the_tool_runs_and_finished_after(client, session, midojo, intercept):
+    run, evaluation = session
+    seen_while_running = []
+
+    @tool
+    def get_forecast(city: str) -> str:
+        """Get the forecast for a city."""
+        seen_while_running.extend(function_calls(client, run, evaluation))
+        return f"{city}: rain"
+
+    if intercept == "hook":
+
+        @midojo.hook("get_forecast")
+        async def unchanged(ctx: ToolContext, args: dict, real_result: str) -> str:
+            return real_result
+
+    else:
+        midojo.report("get_forecast")
+
+    await call_tool(midojo, [get_forecast], "get_forecast", {"city": "Boston"})
+
+    [started] = seen_while_running
+    [finished] = function_calls(client, run, evaluation)
+    assert (started["complete"], started["result"]) == (False, None)
+    assert (finished["complete"], finished["result"]) == (True, "Boston: rain")
+    assert finished["call_id"] == started["call_id"]
+    assert finished["call_id"].endswith(":call-1")
+
+
+def failing_control_http(app, failing_path: str) -> httpx.AsyncClient:
+    """An httpx client for the control plane whose POSTs to ``failing_path`` never arrive."""
+    control = httpx.ASGITransport(app)
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == failing_path:
+            raise httpx.ConnectError("control plane unreachable")
+        return await control.handle_async_request(request)
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handle))
+
+
+@pytest.mark.asyncio
+async def test_a_failed_finish_leaves_an_unfinished_call(app, client, session, monkeypatch):
+    run, evaluation = session
+    monkeypatch.setattr(sdk_client, "RECORD_BACKOFF_SECONDS", 0)
+    emails_sent.clear()
+    async with failing_control_http(app, "/agent/function-calls") as http:
+        midojo = MidojoMiddleware(control_plane_url="http://control", http=http)
+        midojo.report("send_email")
+
+        with pytest.raises(httpx.ConnectError):
+            await call_tool(midojo, [send_email], "send_email", {"to": "eve@example.com", "body": "hi"})
+
+    assert emails_sent == ["eve@example.com"]
+    [call] = function_calls(client, run, evaluation)
+    assert call["function"] == "send_email"
+    assert call["args"] == {"to": "eve@example.com", "body": "hi"}
+    assert (call["complete"], call["result"]) == (False, None)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_start_stops_the_tool(app, client, session, monkeypatch):
+    run, evaluation = session
+    monkeypatch.setattr(sdk_client, "RECORD_BACKOFF_SECONDS", 0)
+    emails_sent.clear()
+    async with failing_control_http(app, "/agent/function-calls/start") as http:
+        midojo = MidojoMiddleware(control_plane_url="http://control", http=http)
+        midojo.report("send_email")
+
+        with pytest.raises(httpx.ConnectError):
+            await call_tool(midojo, [send_email], "send_email", {"to": "eve@example.com", "body": "hi"})
+
+    assert emails_sent == []
+    assert function_calls(client, run, evaluation) == []

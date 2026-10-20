@@ -11,6 +11,7 @@ from midojo.yaml_task_suite import YAMLTaskSuite
 from ..config import AppConfig
 from ..dependencies import (
     RECORD_FUNCTION_CALL_RESPONSES,
+    START_FUNCTION_CALL_RESPONSES,
     get_config,
     get_evaluation_by_id,
     get_run,
@@ -19,6 +20,7 @@ from ..dependencies import (
     get_suites,
     record_function_call,
     resolve_suite,
+    start_function_call,
     validate_environment,
     validate_observations,
 )
@@ -27,6 +29,7 @@ from ..models import (
     CreateEvaluationRequest,
     CreateEvaluationResponse,
     CreateFunctionCallRecord,
+    CreateFunctionCallStart,
     CreateRunRequest,
     CreateRunResponse,
     EvaluationResponse,
@@ -246,10 +249,37 @@ async def record_run_function_call(
 ) -> FunctionCallRecord:
     """Record a call in the evaluation, at most once per ``call_id``.
 
-    201 when recorded; 200 with the stored record when ``call_id`` is already
-    recorded with the same body; 409 when it's recorded with another body.
+    201 when recorded, or when it finishes a started ``call_id`` in place; 200
+    with the stored record when ``call_id`` is already finished with the same
+    body; 409 when it's finished with another body, or was started with
+    another function or args.
     """
     record = record_function_call(store, run.id, eval_id, req, response)
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown evaluation: {eval_id}")
+    return record
+
+
+@router.post(
+    "/{run_id}/evaluations/{eval_id}/function-calls/start",
+    response_model=FunctionCallResponse,
+    status_code=status.HTTP_201_CREATED,
+    responses=START_FUNCTION_CALL_RESPONSES,
+)
+async def start_run_function_call(
+    eval_id: str,
+    req: CreateFunctionCallStart,
+    response: Response,
+    run: Annotated[Run, Depends(get_run)],
+    store: Annotated[Store, Depends(get_store)],
+) -> FunctionCallRecord:
+    """Start a call in the evaluation: an unfinished record that ``POST .../function-calls`` finishes.
+
+    201 when started; 200 with the stored record when ``call_id`` is already
+    recorded, finished or not, with the same function and args; 409 when it's
+    recorded with another function or args.
+    """
+    record = start_function_call(store, run.id, eval_id, req, response)
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown evaluation: {eval_id}")
     return record

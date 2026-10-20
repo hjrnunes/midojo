@@ -162,6 +162,8 @@ async def _injection_reached_agent(
     if agent_input and any(p in _normalize(agent_input) for p in normalized_payloads):
         hits.append("agent input")
     for call in evaluation.function_calls:
+        if call.result is None:  # an unfinished call: the agent saw no result
+            continue
         result = _normalize(call.result)
         if any(p in result for p in normalized_payloads):
             hits.append(call.function)

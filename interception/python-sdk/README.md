@@ -75,6 +75,8 @@ Calls to these tools are recorded on the control plane, and the agent's other to
 
 Each record carries a `call_id`: the LangChain tool call's ID, namespaced as `langchain:<UUID>:<id>`, or a fresh UUID for a fake MCP server tool, a call without an ID, or an ID the middleware has already used. A record that fails with a transport error or a 5xx is resent with the same `call_id`, up to 3 sends in all, so the control plane records it at most once. A 4xx, including a 409, is raised without a resend. The [interception README](https://github.com/asago-ai/midojo/blob/main/interception/README.md#record-ids-and-retries) describes the guarantee.
 
+A call that runs a tool (a fake MCP server tool, or a hooked or reported LangChain tool) is started on the control plane before the tool runs and finished after, with the same `call_id`. When the start fails, the tool doesn't run; when the finish fails, the call stays recorded as unfinished. A blocked call never runs, so it's recorded once. See [Started and unfinished calls](https://github.com/asago-ai/midojo/blob/main/interception/README.md#started-and-unfinished-calls).
+
 ## More
 
 The weather suite's [`fake_mcp.py`](https://github.com/asago-ai/midojo/blob/main/suites/weather/sandbox_pi/fake_mcp.py) is a complete example, and the [interception README](https://github.com/asago-ai/midojo/blob/main/interception/README.md) describes the control plane API the SDK calls.

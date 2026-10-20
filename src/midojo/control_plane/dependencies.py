@@ -13,7 +13,7 @@ from midojo.types import Environment, FunctionCallRecord, SuiteName
 from midojo.yaml_task_suite import YAMLTaskSuite
 
 from .config import AppConfig
-from .models import CreateFunctionCallRecord
+from .models import CreateFunctionCallRecord, CreateFunctionCallStart
 from .state import Evaluation, Run
 from .store import FunctionCallConflictError, Store
 
@@ -96,10 +96,30 @@ def validate_observations(source: str, data: dict) -> BaseModel:
 
 
 RECORD_FUNCTION_CALL_RESPONSES: dict[int | str, dict] = {
-    status.HTTP_200_OK: {"description": "Replay: the call_id is already recorded with this body. Nothing is appended."},
-    status.HTTP_201_CREATED: {"description": "The call is recorded."},
+    status.HTTP_200_OK: {
+        "description": "Replay: the call_id is already finished with this body. Nothing is appended or changed."
+    },
+    status.HTTP_201_CREATED: {
+        "description": "The call is recorded: appended, or, when the call_id was started, its record finished."
+    },
     status.HTTP_409_CONFLICT: {
-        "description": "The call_id is already recorded with a different body. Nothing is appended."
+        "description": (
+            "The call_id is already finished with a different body, or was started with another function or "
+            "args. Nothing is appended or changed."
+        )
+    },
+}
+
+START_FUNCTION_CALL_RESPONSES: dict[int | str, dict] = {
+    status.HTTP_200_OK: {
+        "description": (
+            "Replay: the call_id is already recorded, finished or not, with this function and args. "
+            "Nothing is appended."
+        )
+    },
+    status.HTTP_201_CREATED: {"description": "The call is started: an unfinished record is appended."},
+    status.HTTP_409_CONFLICT: {
+        "description": "The call_id is already recorded with another function or args. Nothing is appended."
     },
 }
 
@@ -111,15 +131,40 @@ def record_function_call(
 
     Returns the new record (201), or the stored one when ``req`` replays its
     ``call_id`` with the same body (200); raises a 409 when the body differs.
-    Returns None if the evaluation is unknown.
+    When ``call_id`` was started and not finished, finishes that record in
+    place (201), or raises a 409 when the function or args differ from the
+    start. Returns None if the evaluation is unknown.
     """
     try:
         appended = store.append_function_call(run_id, eval_id, req)
     except FunctionCallConflictError as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
-    if appended is None:
+    return _created_or_replayed(appended, response)
+
+
+def start_function_call(
+    store: Store, run_id: str, eval_id: str, req: CreateFunctionCallStart, response: Response
+) -> FunctionCallRecord | None:
+    """Start a function call idempotently by ``call_id``, for both start routes.
+
+    Returns the new, unfinished record (201), or the stored one, finished or
+    not, when ``req`` replays its ``call_id`` with the same function and args
+    (200); raises a 409 when they differ. Returns None if the evaluation is
+    unknown.
+    """
+    try:
+        started = store.start_function_call(run_id, eval_id, req)
+    except FunctionCallConflictError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    return _created_or_replayed(started, response)
+
+
+def _created_or_replayed(
+    stored: tuple[FunctionCallRecord, bool] | None, response: Response
+) -> FunctionCallRecord | None:
+    if stored is None:
         return None
-    record, created = appended
+    record, created = stored
     if not created:
         response.status_code = status.HTTP_200_OK
     return record
