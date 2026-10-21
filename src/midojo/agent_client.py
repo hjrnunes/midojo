@@ -256,19 +256,20 @@ class OpenShellAgentClient(AgentClient):
 
     Thin wrapper — the sandbox lifecycle (create, seed, teardown) is managed by
     ``OpenShellRuntime``. This class only executes the agent once the sandbox is ready.
+    Without a ``timeout``, it uses the runtime's (the suite's ``timeout_seconds``, or 300 s).
     """
 
     def __init__(
         self,
         runtime: OpenShellRuntime,
         *,
-        timeout: float = 300.0,
+        timeout: float | None = None,
     ) -> None:
         self._runtime = runtime
-        self._timeout = timeout
+        self.timeout = runtime.agent_timeout_seconds if timeout is None else timeout
 
     async def send_task(self, prompt: str, *, session_token: str) -> str:
-        result = await asyncio.to_thread(self._runtime.exec_agent, prompt, timeout_seconds=int(self._timeout))
+        result = await asyncio.to_thread(self._runtime.exec_agent, prompt, timeout_seconds=self.timeout)
         if result.exit_code != 0:
             raise RuntimeError(f"OpenShell agent exited with code {result.exit_code}: {result.stderr}")
         return result.stdout.strip()

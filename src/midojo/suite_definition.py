@@ -28,6 +28,8 @@ class OpenShellRuntimeDefinition(_DefinitionModel):
     env_vars: dict[str, str] = Field(default_factory=dict)
     # Seeded into the sandbox; relative paths land under /sandbox/workdir.
     files: dict[str, str] = Field(default_factory=dict)
+    # Seconds the agent command may run per evaluation; `midojo-run --agent-timeout` overrides it.
+    timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
 
 
 class UnmanagedRuntimeDefinition(_DefinitionModel):

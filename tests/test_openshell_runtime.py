@@ -19,6 +19,13 @@ def test_build_runtime_passes_the_definition_through():
     assert runtime.image == "pi"
     assert runtime.agent_command == ["pi", "-p", "--no-session"]
     assert runtime.policy == POLICY
+    assert runtime.agent_timeout_seconds == 300
+
+
+def test_build_runtime_passes_the_agent_timeout_through():
+    runtime = build_runtime("shell_suite", OpenShellRuntimeDefinition(image="pi", timeout_seconds=900))
+    assert isinstance(runtime, OpenShellRuntime)
+    assert runtime.agent_timeout_seconds == 900
 
 
 def test_ocsf_pairs_each_exit_with_the_latest_launch_of_its_pid():
@@ -85,6 +92,13 @@ def test_exec_addresses_the_sandbox_by_name_within_the_workspace():
     name, _, kwargs = client.exec_calls[0]
     assert name == "midojo-eval-1"
     assert kwargs["workspace"] == "midojo-shell-abc123"
+
+
+def test_exec_agent_rounds_a_fractional_timeout_up_to_whole_seconds():
+    runtime, client = _runtime_with_sandbox()
+    for timeout, sent in [(0.5, 1), (30, 30), (30.2, 31)]:
+        runtime.exec_agent("hello", timeout_seconds=timeout)
+        assert client.exec_calls[-1][2]["timeout_seconds"] == sent
 
 
 def test_log_fetch_scopes_to_the_sandbox_since_the_evaluation_started():

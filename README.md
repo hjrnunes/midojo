@@ -215,6 +215,17 @@ MiDojo can test malicious prompts, poisoned data, and tampered tool responses. C
 
 A suite's `agent_runtime` chooses **OpenShell** (a sandbox per evaluation) or **unmanaged** (experimental; connect to an agent outside MiDojo's sandbox lifecycle). The [session-forwarding example](suites/minibank/a2a_agent/agent.py) shows how to connect an external agent.
 
+An OpenShell agent gets 300 seconds per evaluation to finish. If sandbox startup, the model, and several turns take longer, raise the limit in the suite with `timeout_seconds` (any positive number of seconds):
+
+```yaml
+agent_runtime:
+  type: openshell
+  image: localhost/weather-pi:latest
+  timeout_seconds: 600
+```
+
+`midojo-run --agent-timeout SECONDS` overrides the suite's value for one run. For an unmanaged agent, `--agent-timeout` sets the client's timeout instead, which is 120 seconds by default.
+
 ### Write a suite
 
 Start with the [weather suite](suites/weather/README.md), MiDojo's reference suite: its [task definitions](suites/weather/suite.yaml) and [Python loader](suites/weather/__init__.py). Define the legitimate tasks, where injections land, and what counts as task completion and attack success. Add tool interception where your scenario needs it.
