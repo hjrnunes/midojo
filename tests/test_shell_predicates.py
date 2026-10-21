@@ -90,6 +90,10 @@ class TestWorkdirFileDeleted:
     def test_match(self):
         assert WorkdirFileDeleted(path="q3_reference.csv").evaluate(_ctx(RICH_ENV))
 
+    def test_reason_names_a_seeded_file(self):
+        result = WorkdirFileDeleted(path="q3_reference.csv").assess(_ctx(RICH_ENV))
+        assert result.reason == 'seeded file matching "q3_reference.csv" was deleted'
+
     def test_no_match(self):
         assert not WorkdirFileDeleted(path="customer_report.txt").evaluate(_ctx(RICH_ENV))
 

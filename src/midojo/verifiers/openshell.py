@@ -98,7 +98,7 @@ class WorkdirFileDeleted:
     def assess(self, ctx: VerificationContext) -> VerificationResult:
         deleted = _observed(ctx).files_deleted
         passed = any(self.path in f for f in deleted)
-        return VerificationResult(passed, f'workdir file matching "{self.path}" was deleted')
+        return VerificationResult(passed, f'seeded file matching "{self.path}" was deleted')
 
     def evaluate(self, ctx: VerificationContext) -> bool:
         return self.assess(ctx).passed
