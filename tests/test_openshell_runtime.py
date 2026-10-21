@@ -141,13 +141,15 @@ class TestLogSync:
 class _FakeSandboxFiles:
     """A sandbox filesystem that answers the commands ``setup()`` and ``observe()`` run.
 
-    ``changed`` holds the paths written after the baseline was touched.
+    ``changed`` holds the paths written after the baseline was touched. Set
+    ``status_result`` to answer the outside-workdir status check with it instead.
     """
 
     def __init__(self):
         self.files: dict[str, str] = {}
         self.changed: set[str] = set()
         self.commands: list[list[str]] = []
+        self.status_result: ExecResult | None = None
 
     def create(self, *, workspace, spec, name, labels):
         return SimpleNamespace(name=name)
@@ -171,6 +173,8 @@ class _FakeSandboxFiles:
             case ["cat", path]:
                 stdout = self.files[path]
             case ["sh", "-c", _script, _name, _baseline, *paths]:
+                if self.status_result is not None:
+                    return self.status_result
                 stdout = "".join(f"{self._status(p)}\n" for p in paths)
         return ExecResult(exit_code=0, stdout=stdout, stderr="")
 
@@ -257,8 +261,22 @@ class TestSeededFileChanges:
         sandbox.write("/etc/other.conf", "y")
         assert _file_changes(runtime) == ([], [], [])
 
-    def test_absolute_seed_inside_the_workdir_is_a_workdir_file(self):
-        runtime, sandbox = _seeded_runtime({"/sandbox/workdir/notes.txt": "x", "notes.txt": "x"})
+    @pytest.mark.parametrize(
+        ("seed", "dest"),
+        [
+            ("a", "/sandbox/workdir/a"),
+            ("./sub/../a", "/sandbox/workdir/a"),
+            ("//sandbox/workdir/a", "/sandbox/workdir/a"),
+            ("///etc/app.conf", "/etc/app.conf"),
+        ],
+    )
+    def test_seed_path_is_one_normalized_absolute_path(self, seed, dest):
+        assert openshell_runtime._seed_path(seed) == dest
+
+    @pytest.mark.parametrize("seed", ["/sandbox/workdir/notes.txt", "//sandbox/workdir/notes.txt"])
+    def test_absolute_seed_inside_the_workdir_is_a_workdir_file(self, seed):
+        runtime, sandbox = _seeded_runtime({seed: "x", "notes.txt": "x"})
+        assert list(sandbox.files) == ["/sandbox/workdir/notes.txt"]
         assert _file_changes(runtime) == ([], [], [])
         assert all(command[0] == "find" for command in sandbox.commands)
 
@@ -286,20 +304,24 @@ class TestSeededFileExecs:
         assert batch[:2] == ["sh", "-c"]
         assert batch[3:] == ["sh", "/tmp/.midojo_baseline", *paths]
 
-    def test_failed_check_reports_nothing_and_warns(self, caplog):
-        runtime, sandbox = _seeded_runtime({"/etc/a.conf": "a", "/etc/b.conf": "b"})
-        sandbox.delete("/etc/b.conf")
-        real_exec = sandbox.exec
-
-        def exec_without_sh(sandbox_name, command, **kwargs):
-            if command[0] == "sh":
-                sandbox.commands.append(command)
-                return ExecResult(exit_code=127, stdout="", stderr="sh: not found")
-            return real_exec(sandbox_name, command, **kwargs)
-
-        sandbox.exec = exec_without_sh
-        assert _file_changes(runtime) == ([], [], [])
-        assert "returned 0 statuses for 2 files (exit 127): sh: not found" in caplog.text
+    @pytest.mark.parametrize(
+        "result",
+        [
+            ExecResult(exit_code=127, stdout="", stderr="sh: not found"),
+            ExecResult(exit_code=1, stdout="deleted\nmodified\n", stderr="find: Permission denied"),
+            ExecResult(exit_code=0, stdout="deleted\n", stderr=""),
+            ExecResult(exit_code=0, stdout="deleted\ngone\n", stderr=""),
+        ],
+        ids=["no-output", "nonzero-exit-full-output", "too-few-lines", "unknown-status"],
+    )
+    def test_failed_check_reports_no_outside_seeds_and_warns(self, result, caplog):
+        runtime, sandbox = _seeded_runtime({"notes.txt": "n", "/etc/a.conf": "a", "/etc/b.conf": "b"})
+        sandbox.delete("/etc/a.conf")
+        sandbox.delete("/sandbox/workdir/notes.txt")
+        sandbox.status_result = result
+        assert _file_changes(runtime) == ([], [], ["/sandbox/workdir/notes.txt"])
+        assert [r.levelname for r in caplog.records] == ["WARNING"]
+        assert f"Seeded file check failed (exit {result.exit_code}" in caplog.text
 
 
 class TestSeedStatusScript:
@@ -329,3 +351,27 @@ class TestSeedStatusScript:
 
         assert self._statuses(baseline, [unchanged, modified, deleted]) == ["unchanged", "modified", "deleted"]
         assert sorted(p.name for p in tmp_path.iterdir()) == sorted(["baseline", unchanged.name, modified.name])
+
+    def test_a_seed_replaced_by_a_directory_is_deleted(self, tmp_path):
+        baseline = tmp_path / "baseline"
+        baseline.touch()
+        os.utime(baseline, (1000, 1000))
+        replaced = tmp_path / "app.conf"
+        replaced.mkdir()
+        os.utime(replaced, (500, 500))
+
+        assert self._statuses(baseline, [replaced]) == ["deleted"]
+
+    def test_a_seed_behind_a_symlink_is_checked_at_its_target(self, tmp_path):
+        baseline = tmp_path / "baseline"
+        baseline.touch()
+        os.utime(baseline, (1000, 1000))
+        target = tmp_path / "target.conf"
+        target.write_text("x")
+        link = tmp_path / "app.conf"
+        link.symlink_to(target)  # the link itself is newer than the baseline
+
+        os.utime(target, (500, 500))
+        assert self._statuses(baseline, [link]) == ["unchanged"]
+        os.utime(target, (2000, 2000))
+        assert self._statuses(baseline, [link]) == ["modified"]

@@ -69,11 +69,15 @@ _BASELINE = "/tmp/.midojo_baseline"
 # Checks seeded files outside the workdir in one exec: run as
 # `sh -c SCRIPT sh BASELINE PATH...` and prints one status line per PATH, in
 # order. Paths travel as positional arguments, never through the script text.
+# A seed that is no longer a regular file counts as deleted, as in the workdir's
+# `find -type f`. `-f` and `find -H` follow symlinks on purpose: an absolute seed
+# may sit behind a symlink in the image, and `tee` seeds it through that link.
 _SEED_STATUS_SCRIPT = (
-    'baseline=$1; shift; for p do if [ ! -e "$p" ]; then echo deleted; '
-    'elif [ -n "$(find "$p" -prune -newer "$baseline")" ]; then echo modified; '
+    'baseline=$1; shift; for p do if [ ! -f "$p" ]; then echo deleted; '
+    'elif [ -n "$(find -H "$p" -prune -newer "$baseline")" ]; then echo modified; '
     "else echo unchanged; fi; done"
 )
+_SEED_STATUSES = frozenset({"unchanged", "modified", "deleted"})
 
 # From inside an OpenShell sandbox, the host machine that runs the midojo control
 # plane is reachable as this DNS name — `localhost` would resolve to the sandbox
@@ -119,7 +123,9 @@ def _seed_path(path: str) -> str:
     Paths starting with ``/`` are seeded at that absolute path (e.g. config
     files outside the workdir); all others under the workdir.
     """
-    return posixpath.normpath(path if path.startswith("/") else f"{_WORKDIR}/{path}")
+    dest = posixpath.normpath(path if path.startswith("/") else f"{_WORKDIR}/{path}")
+    # normpath keeps a leading "//" (POSIX leaves its meaning open); collapse it to "/".
+    return "/" + dest.lstrip("/")
 
 
 def _in_workdir(path: str) -> bool:
@@ -597,19 +603,23 @@ class OpenShellRuntime:
         if outside_seeded:
             status = self._exec(["sh", "-c", _SEED_STATUS_SCRIPT, "sh", _BASELINE, *outside_seeded])
             states = status.stdout.splitlines()
-            if len(states) != len(outside_seeded):
+            # Trust the batch whole or not at all: a partial or garbled result
+            # must not report a seeded file as deleted.
+            if status.exit_code == 0 and len(states) == len(outside_seeded) and set(states) <= _SEED_STATUSES:
+                for fpath, state in zip(outside_seeded, states, strict=True):
+                    if state == "modified":
+                        files_modified.append(fpath)
+                    elif state == "deleted":
+                        files_deleted.append(fpath)
+            else:
                 logging.getLogger(__name__).warning(
-                    "Seeded file check returned %d statuses for %d files (exit %d): %s",
+                    "Seeded file check failed (exit %d, %d statuses for %d files), "
+                    "reporting no changes to seeded files outside the workdir: %s",
+                    status.exit_code,
                     len(states),
                     len(outside_seeded),
-                    status.exit_code,
                     status.stderr.strip(),
                 )
-            for fpath, state in zip(outside_seeded, states, strict=False):
-                if state == "modified":
-                    files_modified.append(fpath)
-                elif state == "deleted":
-                    files_deleted.append(fpath)
 
         ocsf = self._fetch_ocsf()
 
