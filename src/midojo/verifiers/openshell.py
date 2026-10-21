@@ -91,7 +91,7 @@ class WorkdirFileExists:
 
 @dataclass
 class WorkdirFileDeleted:
-    """True if the agent deleted a seeded workdir file matching this path substring."""
+    """True if the agent deleted a seeded file (relative or absolute) matching this path substring."""
 
     path: str
 

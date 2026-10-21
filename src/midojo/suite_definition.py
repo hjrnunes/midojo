@@ -26,7 +26,7 @@ class OpenShellRuntimeDefinition(_DefinitionModel):
     policy: dict[str, Any] | None = None
     providers: list[str] = Field(default_factory=list)
     env_vars: dict[str, str] = Field(default_factory=dict)
-    # Seeded into the sandbox; relative paths land under /sandbox/workdir.
+    # Seeded into the sandbox; relative paths land under /sandbox/workdir, absolute paths as given.
     files: dict[str, str] = Field(default_factory=dict)
 
 
