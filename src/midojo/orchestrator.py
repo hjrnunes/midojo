@@ -189,13 +189,12 @@ def _check_turns_supported(
     """Refuse multi-turn user tasks the agent client can't hold a conversation for."""
     if agent_client.supports_multiturn:
         return
-    via = "the openshell runtime" if protocol == "openshell" else f"--protocol {protocol}"
     for user_task_id in user_task_ids:
         task = suite.user_tasks.get(user_task_id)
         if task is not None and len(task.turns) > 1:
             raise click.UsageError(
-                f"User task {user_task_id!r} has {len(task.turns)} turns, but {via} sends one message per "
-                "evaluation. Only --protocol openai supports more than one turn."
+                f"User task {user_task_id!r} has {len(task.turns)} turns, but --protocol {protocol} sends one "
+                "message per evaluation. Only --protocol openai and the openshell runtime support more than one turn."
             )
 
 
@@ -229,7 +228,7 @@ async def run_task(
                     user_task_id=user_task_id,
                     injection_task_id=injection_task_id,
                 )
-            conversation = agent_client.start_conversation(session_token=session_token)
+            conversation = agent_client.start_conversation(session_token=session_token, turn_count=len(messages))
             turns: list[Exchange] = []
             try:
                 for idx, message in enumerate(messages):

@@ -19,6 +19,31 @@ async def test_openshell_agent_failure_is_not_graded_as_empty_output():
         await client.send_task("task", session_token="session-a")
 
 
+@pytest.mark.asyncio
+async def test_openshell_turn_failure_names_the_turn():
+    runtime = MagicMock()
+    runtime.exec_agent.side_effect = [
+        MagicMock(exit_code=0, stdout="first reply", stderr=""),
+        MagicMock(exit_code=1, stdout="", stderr="Inference connection failed"),
+    ]
+    conversation = OpenShellAgentClient(runtime).start_conversation(session_token="session-a", turn_count=2)
+    assert await conversation.send("one") == "first reply"
+    with pytest.raises(RuntimeError, match="exited with code 1 on turn 2/2: Inference connection failed"):
+        await conversation.send("two")
+
+
+@pytest.mark.asyncio
+async def test_openshell_conversation_refuses_more_turns_than_it_was_started_with():
+    runtime = MagicMock()
+    runtime.exec_agent.return_value = MagicMock(exit_code=0, stdout="ok", stderr="")
+    conversation = OpenShellAgentClient(runtime).start_conversation(session_token="session-a", turn_count=2)
+    await conversation.send("one")
+    await conversation.send("two")
+    with pytest.raises(RuntimeError, match="has 2 turns"):
+        await conversation.send("three")
+    assert runtime.exec_agent.call_count == 2
+
+
 class TestOGXResponsesClient:
     """Tests for the OGX protocol client fixes (PR #93)."""
 
@@ -252,7 +277,6 @@ async def test_clients_without_multiturn_send_one_message_per_conversation():
     agent = _OneShotAgent()
     assert not agent.supports_multiturn
     assert not OGXResponsesClient("http://ogx", "m", "http://mcp").supports_multiturn
-    assert not OpenShellAgentClient(MagicMock()).supports_multiturn
     conversation = agent.start_conversation(session_token="session-a")
     assert await conversation.send("hello") == "session-a: hello"
     with pytest.raises(RuntimeError, match="_OneShotAgent sends one message per evaluation"):

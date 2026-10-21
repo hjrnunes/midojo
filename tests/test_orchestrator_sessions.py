@@ -11,7 +11,13 @@ import pytest
 from openshell import SandboxClient, WorkspaceClient
 from pydantic import BaseModel
 
-from midojo.agent_client import AgentClient, Conversation, PIAgentClient, SimpleHTTPAgentClient
+from midojo.agent_client import (
+    AgentClient,
+    Conversation,
+    OpenShellAgentClient,
+    PIAgentClient,
+    SimpleHTTPAgentClient,
+)
 from midojo.control_plane.client import ControlPlaneClient
 from midojo.control_plane.config import AppConfig
 from midojo.control_plane.main import create_app
@@ -430,7 +436,7 @@ class ConversingAgent(AgentClient):
         self.messages = []
         self.closed = 0
 
-    def start_conversation(self, *, session_token):
+    def start_conversation(self, *, session_token, turn_count=1):
         self.tokens.append(session_token)
         return ReportingConversation(self, session_token)
 
@@ -531,9 +537,9 @@ async def test_payload_only_in_a_later_turn_still_reaches_the_agent(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("protocol,via", [("http", "--protocol http"), ("openshell", "the openshell runtime")])
+@pytest.mark.parametrize("protocol", ["http", "a2a"])
 async def test_multiturn_task_is_refused_before_a_run_without_conversation_support(
-    local_http, client, unmanaged_suite, tmp_path, monkeypatch, protocol, via
+    local_http, client, unmanaged_suite, tmp_path, monkeypatch, protocol
 ):
     monkeypatch.setattr(unmanaged_suite.user_tasks["warmest_city"], "turns", ["Warmest city?", "And the coldest?"])
     agent = ReportingAgent()
@@ -550,8 +556,8 @@ async def test_multiturn_task_is_refused_before_a_run_without_conversation_suppo
             logdir=tmp_path,
         )
     assert "'warmest_city' has 2 turns" in error.value.message
-    assert via in error.value.message
-    assert "Only --protocol openai" in error.value.message
+    assert f"--protocol {protocol} sends one message" in error.value.message
+    assert "Only --protocol openai and the openshell runtime" in error.value.message
     assert client.app.state.store.list_runs() == []
     assert agent.tokens == []
 
@@ -604,3 +610,96 @@ async def test_injection_check_skips_unfinished_calls():
     async with httpx.AsyncClient(transport=transport) as http:
         control = ControlPlaneClient("http://control", http=http)
         assert await _injection_reached_agent(control, "r", "e", {"i:main": "payload"}) == ["read"]
+
+
+@pytest.fixture
+def openshell_suite(suite, gateway, client, monkeypatch):
+    """The weather suite on a faked gateway, whose agent command reports one call per run."""
+    runtime = OpenShellRuntime("weather", image="base", agent_command=["agent", "-p"])
+    monkeypatch.setattr(runtime, "_sync_ocsf_messages", list)
+    monkeypatch.setattr(suite, "runtime", runtime)
+    # runs: (sandbox, command, exec options) per agent run; failing_run: 1-based run to exit non-zero
+    fake = SimpleNamespace(suite=suite, runtime=runtime, runs=[], failing_run=None)
+
+    def exec_in_sandbox(sandbox, command, **kwargs):
+        if command[:2] != ["agent", "-p"]:
+            return SimpleNamespace(exit_code=0, stdout="", stderr="")
+        runs = fake.runs
+        runs.append((sandbox, command, kwargs))
+        token = gateway.sandboxes.create.call_args.kwargs["spec"].environment["MIDOJO_SESSION_TOKEN"]
+        response = client.post(
+            "/agent/function-calls",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"function": "get_weather", "args": {"city": "New York"}, "result": "72°F, sunny"},
+        )
+        response.raise_for_status()
+        if len(runs) == fake.failing_run:
+            return SimpleNamespace(exit_code=1, stdout="", stderr="model unreachable")
+        return SimpleNamespace(exit_code=0, stdout=f"reply {len(runs)}: New York is 72°F and sunny\n", stderr="")
+
+    gateway.sandboxes.exec.side_effect = exec_in_sandbox
+    return fake
+
+
+async def _run_on_openshell(openshell_suite, tmp_path):
+    await run_benchmark(
+        control_url="http://control",
+        agent_client=OpenShellAgentClient(openshell_suite.runtime),
+        agent_uri="g",
+        protocol="openshell",
+        suite=openshell_suite.suite,
+        suite_name="weather",
+        user_task_ids=["weather_new_york"],
+        injection_task_ids=[],
+        logdir=tmp_path,
+    )
+
+
+@pytest.mark.asyncio
+async def test_openshell_runs_the_agent_command_once_per_turn_in_one_sandbox(
+    local_http, client, gateway, openshell_suite, tmp_path, monkeypatch
+):
+    turns = ["What is the weather in New York?", "Thanks. Is it sunny?"]
+    monkeypatch.setattr(openshell_suite.suite.user_tasks["weather_new_york"], "turns", turns)
+    await _run_on_openshell(openshell_suite, tmp_path)
+    assert gateway.sandboxes.create.call_count == 1
+    sandbox = gateway.sandboxes.create.call_args.kwargs["name"]
+    assert [(name, command) for name, command, _ in openshell_suite.runs] == [
+        (sandbox, ["agent", "-p", turns[0]]),
+        (sandbox, ["agent", "-p", turns[1]]),
+    ]
+    assert [kwargs["env"] for _, _, kwargs in openshell_suite.runs] == [
+        {"MIDOJO_TURN_INDEX": "0", "MIDOJO_TURN_COUNT": "2"},
+        {"MIDOJO_TURN_INDEX": "1", "MIDOJO_TURN_COUNT": "2"},
+    ]
+    assert all(kwargs["timeout_seconds"] == 300 for _, _, kwargs in openshell_suite.runs)
+    gateway.sandboxes.delete.assert_called_once()
+    evaluation = _only_evaluation(client)
+    assert [(t["index"], t["message"], t["reply"]) for t in evaluation["turns"]] == [
+        (0, turns[0], "reply 1: New York is 72°F and sunny"),
+        (1, turns[1], "reply 2: New York is 72°F and sunny"),
+    ]
+    assert [call["turn"] for call in evaluation["function_calls"]] == [0, 1]
+    assert evaluation["agent_output"] == "reply 2: New York is 72°F and sunny"
+    assert evaluation["completed"] is True
+
+
+@pytest.mark.asyncio
+async def test_openshell_failed_second_turn_fails_the_evaluation_after_the_first_reply(
+    local_http, client, gateway, openshell_suite, tmp_path, monkeypatch
+):
+    turns = ["What is the weather in New York?", "Thanks. Is it sunny?"]
+    monkeypatch.setattr(openshell_suite.suite.user_tasks["weather_new_york"], "turns", turns)
+    openshell_suite.failing_run = 2
+    with pytest.raises(RuntimeError, match="exited with code 1 on turn 2/2: model unreachable"):
+        await _run_on_openshell(openshell_suite, tmp_path)
+    evaluation = _only_evaluation(client)
+    assert [(t["index"], t["reply"]) for t in evaluation["turns"]] == [
+        (0, "reply 1: New York is 72°F and sunny"),
+        (1, None),
+    ]
+    assert [call["turn"] for call in evaluation["function_calls"]] == [0, 1]
+    assert evaluation["completed"] is False
+    gateway.sandboxes.delete.assert_called_once()
+    token = gateway.sandboxes.create.call_args.kwargs["spec"].environment["MIDOJO_SESSION_TOKEN"]
+    assert client.get("/agent/environment", headers={"Authorization": f"Bearer {token}"}).status_code == 401

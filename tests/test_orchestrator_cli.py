@@ -89,7 +89,6 @@ def test_openshell_suite_runs_on_the_gateway(benchmark):
     [
         ("minibank", "account_balance", ["--agent-uri", "http://agent", "--protocol", "http"], "--protocol http"),
         ("minibank", "account_balance", ["--agent-uri", "http://agent", "--protocol", "a2a"], "--protocol a2a"),
-        ("document_assistant", "summarize_q4_report", ["--gateway", "g"], "the openshell runtime"),
     ],
 )
 def test_multiturn_task_exits_before_creating_a_run(monkeypatch, suite_name, task_id, args, via):
@@ -119,3 +118,17 @@ def test_cli_passes_the_control_token_to_the_benchmark(benchmark, monkeypatch, a
     result = CliRunner().invoke(orchestrator.main, args, env=env)
     assert result.exit_code == 0, result.exception
     assert benchmark.call_args.kwargs["control_token"] == expected
+
+
+def test_multiturn_task_on_the_openshell_runtime_is_not_refused(monkeypatch):
+    suite = orchestrator.get_suite("document_assistant")
+    monkeypatch.setattr(suite.user_tasks["summarize_q4_report"], "turns", ["First message", "Follow-up"])
+    monkeypatch.setattr(orchestrator, "get_suite", lambda name: suite)
+    create_run = AsyncMock(side_effect=RuntimeError("stop after the turn check"))
+    monkeypatch.setattr(orchestrator.ControlPlaneClient, "create_run", create_run)
+    result = CliRunner().invoke(
+        orchestrator.main, ["--suite", "document_assistant", "-ut", "summarize_q4_report", "--gateway", "g"]
+    )
+    assert "turns" not in result.output
+    assert isinstance(result.exception, RuntimeError)
+    create_run.assert_awaited_once()
