@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import importlib
 import json
+import math
 import os
 from collections import Counter
 from pathlib import Path
@@ -47,6 +48,13 @@ def _resolve_system_message(suite_name: str) -> str:
         console.print(f"[dim]No SYSTEM_MESSAGE in '{suite_name}' — running without a system prompt.[/dim]")
         return ""
     return msg
+
+
+def _finite_seconds(_ctx: click.Context, param: click.Parameter, value: float | None) -> float | None:
+    # FloatRange lets nan and inf through; the sandbox exec needs whole seconds.
+    if value is not None and not math.isfinite(value):
+        raise click.BadParameter(f"{value} is not a finite number of seconds.", param=param)
+    return value
 
 
 class TaskPair(NamedTuple):
@@ -452,6 +460,14 @@ async def run_benchmark(
     envvar="MODEL_NAME",
     help="Model ID. Required for ogx/openai; env: MODEL_NAME.",
 )
+@click.option(
+    "--agent-timeout",
+    type=click.FloatRange(min=0, min_open=True),
+    default=None,
+    callback=_finite_seconds,
+    help="Seconds the agent may take per evaluation. Overrides the suite's timeout_seconds for openshell suites "
+    "(default 300); for unmanaged agents, sets the client's timeout (default 120).",
+)
 def main(
     control_url: str,
     control_token: str | None,
@@ -467,12 +483,15 @@ def main(
     mcp_server_url: str | None,
     mcp_server_label: str | None,
     model_name: str | None,
+    agent_timeout: float | None,
 ) -> None:
     for module in modules_to_load:
         importlib.import_module(module)
 
     suite = get_suite(suite_name)
     agent_client: AgentClient
+    # Unmanaged clients keep their own default timeout unless --agent-timeout is given.
+    timeout_kwargs = {} if agent_timeout is None else {"timeout": agent_timeout}
 
     if isinstance(suite.runtime, OpenShellRuntime):
         if agent_uri or protocol:
@@ -482,7 +501,7 @@ def main(
         if not gateway:
             raise click.UsageError(f"Suite {suite_name!r} runs its agent in OpenShell and requires --gateway.")
         suite.runtime.configure(cluster=gateway, control_url=control_url)
-        agent_client = OpenShellAgentClient(suite.runtime)
+        agent_client = OpenShellAgentClient(suite.runtime, timeout=agent_timeout)
         agent_uri, protocol = gateway, "openshell"
     elif gateway:
         raise click.UsageError(
@@ -491,9 +510,9 @@ def main(
     elif not agent_uri or not protocol:
         raise click.UsageError(f"Suite {suite_name!r} has an unmanaged agent and requires --agent-uri and --protocol.")
     elif protocol == "a2a":
-        agent_client = A2AAgentClient(agent_uri)
+        agent_client = A2AAgentClient(agent_uri, **timeout_kwargs)
     elif protocol == "pi":
-        agent_client = PIAgentClient(agent_uri, control_url)
+        agent_client = PIAgentClient(agent_uri, control_url, **timeout_kwargs)
     elif protocol in {"ogx", "openai"}:
         if not model_name:
             raise click.UsageError(f"--protocol {protocol} requires --model-name or MODEL_NAME.")
@@ -508,6 +527,7 @@ def main(
                 mcp_server_label=mcp_server_label or suite_name,
                 instructions=system_message,
                 shield_id=ogx_shield,
+                **timeout_kwargs,
             )
         else:
             api_key = os.environ.get("OPENAI_API_KEY")
@@ -520,9 +540,10 @@ def main(
                 mcp_server_label=mcp_server_label or suite_name,
                 api_key=api_key,
                 instructions=system_message,
+                **timeout_kwargs,
             )
     else:
-        agent_client = SimpleHTTPAgentClient(agent_uri)
+        agent_client = SimpleHTTPAgentClient(agent_uri, **timeout_kwargs)
 
     asyncio.run(
         run_benchmark(

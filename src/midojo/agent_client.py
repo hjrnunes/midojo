@@ -349,6 +349,7 @@ class OpenShellAgentClient(AgentClient):
     The command keeps its own state between runs, outside ``/sandbox/workdir``.
     A single-turn task runs the command as ``send_task`` does, without them.
     Each run gets the full ``timeout``.
+    Without a ``timeout``, it uses the runtime's (the suite's ``timeout_seconds``, or 300 s).
     """
 
     supports_multiturn = True
@@ -357,10 +358,10 @@ class OpenShellAgentClient(AgentClient):
         self,
         runtime: OpenShellRuntime,
         *,
-        timeout: float = 300.0,
+        timeout: float | None = None,
     ) -> None:
         self._runtime = runtime
-        self._timeout = timeout
+        self.timeout = runtime.agent_timeout_seconds if timeout is None else timeout
 
     async def send_task(self, prompt: str, *, session_token: str) -> str:
         return await self._run(prompt)
@@ -372,7 +373,7 @@ class OpenShellAgentClient(AgentClient):
 
     async def _run(self, prompt: str, *, env: dict[str, str] | None = None, turn: str = "") -> str:
         extra = {"env": env} if env is not None else {}
-        result = await asyncio.to_thread(self._runtime.exec_agent, prompt, timeout_seconds=int(self._timeout), **extra)
+        result = await asyncio.to_thread(self._runtime.exec_agent, prompt, timeout_seconds=self.timeout, **extra)
         if result.exit_code != 0:
             raise RuntimeError(f"OpenShell agent exited with code {result.exit_code}{turn}: {result.stderr}")
         return result.stdout.strip()
