@@ -41,8 +41,11 @@ class AgentClient(abc.ABC):
         """Send a task prompt to the agent and return its final text output."""
         ...
 
-    def start_conversation(self, *, session_token: str) -> Conversation:
-        """Start one evaluation's conversation. By default, its one message goes through ``send_task``."""
+    def start_conversation(self, *, session_token: str, turn_count: int = 1) -> Conversation:
+        """Start one evaluation's conversation of ``turn_count`` messages.
+
+        By default, its one message goes through ``send_task``.
+        """
         return _SingleMessageConversation(self, session_token)
 
 
@@ -175,7 +178,7 @@ class OpenAIResponsesAgentClient(AgentClient):
         finally:
             await conversation.aclose()
 
-    def start_conversation(self, *, session_token: str) -> Conversation:
+    def start_conversation(self, *, session_token: str, turn_count: int = 1) -> Conversation:
         return _ResponsesConversation(self, session_token)
 
     async def _create_response(
@@ -339,7 +342,16 @@ class OpenShellAgentClient(AgentClient):
 
     Thin wrapper — the sandbox lifecycle (create, seed, teardown) is managed by
     ``OpenShellRuntime``. This class only executes the agent once the sandbox is ready.
+
+    A multi-turn conversation runs the agent command once per message, in the
+    evaluation's one sandbox, with the message as its last argument and
+    ``MIDOJO_TURN_INDEX`` (0-based) and ``MIDOJO_TURN_COUNT`` in its environment.
+    The command keeps its own state between runs, outside ``/sandbox/workdir``.
+    A single-turn task runs the command as ``send_task`` does, without them.
+    Each run gets the full ``timeout``.
     """
+
+    supports_multiturn = True
 
     def __init__(
         self,
@@ -351,7 +363,33 @@ class OpenShellAgentClient(AgentClient):
         self._timeout = timeout
 
     async def send_task(self, prompt: str, *, session_token: str) -> str:
-        result = await asyncio.to_thread(self._runtime.exec_agent, prompt, timeout_seconds=int(self._timeout))
+        return await self._run(prompt)
+
+    def start_conversation(self, *, session_token: str, turn_count: int = 1) -> Conversation:
+        if turn_count == 1:
+            return super().start_conversation(session_token=session_token)
+        return _OpenShellConversation(self, turn_count)
+
+    async def _run(self, prompt: str, *, env: dict[str, str] | None = None, turn: str = "") -> str:
+        extra = {"env": env} if env is not None else {}
+        result = await asyncio.to_thread(self._runtime.exec_agent, prompt, timeout_seconds=int(self._timeout), **extra)
         if result.exit_code != 0:
-            raise RuntimeError(f"OpenShell agent exited with code {result.exit_code}: {result.stderr}")
+            raise RuntimeError(f"OpenShell agent exited with code {result.exit_code}{turn}: {result.stderr}")
         return result.stdout.strip()
+
+
+class _OpenShellConversation(Conversation):
+    """Runs the agent command once per turn, telling it which turn it is."""
+
+    def __init__(self, client: OpenShellAgentClient, turn_count: int) -> None:
+        self._client = client
+        self._turn_count = turn_count
+        self._turn_index = 0
+
+    async def send(self, message: str) -> str:
+        index, count = self._turn_index, self._turn_count
+        if index >= count:
+            raise RuntimeError(f"OpenShell conversation has {count} turns; turn {index + 1} was not expected")
+        self._turn_index += 1
+        env = {"MIDOJO_TURN_INDEX": str(index), "MIDOJO_TURN_COUNT": str(count)}
+        return await self._client._run(message, env=env, turn=f" on turn {index + 1}/{count}")

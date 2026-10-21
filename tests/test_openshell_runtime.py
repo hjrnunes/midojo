@@ -1,9 +1,11 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
 from openshell._proto import openshell_pb2
 
 import midojo.runtimes.openshell as openshell_runtime
+from midojo.agent_client import OpenShellAgentClient
 from midojo.runtimes import build_runtime
 from midojo.runtimes.openshell import OpenShellRuntime, _resolve_policy
 from midojo.runtimes.openshell.logs import parse_ocsf_lines
@@ -58,6 +60,7 @@ class _FakeSandboxClient:
 
     def __init__(self):
         self.exec_calls = []
+        self.exec_results = []
         self.logs_requests = []
         self.specs = []
         self._stub = self
@@ -71,6 +74,7 @@ class _FakeSandboxClient:
 
     def exec(self, sandbox_name, command, **kwargs):
         self.exec_calls.append((sandbox_name, command, kwargs))
+        return self.exec_results.pop(0) if self.exec_results else SimpleNamespace(exit_code=0, stdout="", stderr="")
 
     def GetSandboxLogs(self, request, timeout):  # noqa: N802 - mirrors the gRPC stub
         self.logs_requests.append(request)
@@ -105,6 +109,52 @@ def test_sandbox_environment_never_carries_the_control_token(monkeypatch):
         "MIDOJO_SESSION_TOKEN": "session",
         "MIDOJO_URL": "http://host.openshell.internal:8090",
     }
+
+
+_AGENT_RUN = {"workspace": "midojo-shell-abc123", "workdir": "/sandbox/workdir"}
+
+
+@pytest.mark.asyncio
+async def test_multiturn_conversation_runs_the_agent_command_once_per_turn_in_one_sandbox():
+    runtime, client = _runtime_with_sandbox()
+    runtime._agent_command = ["agent", "-p"]
+    client.exec_results = [
+        SimpleNamespace(exit_code=0, stdout=" Hi there \n", stderr=""),
+        SimpleNamespace(exit_code=0, stdout="Still here\n", stderr=""),
+    ]
+    agent = OpenShellAgentClient(runtime, timeout=60)
+    assert agent.supports_multiturn
+    conversation = agent.start_conversation(session_token="session-a", turn_count=2)
+    assert await conversation.send("Hello") == "Hi there"
+    assert await conversation.send("Are you there?") == "Still here"
+    assert client.exec_calls == [
+        (
+            "midojo-eval-1",
+            ["agent", "-p", "Hello"],
+            {**_AGENT_RUN, "timeout_seconds": 60, "env": {"MIDOJO_TURN_INDEX": "0", "MIDOJO_TURN_COUNT": "2"}},
+        ),
+        (
+            "midojo-eval-1",
+            ["agent", "-p", "Are you there?"],
+            {**_AGENT_RUN, "timeout_seconds": 60, "env": {"MIDOJO_TURN_INDEX": "1", "MIDOJO_TURN_COUNT": "2"}},
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("via", ["send_task", "conversation"])
+async def test_single_turn_runs_the_agent_command_as_before(via):
+    runtime, client = _runtime_with_sandbox()
+    runtime._agent_command = ["agent", "-p"]
+    client.exec_results = [SimpleNamespace(exit_code=0, stdout="Done\n", stderr="")]
+    agent = OpenShellAgentClient(runtime)
+    if via == "send_task":
+        reply = await agent.send_task("Hello", session_token="session-a")
+    else:
+        reply = await agent.start_conversation(session_token="session-a", turn_count=1).send("Hello")
+    assert reply == "Done"
+    # No turn variables: the same command line and exec options as before multi-turn support.
+    assert client.exec_calls == [("midojo-eval-1", ["agent", "-p", "Hello"], {**_AGENT_RUN, "timeout_seconds": 300})]
 
 
 def test_log_fetch_scopes_to_the_sandbox_since_the_evaluation_started():

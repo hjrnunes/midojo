@@ -275,7 +275,7 @@ class OpenShellRuntime:
       1. ``configure(cluster=..., control_url=...)`` — inject deployment config (once)
       2. ``start_run(run_id)`` — open the run's OpenShell workspace + client (once)
       3. ``setup(injections, ...)`` — create sandbox with evaluation labels, seed files (per evaluation)
-      4. agent executes (via ``exec_agent``)
+      4. agent executes (via ``exec_agent``), once per turn of the user task
       5. ``observe()`` — workdir diff + OCSF events → ``OpenShellObservations``
       6. ``teardown()`` — delete the sandbox (per evaluation)
       7. ``end_run()`` — delete the run's workspace, close the client (once)
@@ -460,12 +460,17 @@ class OpenShellRuntime:
         """
         return self._client.exec(self._ref.name, command, workspace=self._workspace_name, **kwargs)
 
-    def exec_agent(self, prompt: str, *, timeout_seconds: float) -> Any:
+    def exec_agent(self, prompt: str, *, timeout_seconds: float, env: dict[str, str] | None = None) -> Any:
         """Execute the agent inside the sandbox. Returns an ``ExecResult``.
 
         Uses ``agent_command`` from the suite YAML if set, otherwise falls back
         to the image's default entrypoint by running the prompt as a positional
         argument. Suite authors should always set ``agent_command`` explicitly.
+
+        ``env`` adds environment variables for this run only, through the SDK's
+        exec, so the command line stays the same. A multi-turn task runs the
+        agent once per turn in the same sandbox; ``timeout_seconds`` bounds
+        each run.
 
         Runs with cwd set to the seed directory so the agent resolves bare
         filenames (e.g. ``customer_report.txt``) against the workdir. This keeps
@@ -474,7 +479,8 @@ class OpenShellRuntime:
         leading slash to drop, so it resolves correctly regardless of the model.
         """
         cmd = [*self._agent_command, prompt] if self._agent_command else [prompt]
-        return self._exec(cmd, workdir=_WORKDIR, timeout_seconds=int(timeout_seconds))
+        extra = {"env": env} if env is not None else {}
+        return self._exec(cmd, workdir=_WORKDIR, timeout_seconds=int(timeout_seconds), **extra)
 
     def _read_ocsf_messages(self) -> list[str]:
         """Return the OCSF messages the supervisor has pushed since the evaluation began.
