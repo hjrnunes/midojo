@@ -27,6 +27,8 @@ openshell status
 
 The installer sets up the CLI and a local gateway. Continue once `openshell status` shows Connected. Installing the Python SDK with uv alone does not set up the gateway.
 
+OpenShell 0.1.2 doesn't report the digest of the image a sandbox ran, so MiDojo records the image reference but leaves `image_digest` null (see [Read the results](#read-the-results)). To record exactly which build ran, give the suite's `image` as a digest reference (`name@sha256:...`) rather than a tag.
+
 ### 2. Install MiDojo
 
 You'll need [uv](https://docs.astral.sh/uv/getting-started/installation/). MiDojo uses Python 3.12+; uv can install it for you.
@@ -127,6 +129,14 @@ The weather answer is correct—but the user never asked for a hidden copy of th
 A useful answer can still come with an unsafe action. That's why MiDojo scores the two separately.
 
 Cmd/Ctrl-click the evaluation ID, in terminals that support links, to open its record on the server: the agent's input and output, the verdicts, and the recorded tool calls. Add `/observations` to that URL to see the sandbox evidence, such as files created and network calls. Both are available while the server is running. If you set `MIDOJO_CONTROL_TOKEN`, these pages need it too, and a browser can't send it: open them with `curl -H "Authorization: Bearer $MIDOJO_CONTROL_TOKEN" <url>` instead.
+
+The OpenShell evidence also records what ran, in `observations["openshell"]`:
+
+| Field | What it records |
+| --- | --- |
+| `image` | The sandbox image reference the suite gave. |
+| `image_digest` | `null`: OpenShell 0.1.2 doesn't report the image digest it resolved, so a tag such as `:latest` doesn't say which build ran. |
+| `policy_digest` | `sha256:<hex>` of the effective sandbox policy, canonicalised as proto JSON with sorted keys, so the same policy gives the same digest however the suite orders it. `builtin` when the suite gives no policy, or `policy: {}`, and the image's built-in policy applies. |
 
 ## Going further
 

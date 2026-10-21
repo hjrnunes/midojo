@@ -140,6 +140,7 @@ async def retrieve_evaluation(evaluation: Annotated[Evaluation, Depends(get_eval
         agent_output=evaluation.agent_output,
         turns=[TurnResponse.model_validate(turn) for turn in evaluation.turns],
         function_calls=[FunctionCallResponse.model_validate(fc) for fc in evaluation.function_calls],
+        observations=_observations_json(evaluation),
         pre_environment=evaluation.pre_environment.model_dump(),
         environment=evaluation.environment.model_dump(),
     )

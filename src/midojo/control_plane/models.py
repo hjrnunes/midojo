@@ -184,6 +184,10 @@ class EvaluationResponse(BaseModel):
     agent_output: str | None
     turns: list[TurnResponse]
     function_calls: list[FunctionCallResponse]
+    observations: dict[str, dict[str, Any]] = Field(
+        default_factory=dict,
+        description="Runtime observations keyed by source, as recorded (see the evaluation's /observations).",
+    )
     pre_environment: dict
     environment: dict
 
