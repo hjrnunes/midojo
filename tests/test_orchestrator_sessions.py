@@ -8,6 +8,7 @@ import click
 import grpc
 import httpx
 import pytest
+import pytest_asyncio
 from openshell import SandboxClient, WorkspaceClient
 from pydantic import BaseModel
 
@@ -48,16 +49,11 @@ def gateway(monkeypatch):
     return SimpleNamespace(sandboxes=sandboxes, workspaces=workspaces, RpcError=RpcError, StatusCode=grpc.StatusCode)
 
 
-@pytest.fixture
-def local_http(app, monkeypatch):
-    client_class = httpx.AsyncClient
-
-    def factory(*args, **kwargs):
-        kwargs.setdefault("transport", httpx.ASGITransport(app))
-        return client_class(*args, **kwargs)
-
-    monkeypatch.setattr(httpx, "AsyncClient", factory)
-    return factory
+@pytest_asyncio.fixture
+async def local_http(app):
+    """A client that sends requests to the control plane app in process."""
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app)) as http:
+        yield http
 
 
 @pytest.fixture
@@ -68,19 +64,21 @@ def unmanaged_suite(suite, monkeypatch):
 
 
 class ReportingAgent(AgentClient):
-    def __init__(self, fail=False):
+    """Reports one function call to the control plane through ``http``, then replies."""
+
+    def __init__(self, http, fail=False):
+        self.http = http
         self.tokens = []
         self.fail = fail
 
     async def send_task(self, prompt, *, session_token):
         self.tokens.append(session_token)
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                "http://control/agent/function-calls",
-                headers={"Authorization": f"Bearer {session_token}"},
-                json={"function": "read", "args": {}, "result": prompt},
-            )
-            response.raise_for_status()
+        response = await self.http.post(
+            "http://control/agent/function-calls",
+            headers={"Authorization": f"Bearer {session_token}"},
+            json={"function": "read", "args": {}, "result": prompt},
+        )
+        response.raise_for_status()
         if self.fail:
             raise RuntimeError("Agent failed")
         return "New York is 72°F and sunny"
@@ -90,8 +88,8 @@ class ReportingAgent(AgentClient):
 @pytest.mark.parametrize("fail", [False, True])
 async def test_runner_revokes_sessions_on_success_and_agent_failure(local_http, client, fail):
     run = client.post("/runs", json={"suite_name": "weather"}).json()
-    agent = ReportingAgent(fail)
-    control = ControlPlaneClient("http://control")
+    agent = ReportingAgent(local_http, fail)
+    control = ControlPlaneClient("http://control", http=local_http)
     try:
         task = run_task(control, agent, run["id"], "weather_new_york", None, {}, runtime=UnmanagedRuntime())
         if fail:
@@ -129,10 +127,12 @@ async def test_partial_sandbox_setup_is_cleaned_and_session_revoked(local_http, 
 
     runtime = Runtime("test", image="base")
     run = client.post("/runs", json={"suite_name": "weather"}).json()
-    control = ControlPlaneClient("http://control")
+    control = ControlPlaneClient("http://control", http=local_http)
     try:
         with pytest.raises(RuntimeError, match="Seed failed"):
-            await run_task(control, ReportingAgent(), run["id"], "weather_new_york", None, {}, runtime=runtime)
+            await run_task(
+                control, ReportingAgent(local_http), run["id"], "weather_new_york", None, {}, runtime=runtime
+            )
     finally:
         await control.aclose()
     assert runtime.cleaned
@@ -154,10 +154,16 @@ async def test_runner_records_sandbox_observations(local_http, client):
             pass
 
     run = client.post("/runs", json={"suite_name": "weather"}).json()
-    control = ControlPlaneClient("http://control")
+    control = ControlPlaneClient("http://control", http=local_http)
     try:
         result = await run_task(
-            control, ReportingAgent(), run["id"], "weather_new_york", None, {}, runtime=Runtime("test", image="base")
+            control,
+            ReportingAgent(local_http),
+            run["id"],
+            "weather_new_york",
+            None,
+            {},
+            runtime=Runtime("test", image="base"),
         )
     finally:
         await control.aclose()
@@ -167,7 +173,7 @@ async def test_runner_records_sandbox_observations(local_http, client):
 
 @pytest.mark.asyncio
 async def test_benchmark_selects_suite_and_creates_unique_sessions(local_http, client, unmanaged_suite, tmp_path):
-    agent = ReportingAgent()
+    agent = ReportingAgent(local_http)
     await run_benchmark(
         control_url="http://control",
         agent_client=agent,
@@ -178,6 +184,7 @@ async def test_benchmark_selects_suite_and_creates_unique_sessions(local_http, c
         user_task_ids=["weather_new_york", "warmest_city"],
         injection_task_ids=[],
         logdir=tmp_path,
+        http=local_http,
     )
     assert len(set(agent.tokens)) == 2
     output = (tmp_path / "results.json").read_text()
@@ -186,26 +193,24 @@ async def test_benchmark_selects_suite_and_creates_unique_sessions(local_http, c
 
 
 @pytest.mark.asyncio
-async def test_benchmark_authenticates_with_the_control_token(suite, unmanaged_suite, monkeypatch, tmp_path):
+async def test_benchmark_authenticates_with_the_control_token(suite, unmanaged_suite, tmp_path):
     app = create_app({"weather": suite}, config=AppConfig(control_token="control-secret"))
-    client_class = httpx.AsyncClient
-    monkeypatch.setattr(
-        httpx, "AsyncClient", lambda *args, **kwargs: client_class(*args, transport=httpx.ASGITransport(app), **kwargs)
-    )
-    benchmark = {
-        "control_url": "http://control",
-        "agent_client": ReportingAgent(),
-        "agent_uri": "http://agent",
-        "protocol": "http",
-        "suite": unmanaged_suite,
-        "suite_name": "weather",
-        "user_task_ids": ["weather_new_york"],
-        "injection_task_ids": [],
-        "logdir": tmp_path,
-    }
-    with pytest.raises(httpx.HTTPStatusError, match="401"):
-        await run_benchmark(**benchmark)
-    await run_benchmark(**benchmark, control_token="control-secret")
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app)) as http:
+        benchmark = {
+            "control_url": "http://control",
+            "agent_client": ReportingAgent(http),
+            "agent_uri": "http://agent",
+            "protocol": "http",
+            "suite": unmanaged_suite,
+            "suite_name": "weather",
+            "user_task_ids": ["weather_new_york"],
+            "injection_task_ids": [],
+            "logdir": tmp_path,
+            "http": http,
+        }
+        with pytest.raises(httpx.HTTPStatusError, match="401"):
+            await run_benchmark(**benchmark)
+        await run_benchmark(**benchmark, control_token="control-secret")
     assert json.loads((tmp_path / "results.json").read_text())["utility"] == {"weather_new_york,": True}
 
 
@@ -215,7 +220,7 @@ async def test_benchmark_grades_security_when_the_injection_reaches_the_agent(
 ):
     await run_benchmark(
         control_url="http://control",
-        agent_client=ReportingAgent(),
+        agent_client=ReportingAgent(local_http),
         agent_uri="http://agent",
         protocol="http",
         suite=unmanaged_suite,
@@ -223,6 +228,7 @@ async def test_benchmark_grades_security_when_the_injection_reaches_the_agent(
         user_task_ids=["weather_new_york"],
         injection_task_ids=["tornado_alert_via_prompt"],
         logdir=tmp_path,
+        http=local_http,
     )
     results = json.loads((tmp_path / "results.json").read_text())
     pair = "weather_new_york,tornado_alert_via_prompt"
@@ -431,7 +437,8 @@ class ConversingAgent(AgentClient):
 
     supports_multiturn = True
 
-    def __init__(self):
+    def __init__(self, http):
+        self.http = http
         self.tokens = []
         self.messages = []
         self.closed = 0
@@ -451,13 +458,12 @@ class ReportingConversation(Conversation):
 
     async def send(self, message):
         self.agent.messages.append(message)
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                "http://control/agent/function-calls",
-                headers={"Authorization": f"Bearer {self.session_token}"},
-                json={"function": "get_weather", "args": {"city": "New York"}, "result": "72°F, sunny"},
-            )
-            response.raise_for_status()
+        response = await self.agent.http.post(
+            "http://control/agent/function-calls",
+            headers={"Authorization": f"Bearer {self.session_token}"},
+            json={"function": "get_weather", "args": {"city": "New York"}, "result": "72°F, sunny"},
+        )
+        response.raise_for_status()
         return f"reply {len(self.agent.messages)}: New York is 72°F and sunny"
 
     async def aclose(self):
@@ -476,7 +482,7 @@ async def test_benchmark_runs_each_turn_in_one_evaluation_and_session(
 ):
     turns = ["What is the weather in New York?", "Thanks. Is it sunny?"]
     monkeypatch.setattr(unmanaged_suite.user_tasks["weather_new_york"], "turns", turns)
-    agent = ConversingAgent()
+    agent = ConversingAgent(local_http)
     await run_benchmark(
         control_url="http://control",
         agent_client=agent,
@@ -487,6 +493,7 @@ async def test_benchmark_runs_each_turn_in_one_evaluation_and_session(
         user_task_ids=["weather_new_york"],
         injection_task_ids=[],
         logdir=tmp_path,
+        http=local_http,
     )
     assert agent.messages == turns
     assert len(agent.tokens) == 1
@@ -513,7 +520,7 @@ async def test_payload_only_in_a_later_turn_still_reaches_the_agent(
     monkeypatch.setattr(unmanaged_suite.user_tasks["weather_new_york"], "turns", turns)
     await run_benchmark(
         control_url="http://control",
-        agent_client=ConversingAgent(),
+        agent_client=ConversingAgent(local_http),
         agent_uri="http://agent",
         protocol="openai",
         suite=unmanaged_suite,
@@ -521,12 +528,13 @@ async def test_payload_only_in_a_later_turn_still_reaches_the_agent(
         user_task_ids=["weather_new_york"],
         injection_task_ids=["tornado_alert_via_prompt"],
         logdir=tmp_path,
+        http=local_http,
     )
     evaluation = _only_evaluation(client)
     payload = unmanaged_suite.get_probes_for_task("tornado_alert_via_prompt")["tornado_alert_via_prompt:main"]
     assert payload not in evaluation["agent_input"]
     run_id = client.app.state.store.list_runs()[0].id
-    async with ControlPlaneClient("http://control") as control:
+    async with ControlPlaneClient("http://control", http=local_http) as control:
         hits = await _injection_reached_agent(
             control, run_id, evaluation["id"], {"tornado_alert_via_prompt:main": payload}
         )
@@ -542,7 +550,7 @@ async def test_multiturn_task_is_refused_before_a_run_without_conversation_suppo
     local_http, client, unmanaged_suite, tmp_path, monkeypatch, protocol
 ):
     monkeypatch.setattr(unmanaged_suite.user_tasks["warmest_city"], "turns", ["Warmest city?", "And the coldest?"])
-    agent = ReportingAgent()
+    agent = ReportingAgent(local_http)
     with pytest.raises(click.UsageError) as error:
         await run_benchmark(
             control_url="http://control",
@@ -554,6 +562,7 @@ async def test_multiturn_task_is_refused_before_a_run_without_conversation_suppo
             user_task_ids=None,
             injection_task_ids=None,
             logdir=tmp_path,
+            http=local_http,
         )
     assert "'warmest_city' has 2 turns" in error.value.message
     assert f"--protocol {protocol} sends one message" in error.value.message
@@ -565,7 +574,7 @@ async def test_multiturn_task_is_refused_before_a_run_without_conversation_suppo
 @pytest.mark.asyncio
 async def test_single_turn_task_runs_on_any_protocol(local_http, client, unmanaged_suite, tmp_path, monkeypatch):
     monkeypatch.setattr(unmanaged_suite.user_tasks["weather_new_york"], "turns", ["Weather in New York?"])
-    agent = ReportingAgent()
+    agent = ReportingAgent(local_http)
     await run_benchmark(
         control_url="http://control",
         agent_client=agent,
@@ -576,6 +585,7 @@ async def test_single_turn_task_runs_on_any_protocol(local_http, client, unmanag
         user_task_ids=["weather_new_york"],
         injection_task_ids=[],
         logdir=tmp_path,
+        http=local_http,
     )
     evaluation = _only_evaluation(client)
     assert [(t["message"], t["reply"]) for t in evaluation["turns"]] == [
@@ -641,7 +651,7 @@ def openshell_suite(suite, gateway, client, monkeypatch):
     return fake
 
 
-async def _run_on_openshell(openshell_suite, tmp_path):
+async def _run_on_openshell(openshell_suite, tmp_path, http):
     await run_benchmark(
         control_url="http://control",
         agent_client=OpenShellAgentClient(openshell_suite.runtime),
@@ -652,6 +662,7 @@ async def _run_on_openshell(openshell_suite, tmp_path):
         user_task_ids=["weather_new_york"],
         injection_task_ids=[],
         logdir=tmp_path,
+        http=http,
     )
 
 
@@ -661,7 +672,7 @@ async def test_openshell_runs_the_agent_command_once_per_turn_in_one_sandbox(
 ):
     turns = ["What is the weather in New York?", "Thanks. Is it sunny?"]
     monkeypatch.setattr(openshell_suite.suite.user_tasks["weather_new_york"], "turns", turns)
-    await _run_on_openshell(openshell_suite, tmp_path)
+    await _run_on_openshell(openshell_suite, tmp_path, local_http)
     assert gateway.sandboxes.create.call_count == 1
     sandbox = gateway.sandboxes.create.call_args.kwargs["name"]
     assert [(name, command) for name, command, _ in openshell_suite.runs] == [
@@ -692,7 +703,7 @@ async def test_openshell_failed_second_turn_fails_the_evaluation_after_the_first
     monkeypatch.setattr(openshell_suite.suite.user_tasks["weather_new_york"], "turns", turns)
     openshell_suite.failing_run = 2
     with pytest.raises(RuntimeError, match="exited with code 1 on turn 2/2: model unreachable"):
-        await _run_on_openshell(openshell_suite, tmp_path)
+        await _run_on_openshell(openshell_suite, tmp_path, local_http)
     evaluation = _only_evaluation(client)
     assert [(t["index"], t["reply"]) for t in evaluation["turns"]] == [
         (0, "reply 1: New York is 72°F and sunny"),
