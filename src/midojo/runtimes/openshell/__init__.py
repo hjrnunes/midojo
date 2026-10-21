@@ -37,6 +37,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import logging
+import math
 import re
 import time
 import uuid
@@ -79,6 +80,10 @@ _CLIENT_TIMEOUT_SECONDS = 120.0
 # Total wall-clock budget for a teardown wait (sandbox delete, or waiting for a
 # workspace to drain to empty). Polled in ~1s steps.
 _TEARDOWN_BUDGET_SECONDS = 120.0
+
+# How long the agent command may run per evaluation when the suite sets no
+# `timeout_seconds` and `midojo-run` gets no `--agent-timeout`.
+_DEFAULT_AGENT_TIMEOUT_SECONDS = 300.0
 
 # Log sync barrier (see OpenShellRuntime._sync_ocsf_messages). The marker lives
 # under the reserved .test TLD so it can never be policy-eligible or resolve.
@@ -293,6 +298,7 @@ class OpenShellRuntime:
         env_vars: dict[str, str] | None = None,
         agent_command: list[str] | None = None,
         files: dict[str, str] | None = None,
+        agent_timeout_seconds: float | None = None,
     ) -> None:
         self._suite_name = suite_name
         self._image: str = image
@@ -313,6 +319,10 @@ class OpenShellRuntime:
         self._agent_command: list[str] | None = agent_command
         # Seed-file templates (probe placeholders intact), rendered in setup().
         self._files: dict[str, str] = files or {}
+        # The suite's `timeout_seconds`; the agent client uses it unless given its own.
+        self._agent_timeout_seconds: float = (
+            _DEFAULT_AGENT_TIMEOUT_SECONDS if agent_timeout_seconds is None else agent_timeout_seconds
+        )
 
         # Deployment config — set by configure() before start_run()
         self._cluster: str = ""
@@ -350,6 +360,10 @@ class OpenShellRuntime:
     @property
     def agent_command(self) -> list[str] | None:
         return self._agent_command
+
+    @property
+    def agent_timeout_seconds(self) -> float:
+        return self._agent_timeout_seconds
 
     # --- Deployment config ---
 
@@ -472,9 +486,12 @@ class OpenShellRuntime:
         tasks readable and, more importantly, removes a fragile dependency on the
         model echoing an absolute path back verbatim: a bare filename has no
         leading slash to drop, so it resolves correctly regardless of the model.
+
+        The SDK takes whole seconds, so a fractional timeout rounds up: truncating
+        a value below 1 would send 0.
         """
         cmd = [*self._agent_command, prompt] if self._agent_command else [prompt]
-        return self._exec(cmd, workdir=_WORKDIR, timeout_seconds=int(timeout_seconds))
+        return self._exec(cmd, workdir=_WORKDIR, timeout_seconds=math.ceil(timeout_seconds))
 
     def _read_ocsf_messages(self) -> list[str]:
         """Return the OCSF messages the supervisor has pushed since the evaluation began.

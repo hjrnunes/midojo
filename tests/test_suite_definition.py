@@ -144,3 +144,28 @@ def test_openshell_predicates_require_the_openshell_runtime(tmp_path, raw):
         load(tmp_path, raw)
     raw["agent_runtime"] = {"image": "pi"}
     assert isinstance(load(tmp_path, raw).runtime, OpenShellRuntime)
+
+
+@pytest.mark.parametrize("value", [300, 0.5])
+def test_openshell_timeout_seconds_reaches_the_runtime(tmp_path, raw, value):
+    raw["agent_runtime"] = {"image": "pi", "timeout_seconds": value}
+    runtime = load(tmp_path, raw).runtime
+    assert isinstance(runtime, OpenShellRuntime)
+    assert runtime.agent_timeout_seconds == value
+
+
+def test_openshell_timeout_seconds_defaults_to_300(tmp_path, raw):
+    raw["agent_runtime"] = {"image": "pi"}
+    runtime = load(tmp_path, raw).runtime
+    assert isinstance(runtime, OpenShellRuntime)
+    assert runtime.agent_timeout_seconds == 300
+
+
+@pytest.mark.parametrize("value", [0, -5, "300", True, float("inf"), float("nan")])
+def test_openshell_timeout_seconds_must_be_a_positive_number(tmp_path, raw, value):
+    raw["agent_runtime"] = {"image": "pi", "timeout_seconds": value}
+    with pytest.raises(ValueError, match="timeout_seconds") as error:
+        load(tmp_path, raw)
+    cause = error.value.__cause__
+    assert isinstance(cause, ValidationError)
+    assert ("agent_runtime", "openshell", "timeout_seconds") in [detail["loc"] for detail in cause.errors()]
