@@ -28,6 +28,7 @@ contract with transactions.
 from __future__ import annotations
 
 import hashlib
+import json
 import secrets
 import time
 import uuid
@@ -38,7 +39,7 @@ from pydantic import BaseModel
 
 from midojo.types import Environment, FunctionCallRecord, SuiteName
 
-from .models import CreateFunctionCallRecord
+from .models import CreateFunctionCallRecord, FunctionCallBody
 from .state import Evaluation, Run
 
 
@@ -72,8 +73,13 @@ class Store(Protocol):
     def session_evaluation(self, session_token: str) -> Evaluation: ...
 
     # --- per-evaluation mutations (ID-based) ---
-    # Each returns the mutated evaluation, or None if (run_id, eval_id) is unknown.
-    def append_function_call(self, run_id: str, eval_id: str, req: CreateFunctionCallRecord) -> Evaluation | None: ...
+    # Each returns None if (run_id, eval_id) is unknown, else the mutated
+    # evaluation, except append_function_call: it returns (record, created),
+    # with created False when req replays a stored call_id with the same body,
+    # and raises FunctionCallConflictError when the call_id has another body.
+    def append_function_call(
+        self, run_id: str, eval_id: str, req: CreateFunctionCallRecord
+    ) -> tuple[FunctionCallRecord, bool] | None: ...
     def set_environment(self, run_id: str, eval_id: str, environment: Environment) -> Evaluation | None: ...
     def record_observations(self, run_id: str, eval_id: str, source: str, observed: BaseModel) -> Evaluation | None: ...
     def set_grade(
@@ -84,6 +90,24 @@ class Store(Protocol):
 
 class InvalidSessionError(ValueError):
     """A callback has no live evaluation binding."""
+
+
+class FunctionCallConflictError(ValueError):
+    """A function call record reuses a call_id already stored with a different body."""
+
+
+_BODY_FIELDS = set(FunctionCallBody.model_fields)
+
+
+def _canonical_body(call: FunctionCallBody | FunctionCallRecord) -> str:
+    """A call's body as canonical JSON, so a replay must match it type for type.
+
+    Plain ``==`` would let ``true`` match ``1``. JSON keeps them apart, and ``1``
+    and ``1.0`` too: they're different bodies. Object keys are sorted, so their
+    order doesn't matter, and an omitted field and its explicit default are the
+    same body because the model has filled in the default by now.
+    """
+    return json.dumps(call.model_dump(mode="json", include=_BODY_FIELDS), sort_keys=True, separators=(",", ":"))
 
 
 def _token_hash(token: str) -> str:
@@ -190,10 +214,21 @@ class InMemoryStore:
 
     # --- per-evaluation mutations ---
 
-    def append_function_call(self, run_id: str, eval_id: str, req: CreateFunctionCallRecord) -> Evaluation | None:
+    def append_function_call(
+        self, run_id: str, eval_id: str, req: CreateFunctionCallRecord
+    ) -> tuple[FunctionCallRecord, bool] | None:
         evaluation = self.get_evaluation(run_id, eval_id)
         if evaluation is None:
             return None
+        # At most one record per call_id. The lookup and the append below run
+        # without an await between them, so a concurrent retry can't slip in.
+        if req.call_id is not None:
+            for existing in evaluation.function_calls:
+                if existing.call_id != req.call_id:
+                    continue
+                if _canonical_body(existing) != _canonical_body(req):
+                    raise FunctionCallConflictError(f"call_id {req.call_id!r} is already recorded with another body")
+                return existing, False
         # Each call's pre-env is the previous call's post-env, chaining from the
         # eval's initial environment; post-env is a deep copy so later mutations
         # don't retroactively change the recorded snapshot.
@@ -202,13 +237,14 @@ class InMemoryStore:
         else:
             pre_env = evaluation.pre_environment
         record = FunctionCallRecord(
-            **req.model_dump(),
+            **req.model_dump(exclude={"call_id"}),
+            call_id=req.call_id or str(uuid.uuid4()),
             timestamp=datetime.now(UTC).isoformat(),
             pre_environment=pre_env,
             post_environment=evaluation.environment.model_copy(deep=True),
         )
         evaluation.function_calls.append(record)
-        return evaluation
+        return record, True
 
     def set_environment(self, run_id: str, eval_id: str, environment: Environment) -> Evaluation | None:
         evaluation = self.get_evaluation(run_id, eval_id)

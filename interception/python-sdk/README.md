@@ -1,6 +1,6 @@
 # midojo-sdk
 
-Build [MiDojo](https://github.com/asago-ai/midojo) interception layers in Python. An interception layer stands between an agent and its tools during an evaluation: it reads and updates the evaluation's environment on the MiDojo control plane, and records every call the agent makes.
+Build [MiDojo](https://github.com/asago-ai/midojo) interception layers in Python. An interception layer stands between an agent and its tools during an evaluation: it reads and updates the evaluation's environment on the MiDojo control plane, and attempts to record every call the agent makes.
 
 ```sh
 pip install "midojo-sdk[mcp]"        # fake MCP servers
@@ -37,7 +37,7 @@ if __name__ == "__main__":
 - `await ctx.env(field)` and `await ctx.env_update(field, value)` read and write a field of the evaluation's environment
 - `await ctx.forward(tool, args)` calls the tool on the upstream MCP server and returns its text
 
-The SDK records each call with its arguments and the result the agent saw. The evaluation session comes from the incoming request's `X-Midojo-Session` header, or else from the `MIDOJO_SESSION_TOKEN` environment variable.
+The SDK attempts to record each call with its arguments and the result the agent saw. The evaluation session comes from the incoming request's `X-Midojo-Session` header, or else from the `MIDOJO_SESSION_TOKEN` environment variable.
 
 ## LangChain agents
 
@@ -70,6 +70,10 @@ agent = create_agent(model, tools=[get_alerts, read_file, send_email], middlewar
 - `report(*names)`: the tools run unchanged, and each call is recorded with its result, so midojo can see what a tool returned, such as a file read, without perturbing the agent.
 
 Calls to these tools are recorded on the control plane, and the agent's other tools run as usual. Run the agent with `ainvoke` or `astream`: the middleware is asynchronous. For a [LangGraph](https://docs.langchain.com/oss/python/langgraph/overview) graph with its own `ToolNode`, pass `ToolNode(tools, awrap_tool_call=midojo.awrap_tool_call)`. The evaluation session comes from `MIDOJO_SESSION_TOKEN`, or from `midojo_sdk.session.session_context()` for an agent that serves several evaluations.
+
+## Records
+
+Each record carries a `call_id`: the LangChain tool call's ID, namespaced as `langchain:<UUID>:<id>`, or a fresh UUID for a fake MCP server tool, a call without an ID, or an ID the middleware has already used. A record that fails with a transport error or a 5xx is resent with the same `call_id`, up to 3 sends in all, so the control plane records it at most once. A 4xx, including a 409, is raised without a resend. The [interception README](https://github.com/asago-ai/midojo/blob/main/interception/README.md#record-ids-and-retries) describes the guarantee.
 
 ## More
 

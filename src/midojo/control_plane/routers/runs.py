@@ -3,19 +3,21 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 
 from midojo.types import FunctionCallRecord, SuiteName
 from midojo.yaml_task_suite import YAMLTaskSuite
 
 from ..config import AppConfig
 from ..dependencies import (
+    RECORD_FUNCTION_CALL_RESPONSES,
     get_config,
     get_evaluation_by_id,
     get_run,
     get_run_suite,
     get_store,
     get_suites,
+    record_function_call,
     resolve_suite,
     validate_environment,
     validate_observations,
@@ -231,15 +233,26 @@ async def get_function_call(
     "/{run_id}/evaluations/{eval_id}/function-calls",
     response_model=FunctionCallResponse,
     status_code=status.HTTP_201_CREATED,
+    responses=RECORD_FUNCTION_CALL_RESPONSES,
+    # The ID FastAPI generated before this handler was renamed: keep it stable for API clients.
+    operation_id="record_function_call_runs__run_id__evaluations__eval_id__function_calls_post",
 )
-async def record_function_call(
+async def record_run_function_call(
     eval_id: str,
     req: CreateFunctionCallRecord,
+    response: Response,
     run: Annotated[Run, Depends(get_run)],
     store: Annotated[Store, Depends(get_store)],
 ) -> FunctionCallRecord:
-    evaluation = _require_eval(store.append_function_call(run.id, eval_id, req), eval_id)
-    return evaluation.function_calls[-1]
+    """Record a call in the evaluation, at most once per ``call_id``.
+
+    201 when recorded; 200 with the stored record when ``call_id`` is already
+    recorded with the same body; 409 when it's recorded with another body.
+    """
+    record = record_function_call(store, run.id, eval_id, req, response)
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown evaluation: {eval_id}")
+    return record
 
 
 # --- Observation endpoints ---
