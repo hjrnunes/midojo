@@ -112,6 +112,10 @@ class EvaluationResponse(BaseModel):
     agent_input: str | None
     agent_output: str | None
     function_calls: list[FunctionCallResponse]
+    observations: dict[str, dict[str, Any]] = Field(
+        default_factory=dict,
+        description="Runtime observations keyed by source, as recorded (see the evaluation's /observations).",
+    )
 
 
 # --- Suite / task response models ---

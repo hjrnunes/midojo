@@ -2,6 +2,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from midojo.control_plane.models import EvaluationResponse
 from midojo.control_plane.state import Evaluation
 from midojo.runtimes.openshell import OpenShellObservations
 
@@ -291,6 +292,41 @@ def test_record_and_get_observations(client):
     assert client.get(f"/runs/{run_id}/evaluations/{eval_id}/observations").json() == {"openshell": data}
     # The store keeps the validated model, which is what verifiers receive.
     assert _evaluation(client, run_id, eval_id).observations == {"openshell": observed}
+
+
+def test_evaluation_response_carries_what_ran(client):
+    run_id = _create_run(client)
+    eval_id = _create_evaluation(client, run_id)["id"]
+    assert client.get(f"/runs/{run_id}/evaluations/{eval_id}").json()["observations"] == {}
+
+    observed = OpenShellObservations(image="localhost/agent:latest", policy_digest="sha256:" + "ab" * 32)
+    client.post(
+        f"/runs/{run_id}/evaluations/{eval_id}/observations",
+        json={"source": "openshell", "data": observed.model_dump(mode="json")},
+    )
+
+    recorded = client.get(f"/runs/{run_id}/evaluations/{eval_id}").json()["observations"]["openshell"]
+    assert recorded["image"] == "localhost/agent:latest"
+    assert recorded["image_digest"] is None
+    assert recorded["policy_digest"] == "sha256:" + "ab" * 32
+    # The orchestrator's client parses the same response.
+    assert (
+        EvaluationResponse.model_validate(client.get(f"/runs/{run_id}/evaluations/{eval_id}").json()).observations[
+            "openshell"
+        ]
+        == recorded
+    )
+
+
+def test_observations_recorded_without_what_ran_still_validate(client):
+    run_id = _create_run(client)
+    eval_id = _create_evaluation(client, run_id)["id"]
+    resp = client.post(
+        f"/runs/{run_id}/evaluations/{eval_id}/observations",
+        json={"source": "openshell", "data": {"network_calls_blocked": ["evil.com:443"]}},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["openshell"]["policy_digest"] is None
 
 
 @pytest.mark.parametrize("source,data", [("acs", {}), ("openshell", {"processes_launched": ["curl"]})])
