@@ -320,10 +320,10 @@ export function createMidojoExtension(config: MidojoExtensionConfig): (pi: Exten
 		// Start each hooked or reported call before the tool runs, so a call
 		// whose tool_result never records stays visible as unfinished. If the
 		// start still fails after its resends, the error blocks the call, so the
-		// tool doesn't run unrecorded. A call without a tool call ID is blocked
-		// the same way: tool_result couldn't find its start, so its finish could
-		// be lost without a trace. A blocked tool never runs, so it isn't
-		// started: the handler below records it once.
+		// tool doesn't run unrecorded. A call without a tool call ID isn't
+		// started, since tool_result couldn't find the start: it runs and its
+		// tool_result records it once, as before starts existed. A blocked tool
+		// never runs, so it isn't started either: the handler below records it once.
 		const blockedTools = new Set(config.blockTools ?? []);
 		const startedTools = new Set(
 			[...hookedTools, ...(config.reportTools ?? [])].filter((name) => !blockedTools.has(name)),
@@ -331,9 +331,7 @@ export function createMidojoExtension(config: MidojoExtensionConfig): (pi: Exten
 		if (startedTools.size > 0) {
 			pi.on("tool_call", async (event) => {
 				if (!startedTools.has(event.toolName)) return;
-				if (!event.toolCallId) {
-					throw new Error(`Cannot start ${event.toolName}: PI gave no tool call ID to pair its result with.`);
-				}
+				if (!event.toolCallId) return;
 
 				const call = { callId: callIds.forCall(event.toolCallId), args: event.input as Record<string, unknown> };
 				started.set(event.toolCallId, call);
