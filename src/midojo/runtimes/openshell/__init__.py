@@ -7,7 +7,8 @@ policy, where the kernel audits everything the agent does as OCSF events.
 Each evaluation's sandbox is seeded with the runtime's ``files``. After the
 agent runs, ``observe()`` collects runtime observations from outside the agent:
 
-  * **workdir diff** — files created, modified and deleted against the seeded files.
+  * **file diff** — files created in the workdir, and seeded files modified or
+    deleted, wherever they were seeded.
   * **OCSF events** — kernel-audited network connections, processes (command
     line and exit code) and security findings.
 
@@ -37,6 +38,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import logging
+import posixpath
 import re
 import time
 import uuid
@@ -60,6 +62,22 @@ from midojo.runtimes.openshell.logs import OCSFEvents, parse_ocsf_lines
 # Directory inside the sandbox where the suite's files are seeded and where the
 # agent works. Relative paths in the runtime's `files` are placed under it.
 _WORKDIR = "/sandbox/workdir"
+
+# Touched after seeding; files with a newer mtime were changed during the evaluation.
+_BASELINE = "/tmp/.midojo_baseline"
+
+# Checks seeded files outside the workdir in one exec: run as
+# `sh -c SCRIPT sh BASELINE PATH...` and prints one status line per PATH, in
+# order. Paths travel as positional arguments, never through the script text.
+# A seed that is no longer a regular file counts as deleted, as in the workdir's
+# `find -type f`. `-f` and `find -H` follow symlinks on purpose: an absolute seed
+# may sit behind a symlink in the image, and `tee` seeds it through that link.
+_SEED_STATUS_SCRIPT = (
+    'baseline=$1; shift; for p do if [ ! -f "$p" ]; then echo deleted; '
+    'elif [ -n "$(find -H "$p" -prune -newer "$baseline")" ]; then echo modified; '
+    "else echo unchanged; fi; done"
+)
+_SEED_STATUSES = frozenset({"unchanged", "modified", "deleted"})
 
 # From inside an OpenShell sandbox, the host machine that runs the midojo control
 # plane is reachable as this DNS name — `localhost` would resolve to the sandbox
@@ -97,6 +115,21 @@ _LOG_SYNC_BUDGET_SECONDS = 15.0
 def _short_name(value: str, length: int, fallback: str) -> str:
     """Make a short DNS-label fragment without trailing or repeated hyphens."""
     return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")[:length].rstrip("-") or fallback
+
+
+def _seed_path(path: str) -> str:
+    """Where a ``files`` entry is seeded in the sandbox, as a normalized absolute path.
+
+    Paths starting with ``/`` are seeded at that absolute path (e.g. config
+    files outside the workdir); all others under the workdir.
+    """
+    dest = posixpath.normpath(path if path.startswith("/") else f"{_WORKDIR}/{path}")
+    # normpath keeps a leading "//" (POSIX leaves its meaning open); collapse it to "/".
+    return "/" + dest.lstrip("/")
+
+
+def _in_workdir(path: str) -> bool:
+    return path.startswith(f"{_WORKDIR}/")
 
 
 def _create_named_resource[T](prefix: str, identity: str, create: Callable[[str], T]) -> T:
@@ -234,7 +267,8 @@ class OpenShellObservations(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    # Workdir diff against the seeded files (absolute paths)
+    # File diff against the seeded files (absolute paths). Created files are
+    # found in the workdir only; seeded files are checked wherever they were seeded.
     files_created: list[str] = Field(default_factory=list)
     files_modified: list[str] = Field(default_factory=list)
     files_deleted: list[str] = Field(default_factory=list)
@@ -268,7 +302,7 @@ class OpenShellRuntime:
           type: openshell          # the default, may be omitted
           image: localhost/my-agent:latest  # the agent's sandbox image, as a full reference
           policy: {...}            # inline policy; omit for the image's built-in policy
-          files:                   # seeded workdir files (probe placeholders allowed)
+          files:                   # seeded files, relative to the workdir or absolute (probe placeholders allowed)
             customer_report.txt: "Q4 report ... {injection_task_0:main}"
 
     Lifecycle (driven by the orchestrator):
@@ -276,7 +310,7 @@ class OpenShellRuntime:
       2. ``start_run(run_id)`` — open the run's OpenShell workspace + client (once)
       3. ``setup(injections, ...)`` — create sandbox with evaluation labels, seed files (per evaluation)
       4. agent executes (via ``exec_agent``)
-      5. ``observe()`` — workdir diff + OCSF events → ``OpenShellObservations``
+      5. ``observe()`` — file diff + OCSF events → ``OpenShellObservations``
       6. ``teardown()`` — delete the sandbox (per evaluation)
       7. ``end_run()`` — delete the run's workspace, close the client (once)
     """
@@ -313,6 +347,11 @@ class OpenShellRuntime:
         self._agent_command: list[str] | None = agent_command
         # Seed-file templates (probe placeholders intact), rendered in setup().
         self._files: dict[str, str] = files or {}
+        # setup() touches the baseline after seeding, so a seed there could never
+        # look modified.
+        for path in self._files:
+            if _seed_path(path) == _BASELINE:
+                raise ValueError(f"files entry {path!r} would overwrite midojo's observation baseline {_BASELINE}")
 
         # Deployment config — set by configure() before start_run()
         self._cluster: str = ""
@@ -435,22 +474,16 @@ class OpenShellRuntime:
         )
         self._client.wait_ready(self._ref.name, workspace=self._workspace_name, timeout_seconds=120.0)
 
-        # Seed workdir files.
-        # Paths starting with "/" are seeded at the absolute path (e.g. config
-        # files outside the workdir). All other paths are relative to
-        # /sandbox/workdir/ (the agent's working directory).
+        # Seed the files at their _seed_path() destinations.
         self._exec(["mkdir", "-p", _WORKDIR])
         for path, template in self._files.items():
             content = substitute_probes(template, injections)
-            if path.startswith("/"):
-                dest = path
-            else:
-                dest = f"{_WORKDIR}/{path}"
+            dest = _seed_path(path)
             parent = dest.rsplit("/", 1)[0]
             self._exec(["mkdir", "-p", parent])
             self._exec(["tee", dest], stdin=content.encode())
 
-        self._exec(["touch", "/tmp/.midojo_baseline"])
+        self._exec(["touch", _BASELINE])
         self._start_ms = int(time.time() * 1000)
 
     def _exec(self, command: list[str], **kwargs: Any) -> Any:
@@ -538,10 +571,18 @@ class OpenShellRuntime:
         return self._cached_ocsf
 
     def observe(self) -> dict[str, BaseModel]:
-        """Collect the workdir diff and OCSF events as ``observations["openshell"]``."""
-        seeded = {f"{_WORKDIR}/{p}" for p in self._files}
+        """Collect the file diff and OCSF events as ``observations["openshell"]``.
 
-        diff_result = self._exec(["find", _WORKDIR, "-type", "f", "-newer", "/tmp/.midojo_baseline"])
+        Two ``find`` runs over the workdir give its created, modified and deleted
+        files. Seeded files outside the workdir (absolute ``files`` paths) are
+        checked by one extra exec, made only when there are any. An absolute path
+        inside the workdir counts as a workdir file.
+        """
+        seeded = list(dict.fromkeys(_seed_path(p) for p in self._files))
+        workdir_seeded = [p for p in seeded if _in_workdir(p)]
+        outside_seeded = [p for p in seeded if not _in_workdir(p)]
+
+        diff_result = self._exec(["find", _WORKDIR, "-type", "f", "-newer", _BASELINE])
         all_result = self._exec(["find", _WORKDIR, "-type", "f"])
 
         current = {ln.strip() for ln in all_result.stdout.splitlines() if ln.strip()}
@@ -554,7 +595,7 @@ class OpenShellRuntime:
             fpath = line.strip()
             if not fpath:
                 continue
-            if fpath in seeded:
+            if fpath in workdir_seeded:
                 files_modified.append(fpath)
             else:
                 files_created.append(fpath)
@@ -562,7 +603,28 @@ class OpenShellRuntime:
                 if cat.exit_code == 0:
                     new_file_contents[fpath] = cat.stdout
 
-        files_deleted = [p for p in seeded if p not in current]
+        files_deleted = [p for p in workdir_seeded if p not in current]
+
+        if outside_seeded:
+            status = self._exec(["sh", "-c", _SEED_STATUS_SCRIPT, "sh", _BASELINE, *outside_seeded])
+            states = status.stdout.splitlines()
+            # Trust the batch whole or not at all: a partial or garbled result
+            # must not report a seeded file as deleted.
+            if status.exit_code == 0 and len(states) == len(outside_seeded) and set(states) <= _SEED_STATUSES:
+                for fpath, state in zip(outside_seeded, states, strict=True):
+                    if state == "modified":
+                        files_modified.append(fpath)
+                    elif state == "deleted":
+                        files_deleted.append(fpath)
+            else:
+                logging.getLogger(__name__).warning(
+                    "Seeded file check failed (exit %d, %d statuses for %d files), "
+                    "reporting no changes to seeded files outside the workdir: %s",
+                    status.exit_code,
+                    len(states),
+                    len(outside_seeded),
+                    status.stderr.strip(),
+                )
 
         ocsf = self._fetch_ocsf()
 
