@@ -20,6 +20,7 @@ The SDKs intercept tools the same way, so a suite's evaluation means the same th
   - *block*: the tool never runs, and the agent gets `Tool execution was blocked` as an error result. Use it for a tool whose effect must not happen during an evaluation, such as sending email.
   - *report*: the tool runs, and the agent gets its result unchanged.
 - **The SDK attempts to record every intercepted call,** with `POST /agent/function-calls`: the agent's arguments, the result the agent saw, the error if there was one, and whether the call was blocked. Each record carries a `call_id`, so the SDK can resend a record whose response it lost without recording the call twice; a record that never arrives is still missing (see [Record IDs and retries](#record-ids-and-retries)). Tools that aren't intercepted run as usual and aren't recorded.
+- **A call that runs a tool is started first.** Before the tool runs, the SDK records the call's start with `POST /agent/function-calls/start`, and after, it finishes that record. A call that starts and never finishes, because the tool hangs, the agent stops, or the finish never arrives, stays visible as unfinished (see [Started and unfinished calls](#started-and-unfinished-calls)). A blocked call never runs, so it's recorded once, without a start.
 - **Errors don't end the run.** When a hook raises, the call is recorded with the error, and the agent gets the message as an error result. The agent carries on as it would after any failed tool call.
 - **No session, no call.** An intercepted call needs the evaluation's session. Without one, the SDK raises an error instead of letting the call go unrecorded.
 
@@ -47,10 +48,11 @@ All paths are relative to the control plane URL and take the session's bearer to
 |---|---|---|
 | `GET /agent/environment` | | the evaluation's environment, as JSON |
 | `PUT /agent/environment` | the whole environment | the stored environment. The control plane validates it against the suite's environment schema |
-| `POST /agent/function-calls` | `{"call_id", "function", "args", "result", "error", "blocked"}` | the recorded call: 201 when it's new, 200 when `call_id` is already recorded with the same body, 409 when it's recorded with a different body |
-| `GET /agent/function-calls` | | the calls recorded so far |
+| `POST /agent/function-calls/start` | `{"call_id", "function", "args"}`; `call_id` is required | the started call, unfinished: 201 when it's new, 200 when `call_id` is already recorded with the same `function` and `args`, 409 when it's recorded with others |
+| `POST /agent/function-calls` | `{"call_id", "function", "args", "result", "error", "blocked"}` | the recorded call: 201 when it's new or finishes a started call, 200 when `call_id` is already finished with the same body, 409 when it's finished with a different body or was started with another `function` or `args` |
+| `GET /agent/function-calls` | | the calls recorded so far, finished or not, in the order they started |
 
-In a function-call record, `result` is what the agent saw. `error` (optional) is the error the tool raised. `blocked` (default `false`) means the tool never ran and `result` is what the agent was told instead.
+In a function-call record, `result` is what the agent saw. `error` (optional) is the error the tool raised. `blocked` (default `false`) means the tool never ran and `result` is what the agent was told instead. `complete` (in responses) is `false` while a started call is unfinished; its `result` is then `null`.
 
 ## Record IDs and retries
 
@@ -70,4 +72,30 @@ The SDKs send a `call_id` with every record:
 
 - **The harness's tool call ID, namespaced.** The LangChain middleware uses the tool call's `id`, and the PI SDK the tool call ID that PI passes to `execute`, `tool_call` and `tool_result`. Each becomes `<sdk>:<UUID>:<tool call ID>`, where `<sdk>` is `langchain` or `pi` and the UUID is chosen once per middleware or extension (and again in each forked process, for the Python SDK), so two interception layers recording into one evaluation can't collide.
 - **Otherwise a UUID.** The SDK uses a fresh UUID when the harness gives no ID, when the namespaced ID would be longer than 256 characters, or when the same SDK instance has already used that ID, as when a model reuses tool call IDs or a PI tool is both registered and hooked. The MCP SDK always uses a UUID: an MCP request ID only numbers the requests of one connection.
-- **Bounded retries with the same `call_id`.** A record that fails with a transport error (no response) or a 5xx is resent with the same body and `call_id`, up to 3 sends in all, waiting 100 ms and then 200 ms. A 4xx, including a 409, isn't resent: the SDK raises it.
+- **Bounded retries with the same `call_id`.** A record or a start that fails with a transport error (no response) or a 5xx is resent with the same body and `call_id`, up to 3 sends in all, waiting 100 ms and then 200 ms. A 4xx, including a 409, isn't resent: the SDK raises it.
+
+## Started and unfinished calls
+
+A call is recorded only once it has a result, unless it's started first. `POST /agent/function-calls/start` (and the orchestrator's `POST /runs/{run_id}/evaluations/{eval_id}/function-calls/start`) records a call's `call_id`, `function` and `args` before the tool runs. The record is unfinished: `complete` is `false`, it has no `result`, and its pre-environment is the evaluation's environment when the call started. Sending the call's record to `POST /agent/function-calls` with the same `call_id` later finishes it in place: it fills in `result`, `error` and `blocked`, sets `complete` to `true`, and takes the post-environment.
+
+| The evaluation already has | Start (`.../function-calls/start`) | Record (`.../function-calls`) |
+|---|---|---|
+| no record with this `call_id` | 201: an unfinished record is appended | 201: a finished record is appended, as without a start |
+| an unfinished record with this `call_id` and the same `function` and `args` | 200: nothing changes; the response is the stored record | 201: the record is finished in place |
+| an unfinished record with this `call_id` and another `function` or `args` | 409: nothing changes | 409: nothing changes; the record stays unfinished |
+| a finished record with this `call_id` and the same `function` and `args` | 200: nothing changes; the response is the finished record | 200 when the body is the same, 409 when it's different, as in [Record IDs and retries](#record-ids-and-retries) |
+| a finished record with this `call_id` and another `function` or `args` | 409: nothing changes | 409: nothing changes |
+
+A start without a `call_id` is a 422: nothing could finish it. A start resent after its call finished (say, a retry whose first response was lost) is a 200 replay that returns the finished record, so it can't reopen the call. A record sent without a start behaves as before: one finished record. Its pre-environment is the previous record's post-environment, or, when the previous record is unfinished, the evaluation's environment when it's recorded, so changes made since that call started aren't attributed to it.
+
+Each call keeps one record, in the order the calls started, so counting records counts calls whether or not they were started. Finished calls look as they do without a start, and unfinished ones appear with `complete: false` in `GET /agent/function-calls`, in the orchestrator's evaluation response, and in what verifiers read.
+
+**What an unfinished call means.** The agent made the call, and MiDojo saw it start, but no result was recorded: the tool may still be running, it may have hung or crashed, the agent run may have ended or been cancelled first, or the finish may have been lost on its way to the control plane. An unfinished call doesn't say whether the tool's effect happened. Its record has no result and no post-environment; the evaluation's environment, which verifiers read, is whatever the interception layer last wrote.
+
+**How grading treats it.** An unfinished call counts as an attempted call wherever a blocked call does, and nowhere else. `tool_called` matches it by `function` and `args`, as it matches a blocked call, since MiDojo grades what the agent attempts; no other verifier reads the call records. The orchestrator's check of whether an injection reached the agent skips unfinished calls, since the agent saw no result from them. Whether an evaluation with an unfinished call should be graded at all, or graded as inconclusive, is an open question for the maintainers.
+
+The SDKs start every call that runs a tool: the MCP SDK's tools, the LangChain middleware's hooked and reported tools, and the PI SDK's registered, hooked and reported tools. PI's `tool_call` starts a hooked or reported call, and `tool_result` finishes it with the start's `call_id` and arguments, found by PI's tool call ID. A tool that's also in `blockTools` never runs, so it isn't started: its call is recorded once, as blocked.
+
+If the start fails after its resends, the tool doesn't run: the SDK raises, and PI blocks the call. If the finish fails, the SDK raises after the tool has run, and the call stays unfinished. A tool that's cancelled (or ends with any other Python `BaseException` that isn't an `Exception`) gave the agent no result, so the SDK doesn't finish its call, and it stays unfinished too.
+
+A PI `tool_call` for a hooked or reported tool without a tool call ID isn't started: its `tool_result` couldn't find the start, and PI's events carry nothing else that pairs a `tool_result` with its `tool_call` for certain (the same tool can run in parallel with the same arguments). The call runs, and its `tool_result` records it once with a fresh `call_id`, as before starts existed, so such a call that never finishes leaves no record. The SDK doesn't assume PI always gives an ID.

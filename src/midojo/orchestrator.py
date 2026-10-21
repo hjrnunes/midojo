@@ -174,6 +174,8 @@ async def _injection_reached_agent(
         if message and any(p in _normalize(message) for p in normalized_payloads):
             hits.append(_turn_label("agent input", idx, len(messages)))
     for call in evaluation.function_calls:
+        if call.result is None:  # an unfinished call: the agent saw no result
+            continue
         result = _normalize(call.result)
         if any(p in result for p in normalized_payloads):
             hits.append(call.function)

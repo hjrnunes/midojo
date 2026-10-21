@@ -72,7 +72,7 @@ test("call ids are namespaced, and fall back to a UUID", () => {
 });
 
 test("each tool kind records the tool call ID", async () => {
-	await withFetch([201, 201, 201], async (sent) => {
+	await withFetch([201, 201, 201, 201], async (sent) => {
 		const tools = [];
 		const handlers = {};
 		createMidojoExtension({
@@ -94,7 +94,7 @@ test("each tool kind records the tool call ID", async () => {
 		}
 		assert.deepEqual(
 			sent.map((body) => [body.function, body.call_id.split(":").at(-1)]),
-			[["alert", "call-1"], ["get_weather", "call-2"], ["read", "call-3"]],
+			[["alert", "call-1"], ["alert", "call-1"], ["get_weather", "call-2"], ["read", "call-3"]],
 		);
 	});
 });

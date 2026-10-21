@@ -12,11 +12,16 @@ from midojo.types import Environment, SuiteName
 CALL_ID_MAX_LENGTH = 256
 
 
-class FunctionCallBody(BaseModel):
-    """The fields a client records for a function call. A replayed ``call_id`` must repeat them exactly."""
+class FunctionCallStart(BaseModel):
+    """The fields that identify a call when it starts. Its finish must repeat them exactly."""
 
     function: str
     args: dict
+
+
+class FunctionCallBody(FunctionCallStart):
+    """The fields a client records for a function call. A replayed ``call_id`` must repeat them exactly."""
+
     result: str
     error: str | None = None
     blocked: bool = Field(
@@ -26,16 +31,35 @@ class FunctionCallBody(BaseModel):
 
 
 class CreateFunctionCallRecord(FunctionCallBody):
-    """Request body for recording a function call (server fills in timestamp + env snapshots)."""
+    """Request body for recording a function call (server fills in timestamp + env snapshots).
+
+    Also finishes a call started with ``CreateFunctionCallStart`` under the same ``call_id``.
+    """
 
     call_id: str | None = Field(
         default=None,
         min_length=1,
         max_length=CALL_ID_MAX_LENGTH,
         description=(
-            "Client-chosen ID for this record, unique within the evaluation. Resending a record with the same "
-            "call_id and body returns the stored record instead of appending a duplicate; the same call_id with "
-            "a different body is a 409. When omitted, the server assigns a UUID and the record isn't deduplicated."
+            "Client-chosen ID for this record, unique within the evaluation. When the call_id was started and "
+            "not finished, this finishes that record in place; its function and args must match the start, or "
+            "it's a 409. Resending a finished record with the same call_id and body returns the stored record "
+            "instead of appending a duplicate; the same call_id with a different body is a 409. When omitted, "
+            "the server assigns a UUID and the record isn't deduplicated."
+        ),
+    )
+
+
+class CreateFunctionCallStart(FunctionCallStart):
+    """Request body for starting a function call: an unfinished record, finished later by its ``call_id``."""
+
+    call_id: str = Field(
+        min_length=1,
+        max_length=CALL_ID_MAX_LENGTH,
+        description=(
+            "Client-chosen ID for the call, unique within the evaluation. The finish sends the same call_id. "
+            "Resending a start with the same call_id, function and args returns the stored record, finished or "
+            "not; the same call_id with another function or args is a 409."
         ),
     )
 
@@ -51,6 +75,10 @@ class FunctionCallResponse(FunctionCallBody):
     model_config = ConfigDict(from_attributes=True)
 
     call_id: str = Field(description="The client's call_id, or a UUID the server assigned when the client sent none.")
+    result: str | None = Field(default=None, description="What the agent saw. None while the call is unfinished.")
+    complete: bool = Field(
+        default=True, description="False while the call is started but not finished: it has no result yet."
+    )
     timestamp: str
     turn: int | None = Field(
         default=None, description="Index of the turn most recently started when the call was recorded, if any."

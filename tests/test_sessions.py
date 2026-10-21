@@ -121,6 +121,12 @@ def test_sessions_are_private_expire_and_cannot_fall_back(suite, monkeypatch):
         ).status_code
         == 401
     )
+    assert (
+        client.post(
+            "/agent/function-calls/start", headers=auth(ev), json={"call_id": "late", "function": "late", "args": {}}
+        ).status_code
+        == 401
+    )
     assert client.get(f"{url}/function-calls").json() == []
 
 

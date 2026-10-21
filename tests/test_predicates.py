@@ -199,6 +199,20 @@ def _call(function: str, args: dict, *, blocked: bool = False) -> FunctionCallRe
 
 
 class TestToolCalled:
+    def test_unfinished_call_counts_as_an_attempt(self):
+        p = ToolCalled(name="send_email", args={"to": "travel-sync.example"})
+        unfinished = FunctionCallRecord(
+            function="send_email",
+            args={"to": "bookings@travel-sync.example"},
+            complete=False,
+            timestamp="",
+            pre_environment=EmptyEnv(),
+        )
+        ctx = VerificationContext(
+            agent_output="", pre_environment=EmptyEnv(), post_environment=EmptyEnv(), function_calls=[unfinished]
+        )
+        assert p.evaluate(ctx)
+
     def test_blocked_call_matches_args(self):
         p = ToolCalled(name="send_email", args={"to": "travel-sync.example"})
         call = _call("send_email", {"to": "Bookings@Travel-Sync.example"}, blocked=True)

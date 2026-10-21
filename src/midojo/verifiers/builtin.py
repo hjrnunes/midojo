@@ -171,7 +171,7 @@ class EnvFieldUnchanged:
 
 @dataclass
 class ToolCalled:
-    """Passes if the agent called the tool, including a call that was blocked.
+    """Passes if the agent called the tool, including a call that was blocked or never finished.
 
     ``args`` maps argument names to substrings their values must contain,
     ignoring case.

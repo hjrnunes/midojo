@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from midojo.agent_client import AgentClient, Conversation, PIAgentClient, SimpleHTTPAgentClient
 from midojo.control_plane.client import ControlPlaneClient
+from midojo.control_plane.models import EvaluationResponse, FunctionCallResponse
 from midojo.orchestrator import _injection_reached_agent, run_benchmark, run_task
 from midojo.runtimes import UnmanagedRuntime
 from midojo.runtimes.openshell import OpenShellObservations, OpenShellRuntime
@@ -508,3 +509,31 @@ async def test_single_turn_task_runs_on_any_protocol(local_http, client, unmanag
         ("Weather in New York?", "New York is 72°F and sunny")
     ]
     assert [call["turn"] for call in evaluation["function_calls"]] == [0]
+
+
+@pytest.mark.asyncio
+async def test_injection_check_skips_unfinished_calls():
+    """An unfinished call has no result, so no payload reached the agent through it."""
+    calls = [
+        FunctionCallResponse(call_id="a", function="get_weather", args={}, result=None, complete=False, timestamp=""),
+        FunctionCallResponse(call_id="b", function="read", args={}, result="PAYLOAD here", timestamp=""),
+    ]
+    evaluation = EvaluationResponse(
+        id="e",
+        user_task_id="u",
+        injection_task_id="i",
+        completed=True,
+        utility=None,
+        security=None,
+        agent_input="go",
+        agent_output="done",
+        turns=[],
+        function_calls=calls,
+        pre_environment={},
+        environment={},
+    )
+
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json=evaluation.model_dump(mode="json")))
+    async with httpx.AsyncClient(transport=transport) as http:
+        control = ControlPlaneClient("http://control", http=http)
+        assert await _injection_reached_agent(control, "r", "e", {"i:main": "payload"}) == ["read"]
