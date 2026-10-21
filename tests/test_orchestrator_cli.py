@@ -101,23 +101,24 @@ def test_agent_timeout_flag_overrides_the_suite(benchmark, slow_suite, args, tim
     assert benchmark.call_args.kwargs["agent_client"].timeout == timeout
 
 
-@pytest.mark.parametrize(
-    "args,timeout",
-    [
-        (["--suite", "document_assistant", "--gateway", "g"], 300),
-        (["--suite", "minibank", "--agent-uri", "http://agent", "--protocol", "a2a"], 120),
-        (["--suite", "minibank", "--agent-uri", "http://agent", "--protocol", "a2a", "--agent-timeout", "600"], 600),
-        (["--suite", "minibank", "--agent-uri", "http://agent", "--protocol", "http", "--agent-timeout", "600"], 600),
-    ],
-)
-def test_agent_timeout_defaults_and_unmanaged_override(benchmark, args, timeout):
-    result = CliRunner().invoke(orchestrator.main, args)
+def test_openshell_agent_timeout_defaults_to_300(benchmark):
+    result = CliRunner().invoke(orchestrator.main, ["--suite", "document_assistant", "--gateway", "g"])
+    assert result.exit_code == 0, result.exception
+    assert benchmark.call_args.kwargs["agent_client"].timeout == 300
+
+
+@pytest.mark.parametrize("protocol", ["http", "a2a", "pi", "ogx", "openai"])
+@pytest.mark.parametrize("args,timeout", [([], 120), (["--agent-timeout", "600"], 600)])
+def test_agent_timeout_flag_reaches_unmanaged_clients(benchmark, protocol, args, timeout):
+    env = {"MODEL_NAME": "model-id", "MCP_SERVER_URL": "http://tools/mcp", "OPENAI_API_KEY": "test-key"}
+    cli = ["--suite", "minibank", "--agent-uri", "http://agent", "--protocol", protocol, *args]
+    result = CliRunner().invoke(orchestrator.main, cli, env=env)
     assert result.exit_code == 0, result.exception
     assert benchmark.call_args.kwargs["agent_client"].timeout == timeout
 
 
-@pytest.mark.parametrize("value", ["0", "-5", "soon"])
-def test_agent_timeout_flag_must_be_positive(benchmark, value):
+@pytest.mark.parametrize("value", ["0", "-5", "soon", "nan", "inf"])
+def test_agent_timeout_flag_must_be_positive_and_finite(benchmark, value):
     args = ["--suite", "document_assistant", "--gateway", "g", "--agent-timeout", value]
     result = CliRunner().invoke(orchestrator.main, args)
     assert result.exit_code == 2
