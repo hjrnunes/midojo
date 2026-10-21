@@ -213,7 +213,7 @@ MiDojo can test malicious prompts, poisoned data, and tampered tool responses. C
 | An agent using MCP tools | [The weather suite's fake MCP server](suites/weather/sandbox_pi/fake_mcp.py): put a MiDojo server in place of one of the agent's MCP servers. |
 | A PI agent | [The weather suite's example agent](suites/weather/README.md#the-example-agent): modify tool results, record actions, or block calls. |
 
-A suite's `agent_runtime` chooses **OpenShell** (a sandbox per evaluation) or **unmanaged** (experimental; connect to an agent outside MiDojo's sandbox lifecycle). The [session-forwarding example](suites/minibank/a2a_agent/agent.py) shows how to connect an external agent.
+A suite's `agent_runtime` chooses **OpenShell** (a sandbox per evaluation) or **unmanaged** (experimental; connect to an agent outside MiDojo's sandbox lifecycle). On OpenShell, MiDojo runs the suite's `agent_command` in the sandbox with the user's message as its last argument, and takes the command's output as the reply; each run has up to 5 minutes. The [session-forwarding example](suites/minibank/a2a_agent/agent.py) shows how to connect an external agent.
 
 ### Write a suite
 
@@ -231,6 +231,8 @@ user_tasks:
       output_contains: "meeting"
 ```
 
-Output checks read the last reply, and a verifier can read the whole conversation in `VerificationContext.turns` (each message and its reply). The evaluation record lists each turn's message and reply, and each recorded tool call names the turn it happened in. Only `--protocol openai` supports more than one turn for now; with other protocols or the openshell runtime, `midojo-run` refuses a multi-turn task before the run starts.
+Output checks read the last reply, and a verifier can read the whole conversation in `VerificationContext.turns` (each message and its reply). The evaluation record lists each turn's message and reply, and each recorded tool call names the turn it happened in. `--protocol openai` and the openshell runtime support more than one turn; with other protocols, `midojo-run` refuses a multi-turn task before the run starts.
+
+On the openshell runtime, a multi-turn task runs the suite's `agent_command` once per turn, in the evaluation's one sandbox, with that turn's message as the last argument. The command keeps its own conversation between runs, for example a response ID or message history in a file. MiDojo tells it which turn it is in `MIDOJO_TURN_INDEX` (from 0) and `MIDOJO_TURN_COUNT`; a single-turn task runs the command as before, without them. Keep state files outside `/sandbox/workdir`, or they show up in the workdir observations as created files. The 5-minute timeout applies to each run, not to the whole conversation.
 
 Licensed under [Apache 2.0](LICENSE).
