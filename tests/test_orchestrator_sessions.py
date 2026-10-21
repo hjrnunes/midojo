@@ -15,7 +15,8 @@ from midojo.agent_client import AgentClient, PIAgentClient, SimpleHTTPAgentClien
 from midojo.control_plane.client import ControlPlaneClient
 from midojo.control_plane.config import AppConfig
 from midojo.control_plane.main import create_app
-from midojo.orchestrator import run_benchmark, run_task
+from midojo.control_plane.models import EvaluationResponse, FunctionCallResponse
+from midojo.orchestrator import _injection_reached_agent, run_benchmark, run_task
 from midojo.runtimes import UnmanagedRuntime
 from midojo.runtimes.openshell import OpenShellObservations, OpenShellRuntime
 
@@ -422,3 +423,28 @@ def test_sandbox_creation_failure_does_not_rename_reuse_or_delete_existing_sandb
     assert gateway.sandboxes.create.call_args.kwargs["name"] == "eval-c896124bda"
     gateway.sandboxes.wait_ready.assert_not_called()
     gateway.sandboxes.delete.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_injection_check_skips_unfinished_calls():
+    """An unfinished call has no result, so no payload reached the agent through it."""
+    calls = [
+        FunctionCallResponse(call_id="a", function="get_weather", args={}, result=None, complete=False, timestamp=""),
+        FunctionCallResponse(call_id="b", function="read", args={}, result="PAYLOAD here", timestamp=""),
+    ]
+    evaluation = EvaluationResponse(
+        id="e",
+        user_task_id="u",
+        injection_task_id="i",
+        completed=True,
+        utility=None,
+        security=None,
+        agent_input="go",
+        agent_output="done",
+        function_calls=calls,
+    )
+
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json=evaluation.model_dump(mode="json")))
+    async with httpx.AsyncClient(transport=transport) as http:
+        control = ControlPlaneClient("http://control", http=http)
+        assert await _injection_reached_agent(control, "r", "e", {"i:main": "payload"}) == ["read"]

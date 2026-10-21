@@ -57,10 +57,12 @@ class MidojoMCP:
     The ``ctx: ToolContext`` first parameter is injected by the SDK and
     stripped from the MCP tool schema exposed to agents.
 
-    The SDK attempts to record each call, with a fresh UUID ``call_id``: an MCP
-    request ID only numbers the requests of one connection, so it isn't unique
-    per evaluation. Resends create at most one record per ``call_id``; a record
-    that never reaches the control plane is still missing.
+    The SDK records each call's start before the tool runs and its finish
+    after, with a fresh UUID ``call_id``: an MCP request ID only numbers the
+    requests of one connection, so it isn't unique per evaluation. Resends
+    create at most one record per ``call_id``. When the start fails the tool
+    doesn't run; when the finish never reaches the control plane, the call
+    stays there as unfinished.
     """
 
     def __init__(
@@ -91,22 +93,19 @@ class MidojoMCP:
                 token = session_token(incoming)
                 agent = AgentControlPlaneClient(self._control_plane_url, token, http=self._http)
                 ctx = ToolContext(agent, self._upstream.call_tool if self._upstream else None)
-                result: str = ""
-                error: str | None = None
+                call_id = str(uuid.uuid4())
+                await agent.start_function_call(function=fn.__name__, args=kwargs, call_id=call_id)
+                # Finish the call when the tool returns or raises. A cancelled
+                # tool (or any other BaseException) gave the agent no result,
+                # so the call stays unfinished.
                 try:
                     result = await fn(ctx, **kwargs)
                 except Exception as e:
-                    error = str(e)
-                    result = error
-                    raise
-                finally:
                     await agent.record_function_call(
-                        function=fn.__name__,
-                        args=kwargs,
-                        result=result,
-                        error=error,
-                        call_id=str(uuid.uuid4()),
+                        function=fn.__name__, args=kwargs, result=str(e), error=str(e), call_id=call_id
                     )
+                    raise
+                await agent.record_function_call(function=fn.__name__, args=kwargs, result=result, call_id=call_id)
                 return result
 
             setattr(wrapper, "__signature__", user_sig)

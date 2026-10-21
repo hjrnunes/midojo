@@ -53,7 +53,7 @@ export const BLOCKED_REASON = "Tool execution was blocked";
 /** The longest `call_id` the control plane accepts. */
 export const CALL_ID_MAX_LENGTH = 256;
 
-/** How many times a function-call record is sent before its error is thrown. */
+/** How many times a function-call record, or a call's start, is sent before its error is thrown. */
 export const RECORD_ATTEMPTS = 3;
 
 /** The wait before the first resend of a record, doubled before each later one. */
@@ -148,13 +148,29 @@ export class ControlPlaneClient {
 	}
 
 	/**
-	 * Record a call, at most once per `callId` (a UUID when not given). A lost
-	 * request or a 5xx is resent with the same `call_id`, up to
+	 * Record a call's start: an unfinished record that `recordFunctionCall`
+	 * finishes. Send it before the tool runs, then finish the call with the
+	 * same `callId`, `function` and `args`. If the finish never arrives, the
+	 * call stays on the control plane as unfinished. Resent like
+	 * `recordFunctionCall`; a resent start doesn't record the call twice.
+	 */
+	async startFunctionCall(entry: { function: string; args: Record<string, unknown>; callId: string }): Promise<void> {
+		await this.postRecord("/function-calls/start", {
+			call_id: entry.callId,
+			function: entry.function,
+			args: entry.args,
+		});
+	}
+
+	/**
+	 * Record a call, at most once per `callId` (a UUID when not given). When
+	 * `callId` was started with `startFunctionCall`, this finishes that record.
+	 * A lost request or a 5xx is resent with the same `call_id`, up to
 	 * `RECORD_ATTEMPTS` sends in all, so resending a record that reached the
 	 * control plane doesn't record it twice. This is at most one record per
-	 * `call_id`, not exactly-once: a record whose sends all fail is missing.
-	 * A 4xx, including a 409 for a `call_id` recorded with another body, is
-	 * thrown at once.
+	 * `call_id`, not exactly-once: a record whose sends all fail is missing, or
+	 * left unfinished when it was started. A 4xx, including a 409 for a
+	 * `call_id` recorded with another body, is thrown at once.
 	 */
 	async recordFunctionCall(entry: {
 		function: string;
@@ -165,10 +181,14 @@ export class ControlPlaneClient {
 		callId?: string;
 	}): Promise<void> {
 		const { callId, ...fields } = entry;
-		const body = { call_id: callId ?? randomUUID(), ...fields };
+		await this.postRecord("/function-calls", { call_id: callId ?? randomUUID(), ...fields });
+	}
+
+	/** POST `body`, resending it after a lost request or a 5xx, and throwing a 4xx at once. */
+	private async postRecord(path: string, body: unknown): Promise<void> {
 		for (let attempt = 1; ; attempt++) {
 			try {
-				await this.request("/function-calls", "POST", body);
+				await this.request(path, "POST", body);
 				return;
 			} catch (e) {
 				if (attempt >= RECORD_ATTEMPTS || !(e instanceof ControlPlaneError && e.retryable)) throw e;
@@ -197,6 +217,18 @@ export function createMidojoExtension(config: MidojoExtensionConfig): (pi: Exten
 		const client = new ControlPlaneClient(config.controlPlaneUrl);
 		const callIds = new CallIds("pi");
 
+		// Hooked and reported calls, started on tool_call and keyed by PI's tool
+		// call ID, until tool_result finishes them with the same call_id and args.
+		// A tool_result with no started call (one whose tool_call this extension
+		// never saw) is recorded once, with a call_id of its own.
+		const started = new Map<string, { callId: string; args: Record<string, unknown> }>();
+		const finishing = (toolCallId: string | undefined, args: Record<string, unknown>) => {
+			const call = toolCallId === undefined ? undefined : started.get(toolCallId);
+			if (call === undefined) return { callId: callIds.forCall(toolCallId), args };
+			started.delete(toolCallId as string);
+			return call;
+		};
+
 		for (const toolDef of config.tools ?? []) {
 			pi.registerTool({
 				name: toolDef.name,
@@ -206,6 +238,8 @@ export function createMidojoExtension(config: MidojoExtensionConfig): (pi: Exten
 				async execute(toolCallId, params) {
 					const typedParams = params as Record<string, unknown>;
 					const ctx = client.createToolContext();
+					const callId = callIds.forCall(toolCallId);
+					await client.startFunctionCall({ function: toolDef.name, args: typedParams, callId });
 
 					let result: string;
 					let error: string | null = null;
@@ -216,13 +250,7 @@ export function createMidojoExtension(config: MidojoExtensionConfig): (pi: Exten
 						result = error;
 					}
 
-					await client.recordFunctionCall({
-						function: toolDef.name,
-						args: typedParams,
-						result,
-						error,
-						callId: callIds.forCall(toolCallId),
-					});
+					await client.recordFunctionCall({ function: toolDef.name, args: typedParams, result, error, callId });
 
 					return {
 						content: [{ type: "text" as const, text: result }],
@@ -253,10 +281,9 @@ export function createMidojoExtension(config: MidojoExtensionConfig): (pi: Exten
 
 				await client.recordFunctionCall({
 					function: hook.toolName,
-					args: event.input,
 					result,
 					error,
-					callId: callIds.forCall(event.toolCallId),
+					...finishing(event.toolCallId, event.input),
 				});
 
 				return {
@@ -281,13 +308,39 @@ export function createMidojoExtension(config: MidojoExtensionConfig): (pi: Exten
 
 				await client.recordFunctionCall({
 					function: reportToolName,
-					args: event.input,
 					result,
 					error: null,
-					callId: callIds.forCall(event.toolCallId),
+					...finishing(event.toolCallId, event.input),
 				});
 				// No return value: leave the tool result untouched so the agent
 				// sees the real output — this observes, it does not mutate.
+			});
+		}
+
+		// Start each hooked or reported call before the tool runs, so a call
+		// whose tool_result never records stays visible as unfinished. If the
+		// start still fails after its resends, the error blocks the call, so the
+		// tool doesn't run unrecorded. A call without a tool call ID isn't
+		// started, since tool_result couldn't find the start: it runs and its
+		// tool_result records it once, as before starts existed. A blocked tool
+		// never runs, so it isn't started either: the handler below records it once.
+		const blockedTools = new Set(config.blockTools ?? []);
+		const startedTools = new Set(
+			[...hookedTools, ...(config.reportTools ?? [])].filter((name) => !blockedTools.has(name)),
+		);
+		if (startedTools.size > 0) {
+			pi.on("tool_call", async (event) => {
+				if (!startedTools.has(event.toolName)) return;
+				if (!event.toolCallId) return;
+
+				const call = { callId: callIds.forCall(event.toolCallId), args: event.input as Record<string, unknown> };
+				started.set(event.toolCallId, call);
+				try {
+					await client.startFunctionCall({ function: event.toolName, ...call });
+				} catch (e) {
+					started.delete(event.toolCallId);
+					throw e;
+				}
 			});
 		}
 
@@ -295,7 +348,6 @@ export function createMidojoExtension(config: MidojoExtensionConfig): (pi: Exten
 		// tool_result for a blocked call, so the hooks and reporters above never
 		// see it. If recording still fails after its resends, the error blocks
 		// the call too, so a missing record doesn't mean the call wasn't tried.
-		const blockedTools = new Set(config.blockTools ?? []);
 		if (blockedTools.size > 0) {
 			pi.on("tool_call", async (event) => {
 				if (!blockedTools.has(event.toolName)) return;

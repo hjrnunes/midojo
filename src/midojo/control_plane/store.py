@@ -39,7 +39,7 @@ from pydantic import BaseModel
 
 from midojo.types import Environment, FunctionCallRecord, SuiteName
 
-from .models import CreateFunctionCallRecord, FunctionCallBody
+from .models import CreateFunctionCallRecord, CreateFunctionCallStart, FunctionCallBody, FunctionCallStart
 from .state import Evaluation, Run
 
 
@@ -74,9 +74,14 @@ class Store(Protocol):
 
     # --- per-evaluation mutations (ID-based) ---
     # Each returns None if (run_id, eval_id) is unknown, else the mutated
-    # evaluation, except append_function_call: it returns (record, created),
-    # with created False when req replays a stored call_id with the same body,
-    # and raises FunctionCallConflictError when the call_id has another body.
+    # evaluation, except start_function_call and append_function_call: they
+    # return (record, created), with created False when req replays a stored
+    # call_id, and raise FunctionCallConflictError when the call_id is stored
+    # with another body. append_function_call finishes an unfinished record
+    # with req's call_id in place (created True) instead of appending.
+    def start_function_call(
+        self, run_id: str, eval_id: str, req: CreateFunctionCallStart
+    ) -> tuple[FunctionCallRecord, bool] | None: ...
     def append_function_call(
         self, run_id: str, eval_id: str, req: CreateFunctionCallRecord
     ) -> tuple[FunctionCallRecord, bool] | None: ...
@@ -97,17 +102,23 @@ class FunctionCallConflictError(ValueError):
 
 
 _BODY_FIELDS = set(FunctionCallBody.model_fields)
+_START_FIELDS = set(FunctionCallStart.model_fields)
 
 
-def _canonical_body(call: FunctionCallBody | FunctionCallRecord) -> str:
+def _canonical_body(call: FunctionCallStart | FunctionCallRecord, fields: set[str] = _BODY_FIELDS) -> str:
     """A call's body as canonical JSON, so a replay must match it type for type.
 
     Plain ``==`` would let ``true`` match ``1``. JSON keeps them apart, and ``1``
     and ``1.0`` too: they're different bodies. Object keys are sorted, so their
     order doesn't matter, and an omitted field and its explicit default are the
-    same body because the model has filled in the default by now.
+    same body because the model has filled in the default by now. ``fields``
+    picks the fields compared: the whole body, or a start's function and args.
     """
-    return json.dumps(call.model_dump(mode="json", include=_BODY_FIELDS), sort_keys=True, separators=(",", ":"))
+    return json.dumps(call.model_dump(mode="json", include=fields), sort_keys=True, separators=(",", ":"))
+
+
+def _find_call(evaluation: Evaluation, call_id: str) -> FunctionCallRecord | None:
+    return next((call for call in evaluation.function_calls if call.call_id == call_id), None)
 
 
 def _token_hash(token: str) -> str:
@@ -214,6 +225,33 @@ class InMemoryStore:
 
     # --- per-evaluation mutations ---
 
+    def start_function_call(
+        self, run_id: str, eval_id: str, req: CreateFunctionCallStart
+    ) -> tuple[FunctionCallRecord, bool] | None:
+        evaluation = self.get_evaluation(run_id, eval_id)
+        if evaluation is None:
+            return None
+        # A start replays any record with its call_id, finished or not, when
+        # the function and args match. As in append_function_call, the lookup
+        # and the append run without an await between them.
+        existing = _find_call(evaluation, req.call_id)
+        if existing is not None:
+            if _canonical_body(existing, _START_FIELDS) != _canonical_body(req, _START_FIELDS):
+                raise FunctionCallConflictError(
+                    f"call_id {req.call_id!r} is already recorded with another function or args"
+                )
+            return existing, False
+        # The pre-env is the live environment when the call starts; the finish
+        # adds the post-env.
+        record = FunctionCallRecord(
+            **req.model_dump(),
+            complete=False,
+            timestamp=datetime.now(UTC).isoformat(),
+            pre_environment=evaluation.environment.model_copy(deep=True),
+        )
+        evaluation.function_calls.append(record)
+        return record, True
+
     def append_function_call(
         self, run_id: str, eval_id: str, req: CreateFunctionCallRecord
     ) -> tuple[FunctionCallRecord, bool] | None:
@@ -222,20 +260,33 @@ class InMemoryStore:
             return None
         # At most one record per call_id. The lookup and the append below run
         # without an await between them, so a concurrent retry can't slip in.
-        if req.call_id is not None:
-            for existing in evaluation.function_calls:
-                if existing.call_id != req.call_id:
-                    continue
-                if _canonical_body(existing) != _canonical_body(req):
-                    raise FunctionCallConflictError(f"call_id {req.call_id!r} is already recorded with another body")
-                return existing, False
+        existing = _find_call(evaluation, req.call_id) if req.call_id is not None else None
+        if existing is not None and existing.complete:
+            if _canonical_body(existing) != _canonical_body(req):
+                raise FunctionCallConflictError(f"call_id {req.call_id!r} is already recorded with another body")
+            return existing, False
+        if existing is not None:
+            # Finish a started call in place, so the record keeps its place in start order.
+            if _canonical_body(existing, _START_FIELDS) != _canonical_body(req, _START_FIELDS):
+                raise FunctionCallConflictError(f"call_id {req.call_id!r} was started with another function or args")
+            existing.result = req.result
+            existing.error = req.error
+            existing.blocked = req.blocked
+            existing.complete = True
+            existing.post_environment = evaluation.environment.model_copy(deep=True)
+            return existing, True
         # Each call's pre-env is the previous call's post-env, chaining from the
         # eval's initial environment; post-env is a deep copy so later mutations
-        # don't retroactively change the recorded snapshot.
-        if evaluation.function_calls:
-            pre_env = evaluation.function_calls[-1].post_environment
-        else:
+        # don't retroactively change the recorded snapshot. An unfinished
+        # previous call has no post-env, and changes made since its start may be
+        # its own, so the pre-env is the live environment: this call's record
+        # then shows only what changed while it was being recorded.
+        if not evaluation.function_calls:
             pre_env = evaluation.pre_environment
+        elif (previous_post := evaluation.function_calls[-1].post_environment) is not None:
+            pre_env = previous_post
+        else:
+            pre_env = evaluation.environment.model_copy(deep=True)
         record = FunctionCallRecord(
             **req.model_dump(exclude={"call_id"}),
             call_id=req.call_id or str(uuid.uuid4()),

@@ -13,7 +13,7 @@ CALL_ID_MAX_LENGTH = 256
 """The longest ``call_id`` the control plane accepts."""
 
 RECORD_ATTEMPTS = 3
-"""How many times a function-call record is sent before its error is raised."""
+"""How many times a function-call record, or a call's start, is sent before its error is raised."""
 
 RECORD_BACKOFF_SECONDS = 0.1
 """The wait before the first resend of a record, doubled before each later one."""
@@ -67,6 +67,16 @@ class AgentControlPlaneClient:
         response = await self._http.put(f"{self._base_url}/agent/environment", json=environment, headers=self._headers)
         response.raise_for_status()
 
+    async def start_function_call(self, *, function: str, args: dict, call_id: str) -> None:
+        """Record a call's start: an unfinished record that ``record_function_call`` finishes.
+
+        Send it before the tool runs, then finish the call with the same
+        ``call_id``, ``function`` and ``args``. If the finish never arrives,
+        the call stays on the control plane as unfinished. Resent like
+        ``record_function_call``; a resent start doesn't record the call twice.
+        """
+        await self._post_record("/agent/function-calls/start", {"call_id": call_id, "function": function, "args": args})
+
     async def record_function_call(
         self,
         *,
@@ -79,12 +89,14 @@ class AgentControlPlaneClient:
     ) -> None:
         """Record a call, at most once per ``call_id`` (a UUID when not given).
 
-        A transport error or 5xx response is retried with the same ``call_id``,
-        up to ``RECORD_ATTEMPTS`` sends in all, so resending a record that
-        reached the control plane doesn't record it twice. This is at most one
-        record per ``call_id``, not exactly-once: a record whose sends all fail
-        is missing. A 4xx, including a 409 for a ``call_id`` recorded with
-        another body, is raised at once.
+        When ``call_id`` was started with ``start_function_call``, this
+        finishes that record. A transport error or 5xx response is retried
+        with the same ``call_id``, up to ``RECORD_ATTEMPTS`` sends in all, so
+        resending a record that reached the control plane doesn't record it
+        twice. This is at most one record per ``call_id``, not exactly-once: a
+        record whose sends all fail is missing, or left unfinished when it was
+        started. A 4xx, including a 409 for a ``call_id`` recorded with another
+        body, is raised at once.
         """
         body = {
             "call_id": call_id or str(uuid.uuid4()),
@@ -94,11 +106,13 @@ class AgentControlPlaneClient:
             "error": error,
             "blocked": blocked,
         }
+        await self._post_record("/agent/function-calls", body)
+
+    async def _post_record(self, path: str, body: dict[str, Any]) -> None:
+        """POST ``body``, resending it after a transport error or 5xx, and raising a 4xx at once."""
         for attempt in range(1, RECORD_ATTEMPTS + 1):
             try:
-                response = await self._http.post(
-                    f"{self._base_url}/agent/function-calls", headers=self._headers, json=body
-                )
+                response = await self._http.post(f"{self._base_url}{path}", headers=self._headers, json=body)
             except httpx.TransportError:
                 if attempt == RECORD_ATTEMPTS:
                     raise

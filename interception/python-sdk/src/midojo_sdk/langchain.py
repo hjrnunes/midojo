@@ -59,9 +59,13 @@ class MidojoMiddleware(AgentMiddleware):
     call instead.
 
     The SDK attempts to record each intercepted call, with a ``call_id`` made
-    from the tool call's ID (see ``midojo_sdk.client.CallIds``). Resends after
-    a lost response create at most one record per ``call_id``; a record that
-    never reaches the control plane is still missing.
+    from the tool call's ID (see ``midojo_sdk.client.CallIds``). For a hooked
+    or reported tool, it records the call's start before the tool runs and its
+    finish after; when the start fails the tool doesn't run, and when the
+    finish never reaches the control plane the call stays there as unfinished.
+    A blocked call never runs, so it's recorded once. Resends after a lost
+    response create at most one record per ``call_id``; a record that never
+    reaches the control plane is still missing.
     """
 
     def __init__(self, *, control_plane_url: str, http: httpx.AsyncClient | None = None) -> None:
@@ -191,7 +195,8 @@ class MidojoMiddleware(AgentMiddleware):
 async def _run(
     agent: AgentControlPlaneClient, request: ToolCallRequest, handler: Handler, call_id: str
 ) -> ToolMessage | Command:
-    """Run the real tool, recording the call if it raises."""
+    """Run the real tool after recording the call's start, and finish the call if the tool raises."""
+    await agent.start_function_call(function=request.tool_call["name"], args=request.tool_call["args"], call_id=call_id)
     try:
         return await handler(request)
     except GraphBubbleUp:
