@@ -103,3 +103,19 @@ def test_multiturn_task_exits_before_creating_a_run(monkeypatch, suite_name, tas
     assert f"User task '{task_id}' has 2 turns" in result.output
     assert via in result.output
     create_run.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "args,env,expected",
+    [
+        (["--control-token", "cli-token"], {"MIDOJO_CONTROL_TOKEN": "env-token"}, "cli-token"),
+        ([], {"MIDOJO_CONTROL_TOKEN": "env-token"}, "env-token"),
+        ([], {}, None),
+    ],
+)
+def test_cli_passes_the_control_token_to_the_benchmark(benchmark, monkeypatch, args, env, expected):
+    monkeypatch.delenv("MIDOJO_CONTROL_TOKEN", raising=False)
+    args = ["--suite", "minibank", "--agent-uri", "http://agent", "--protocol", "http", *args]
+    result = CliRunner().invoke(orchestrator.main, args, env=env)
+    assert result.exit_code == 0, result.exception
+    assert benchmark.call_args.kwargs["control_token"] == expected
