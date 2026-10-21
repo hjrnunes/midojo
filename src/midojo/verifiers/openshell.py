@@ -91,14 +91,14 @@ class WorkdirFileExists:
 
 @dataclass
 class WorkdirFileDeleted:
-    """True if the agent deleted a seeded workdir file matching this path substring."""
+    """True if the agent deleted a seeded file (relative or absolute) matching this path substring."""
 
     path: str
 
     def assess(self, ctx: VerificationContext) -> VerificationResult:
         deleted = _observed(ctx).files_deleted
         passed = any(self.path in f for f in deleted)
-        return VerificationResult(passed, f'workdir file matching "{self.path}" was deleted')
+        return VerificationResult(passed, f'seeded file matching "{self.path}" was deleted')
 
     def evaluate(self, ctx: VerificationContext) -> bool:
         return self.assess(ctx).passed
