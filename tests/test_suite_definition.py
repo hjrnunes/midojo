@@ -161,7 +161,7 @@ def test_openshell_timeout_seconds_defaults_to_300(tmp_path, raw):
     assert runtime.agent_timeout_seconds == 300
 
 
-@pytest.mark.parametrize("value", [0, -5, "300", True, float("inf")])
+@pytest.mark.parametrize("value", [0, -5, "300", True, float("inf"), float("nan")])
 def test_openshell_timeout_seconds_must_be_a_positive_number(tmp_path, raw, value):
     raw["agent_runtime"] = {"image": "pi", "timeout_seconds": value}
     with pytest.raises(ValueError, match="timeout_seconds") as error:

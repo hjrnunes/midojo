@@ -217,7 +217,7 @@ MiDojo can test malicious prompts, poisoned data, and tampered tool responses. C
 
 A suite's `agent_runtime` chooses **OpenShell** (a sandbox per evaluation) or **unmanaged** (experimental; connect to an agent outside MiDojo's sandbox lifecycle). The [session-forwarding example](suites/minibank/a2a_agent/agent.py) shows how to connect an external agent.
 
-An OpenShell agent gets 300 seconds per evaluation to finish. If sandbox startup, the model, and several turns take longer, raise the limit in the suite with `timeout_seconds` (any positive number of seconds):
+In each evaluation, the OpenShell agent command gets 300 seconds to run in its sandbox. The limit starts once the sandbox is ready and its files are seeded, so it covers the agent's model calls and tool turns, not sandbox startup. If your agent needs longer, raise the limit in the suite with `timeout_seconds` (any positive, finite number of seconds):
 
 ```yaml
 agent_runtime:
