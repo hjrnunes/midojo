@@ -61,14 +61,18 @@ class ControlPlaneClient:
 
     async def start_turn(self, run_id: str, eval_id: str, message: str) -> TurnResponse:
         response = await self._http.post(
-            f"{self._base_url}/runs/{run_id}/evaluations/{eval_id}/turns", json={"message": message}
+            f"{self._base_url}/runs/{run_id}/evaluations/{eval_id}/turns",
+            headers=self._headers,
+            json={"message": message},
         )
         response.raise_for_status()
         return TurnResponse.model_validate(response.json())
 
     async def record_turn_reply(self, run_id: str, eval_id: str, index: int, reply: str) -> TurnResponse:
         response = await self._http.post(
-            f"{self._base_url}/runs/{run_id}/evaluations/{eval_id}/turns/{index}/reply", json={"reply": reply}
+            f"{self._base_url}/runs/{run_id}/evaluations/{eval_id}/turns/{index}/reply",
+            headers=self._headers,
+            json={"reply": reply},
         )
         response.raise_for_status()
         return TurnResponse.model_validate(response.json())

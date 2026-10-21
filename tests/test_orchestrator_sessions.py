@@ -430,7 +430,8 @@ class ConversingAgent(AgentClient):
 
     supports_multiturn = True
 
-    def __init__(self):
+    def __init__(self, http):
+        self.http = http
         self.tokens = []
         self.messages = []
         self.closed = 0
@@ -450,13 +451,12 @@ class ReportingConversation(Conversation):
 
     async def send(self, message):
         self.agent.messages.append(message)
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                "http://control/agent/function-calls",
-                headers={"Authorization": f"Bearer {self.session_token}"},
-                json={"function": "get_weather", "args": {"city": "New York"}, "result": "72°F, sunny"},
-            )
-            response.raise_for_status()
+        response = await self.agent.http.post(
+            "http://control/agent/function-calls",
+            headers={"Authorization": f"Bearer {self.session_token}"},
+            json={"function": "get_weather", "args": {"city": "New York"}, "result": "72°F, sunny"},
+        )
+        response.raise_for_status()
         return f"reply {len(self.agent.messages)}: New York is 72°F and sunny"
 
     async def aclose(self):
@@ -475,7 +475,7 @@ async def test_benchmark_runs_each_turn_in_one_evaluation_and_session(
 ):
     turns = ["What is the weather in New York?", "Thanks. Is it sunny?"]
     monkeypatch.setattr(unmanaged_suite.user_tasks["weather_new_york"], "turns", turns)
-    agent = ConversingAgent()
+    agent = ConversingAgent(local_http)
     await run_benchmark(
         control_url="http://control",
         agent_client=agent,
@@ -486,6 +486,7 @@ async def test_benchmark_runs_each_turn_in_one_evaluation_and_session(
         user_task_ids=["weather_new_york"],
         injection_task_ids=[],
         logdir=tmp_path,
+        http=local_http,
     )
     assert agent.messages == turns
     assert len(agent.tokens) == 1
@@ -512,7 +513,7 @@ async def test_payload_only_in_a_later_turn_still_reaches_the_agent(
     monkeypatch.setattr(unmanaged_suite.user_tasks["weather_new_york"], "turns", turns)
     await run_benchmark(
         control_url="http://control",
-        agent_client=ConversingAgent(),
+        agent_client=ConversingAgent(local_http),
         agent_uri="http://agent",
         protocol="openai",
         suite=unmanaged_suite,
@@ -520,12 +521,13 @@ async def test_payload_only_in_a_later_turn_still_reaches_the_agent(
         user_task_ids=["weather_new_york"],
         injection_task_ids=["tornado_alert_via_prompt"],
         logdir=tmp_path,
+        http=local_http,
     )
     evaluation = _only_evaluation(client)
     payload = unmanaged_suite.get_probes_for_task("tornado_alert_via_prompt")["tornado_alert_via_prompt:main"]
     assert payload not in evaluation["agent_input"]
     run_id = client.app.state.store.list_runs()[0].id
-    async with ControlPlaneClient("http://control") as control:
+    async with ControlPlaneClient("http://control", http=local_http) as control:
         hits = await _injection_reached_agent(
             control, run_id, evaluation["id"], {"tornado_alert_via_prompt:main": payload}
         )
@@ -541,7 +543,7 @@ async def test_multiturn_task_is_refused_before_a_run_without_conversation_suppo
     local_http, client, unmanaged_suite, tmp_path, monkeypatch, protocol, via
 ):
     monkeypatch.setattr(unmanaged_suite.user_tasks["warmest_city"], "turns", ["Warmest city?", "And the coldest?"])
-    agent = ReportingAgent()
+    agent = ReportingAgent(local_http)
     with pytest.raises(click.UsageError) as error:
         await run_benchmark(
             control_url="http://control",
@@ -553,6 +555,7 @@ async def test_multiturn_task_is_refused_before_a_run_without_conversation_suppo
             user_task_ids=None,
             injection_task_ids=None,
             logdir=tmp_path,
+            http=local_http,
         )
     assert "'warmest_city' has 2 turns" in error.value.message
     assert via in error.value.message
@@ -564,7 +567,7 @@ async def test_multiturn_task_is_refused_before_a_run_without_conversation_suppo
 @pytest.mark.asyncio
 async def test_single_turn_task_runs_on_any_protocol(local_http, client, unmanaged_suite, tmp_path, monkeypatch):
     monkeypatch.setattr(unmanaged_suite.user_tasks["weather_new_york"], "turns", ["Weather in New York?"])
-    agent = ReportingAgent()
+    agent = ReportingAgent(local_http)
     await run_benchmark(
         control_url="http://control",
         agent_client=agent,
@@ -575,6 +578,7 @@ async def test_single_turn_task_runs_on_any_protocol(local_http, client, unmanag
         user_task_ids=["weather_new_york"],
         injection_task_ids=[],
         logdir=tmp_path,
+        http=local_http,
     )
     evaluation = _only_evaluation(client)
     assert [(t["message"], t["reply"]) for t in evaluation["turns"]] == [
