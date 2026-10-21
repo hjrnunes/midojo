@@ -10,6 +10,8 @@ agent runs, ``observe()`` collects runtime observations from outside the agent:
   * **workdir diff** — files created, modified and deleted against the seeded files.
   * **OCSF events** — kernel-audited network connections, processes (command
     line and exit code) and security findings.
+  * **what ran** — the image reference and a digest of the effective sandbox
+    policy (see ``_policy_digest``).
 
 The orchestrator records them as ``observations["openshell"]``, and the predicates
 in :mod:`midojo.verifiers.openshell` grade them.
@@ -36,6 +38,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import logging
 import re
 import time
@@ -45,7 +48,7 @@ from dataclasses import asdict
 from typing import Any
 
 import grpc
-from google.protobuf.json_format import ParseDict
+from google.protobuf.json_format import MessageToDict, ParseDict
 from google.protobuf.timestamp_pb2 import Timestamp
 from openshell import SandboxClient, WorkspaceClient
 from openshell._proto import datamodel_pb2, openshell_pb2
@@ -113,18 +116,39 @@ def _create_named_resource[T](prefix: str, identity: str, create: Callable[[str]
 
 
 def _resolve_policy(spec: dict | None, sandbox_spec: Any) -> None:
-    """Populate ``sandbox_spec.policy`` in-place. ``spec=None`` is a no-op.
+    """Populate ``sandbox_spec.policy`` in-place. ``spec=None`` or ``{}`` is a no-op.
+
+    An empty dict sets no ``SandboxPolicy`` field, so it is treated like ``None``:
+    the spec carries no policy and the image's built-in policy applies.
 
     Args:
-        spec: ``None`` (no-op — image built-in policy applies) or a camelCase
-              proto-JSON dict matching ``SandboxPolicy`` field names.
+        spec: ``None`` or ``{}`` (no-op — image built-in policy applies) or a
+              camelCase proto-JSON dict matching ``SandboxPolicy`` field names.
         sandbox_spec: A ``SandboxSpec`` proto message whose ``.policy`` field will
                       be populated in-place. ``SandboxPolicy`` is accessed via the
                       field directly — no direct import of its type needed.
     """
-    if spec is None:
+    if not spec:
         return
     ParseDict(spec, sandbox_spec.policy)
+
+
+# Recorded as ``policy_digest`` when the sandbox spec carries no policy, so the
+# image's built-in policy governs the sandbox and there is nothing to hash.
+BUILTIN_POLICY_DIGEST = "builtin"
+
+
+def _policy_digest(sandbox_spec: Any) -> str:
+    """Digest the effective policy of a ``SandboxSpec`` filled by ``_resolve_policy``.
+
+    The policy proto is canonicalised as proto JSON with sorted keys, so the same
+    policy digests the same however its suite YAML orders keys. A spec without a
+    policy yields ``BUILTIN_POLICY_DIGEST``.
+    """
+    if not sandbox_spec.HasField("policy"):
+        return BUILTIN_POLICY_DIGEST
+    canonical = json.dumps(MessageToDict(sandbox_spec.policy), sort_keys=True, separators=(",", ":"))
+    return f"sha256:{hashlib.sha256(canonical.encode()).hexdigest()}"
 
 
 def _rewrite_host_for_sandbox(url: str) -> str:
@@ -163,8 +187,9 @@ def _warn_if_control_plane_not_allowed(policy_spec: dict | None, url: str) -> No
 
     The endpoint checked is ``url`` with any ``localhost``/loopback host rewritten
     to ``host.openshell.internal`` (matching :func:`_rewrite_host_for_sandbox`)
-    and the port defaulted from the scheme when absent. ``policy_spec=None`` means
-    no midojo policy (the image built-in governs egress), which we cannot inspect.
+    and the port defaulted from the scheme when absent. ``policy_spec=None`` (or
+    ``{}``, see :func:`_resolve_policy`) means no midojo policy (the image built-in
+    governs egress), which we cannot inspect.
     """
     import logging
     from urllib.parse import urlsplit
@@ -176,7 +201,7 @@ def _warn_if_control_plane_not_allowed(policy_spec: dict | None, url: str) -> No
         host = _SANDBOX_HOST
     port = parts.port or (443 if parts.scheme == "https" else 80)
 
-    if policy_spec is None:
+    if not policy_spec:
         log.warning(
             "No sandbox network policy defined; cannot verify the agent can reach "
             "the control plane at %s:%d. If it cannot, the in-sandbox SDK will not "
@@ -249,6 +274,14 @@ class OpenShellObservations(BaseModel):
     # Sandbox-verified executables that made allowed or blocked network calls
     network_callers: list[str] = Field(default_factory=list)
     security_findings: list[str] = Field(default_factory=list)  # finding titles
+
+    # What ran. Optional so evaluations recorded before these fields still validate.
+    image: str | None = None  # the image reference the suite gave
+    # None with OpenShell 0.1.2, which reports no resolved image digest: the SDK's
+    # SandboxRef carries no image at all, and the Sandbox proto (spec and
+    # SandboxStatus) carries only the requested reference, SandboxTemplate.image.
+    image_digest: str | None = None
+    policy_digest: str | None = None  # "sha256:<hex>", or BUILTIN_POLICY_DIGEST
 
 
 register_observation_type(OBSERVATIONS_SOURCE, OpenShellObservations)
@@ -330,6 +363,7 @@ class OpenShellRuntime:
 
         # Per-evaluation sandbox state — set by setup(), cleared by teardown()
         self._ref: Any = None
+        self._policy_digest: str | None = None
         self._start_ms: int = 0
         self._cached_ocsf: OCSFEvents | None = None
 
@@ -422,6 +456,7 @@ class OpenShellRuntime:
             providers=self._providers,
         )
         _resolve_policy(self._policy_spec, spec)
+        self._policy_digest = _policy_digest(spec)
 
         labels = {
             **self._run_labels,
@@ -577,6 +612,8 @@ class OpenShellRuntime:
             network_calls_interrupted=ocsf.network_interrupted_endpoints,
             network_callers=ocsf.network_callers,
             security_findings=[f.title for f in ocsf.findings],
+            image=self._image,
+            policy_digest=self._policy_digest,
         )
         return {OBSERVATIONS_SOURCE: observed}
 
@@ -593,6 +630,7 @@ class OpenShellRuntime:
 
                 logging.getLogger(__name__).warning("Sandbox teardown failed: %s", exc)
         self._ref = None
+        self._policy_digest = None
         self._start_ms = 0
         self._cached_ocsf = None
 
