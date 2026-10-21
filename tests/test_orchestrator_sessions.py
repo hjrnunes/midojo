@@ -622,7 +622,7 @@ def openshell_suite(suite, gateway, client, monkeypatch):
     return fake
 
 
-async def _run_on_openshell(openshell_suite, tmp_path):
+async def _run_on_openshell(openshell_suite, tmp_path, http):
     await run_benchmark(
         control_url="http://control",
         agent_client=OpenShellAgentClient(openshell_suite.runtime),
@@ -633,6 +633,7 @@ async def _run_on_openshell(openshell_suite, tmp_path):
         user_task_ids=["weather_new_york"],
         injection_task_ids=[],
         logdir=tmp_path,
+        http=http,
     )
 
 
@@ -642,7 +643,7 @@ async def test_openshell_runs_the_agent_command_once_per_turn_in_one_sandbox(
 ):
     turns = ["What is the weather in New York?", "Thanks. Is it sunny?"]
     monkeypatch.setattr(openshell_suite.suite.user_tasks["weather_new_york"], "turns", turns)
-    await _run_on_openshell(openshell_suite, tmp_path)
+    await _run_on_openshell(openshell_suite, tmp_path, local_http)
     assert gateway.sandboxes.create.call_count == 1
     sandbox = gateway.sandboxes.create.call_args.kwargs["name"]
     assert [(name, command) for name, command, _ in openshell_suite.runs] == [
@@ -673,7 +674,7 @@ async def test_openshell_failed_second_turn_fails_the_evaluation_after_the_first
     monkeypatch.setattr(openshell_suite.suite.user_tasks["weather_new_york"], "turns", turns)
     openshell_suite.failing_run = 2
     with pytest.raises(RuntimeError, match="exited with code 1 on turn 2/2: model unreachable"):
-        await _run_on_openshell(openshell_suite, tmp_path)
+        await _run_on_openshell(openshell_suite, tmp_path, local_http)
     evaluation = _only_evaluation(client)
     assert [(t["index"], t["reply"]) for t in evaluation["turns"]] == [
         (0, "reply 1: New York is 72°F and sunny"),
