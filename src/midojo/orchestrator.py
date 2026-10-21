@@ -412,6 +412,13 @@ async def run_benchmark(
     envvar="MODEL_NAME",
     help="Model ID. Required for ogx/openai; env: MODEL_NAME.",
 )
+@click.option(
+    "--agent-timeout",
+    type=click.FloatRange(min=0, min_open=True),
+    default=None,
+    help="Seconds the agent may take per evaluation. Overrides the suite's timeout_seconds for openshell suites "
+    "(default 300); for unmanaged agents, sets the client's timeout (default 120).",
+)
 def main(
     control_url: str,
     control_token: str | None,
@@ -427,12 +434,15 @@ def main(
     mcp_server_url: str | None,
     mcp_server_label: str | None,
     model_name: str | None,
+    agent_timeout: float | None,
 ) -> None:
     for module in modules_to_load:
         importlib.import_module(module)
 
     suite = get_suite(suite_name)
     agent_client: AgentClient
+    # Unmanaged clients keep their own default timeout unless --agent-timeout is given.
+    timeout = {} if agent_timeout is None else {"timeout": agent_timeout}
 
     if isinstance(suite.runtime, OpenShellRuntime):
         if agent_uri or protocol:
@@ -442,7 +452,7 @@ def main(
         if not gateway:
             raise click.UsageError(f"Suite {suite_name!r} runs its agent in OpenShell and requires --gateway.")
         suite.runtime.configure(cluster=gateway, control_url=control_url)
-        agent_client = OpenShellAgentClient(suite.runtime)
+        agent_client = OpenShellAgentClient(suite.runtime, timeout=agent_timeout)
         agent_uri, protocol = gateway, "openshell"
     elif gateway:
         raise click.UsageError(
@@ -451,9 +461,9 @@ def main(
     elif not agent_uri or not protocol:
         raise click.UsageError(f"Suite {suite_name!r} has an unmanaged agent and requires --agent-uri and --protocol.")
     elif protocol == "a2a":
-        agent_client = A2AAgentClient(agent_uri)
+        agent_client = A2AAgentClient(agent_uri, **timeout)
     elif protocol == "pi":
-        agent_client = PIAgentClient(agent_uri, control_url)
+        agent_client = PIAgentClient(agent_uri, control_url, **timeout)
     elif protocol in {"ogx", "openai"}:
         if not model_name:
             raise click.UsageError(f"--protocol {protocol} requires --model-name or MODEL_NAME.")
@@ -468,6 +478,7 @@ def main(
                 mcp_server_label=mcp_server_label or suite_name,
                 instructions=system_message,
                 shield_id=ogx_shield,
+                **timeout,
             )
         else:
             api_key = os.environ.get("OPENAI_API_KEY")
@@ -480,9 +491,10 @@ def main(
                 mcp_server_label=mcp_server_label or suite_name,
                 api_key=api_key,
                 instructions=system_message,
+                **timeout,
             )
     else:
-        agent_client = SimpleHTTPAgentClient(agent_uri)
+        agent_client = SimpleHTTPAgentClient(agent_uri, **timeout)
 
     asyncio.run(
         run_benchmark(

@@ -19,6 +19,16 @@ async def test_openshell_agent_failure_is_not_graded_as_empty_output():
         await client.send_task("task", session_token="session-a")
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timeout,expected", [(None, 900.0), (45.5, 45.5)])
+async def test_openshell_agent_timeout_defaults_to_the_runtime(timeout, expected):
+    runtime = MagicMock(agent_timeout_seconds=900.0)
+    runtime.exec_agent.return_value = MagicMock(exit_code=0, stdout="done\n", stderr="")
+    client = OpenShellAgentClient(runtime, timeout=timeout)
+    assert await client.send_task("task", session_token="session-a") == "done"
+    runtime.exec_agent.assert_called_once_with("task", timeout_seconds=expected)
+
+
 class TestOGXResponsesClient:
     """Tests for the OGX protocol client fixes (PR #93)."""
 

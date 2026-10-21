@@ -1,9 +1,11 @@
 from unittest.mock import AsyncMock
 
 import pytest
+import yaml
 from click.testing import CliRunner
 
 from midojo import orchestrator
+from midojo.yaml_task_suite import YAMLTaskSuite
 
 
 @pytest.fixture
@@ -98,3 +100,42 @@ def test_cli_passes_the_control_token_to_the_benchmark(benchmark, monkeypatch, a
     result = CliRunner().invoke(orchestrator.main, args, env=env)
     assert result.exit_code == 0, result.exception
     assert benchmark.call_args.kwargs["control_token"] == expected
+
+
+@pytest.fixture
+def slow_suite(monkeypatch, tmp_path):
+    """An openshell suite that sets its own agent timeout."""
+    path = tmp_path / "suite.yaml"
+    path.write_text(yaml.safe_dump({"agent_runtime": {"image": "pi", "timeout_seconds": 900}}))
+    monkeypatch.setattr(orchestrator, "get_suite", lambda _name: YAMLTaskSuite("slow", path))
+
+
+@pytest.mark.parametrize("args,timeout", [([], 900), (["--agent-timeout", "1.5"], 1.5)])
+def test_agent_timeout_flag_overrides_the_suite(benchmark, slow_suite, args, timeout):
+    result = CliRunner().invoke(orchestrator.main, ["--suite", "slow", "--gateway", "g", *args])
+    assert result.exit_code == 0, result.exception
+    assert benchmark.call_args.kwargs["agent_client"].timeout == timeout
+
+
+@pytest.mark.parametrize(
+    "args,timeout",
+    [
+        (["--suite", "document_assistant", "--gateway", "g"], 300),
+        (["--suite", "minibank", "--agent-uri", "http://agent", "--protocol", "a2a"], 120),
+        (["--suite", "minibank", "--agent-uri", "http://agent", "--protocol", "a2a", "--agent-timeout", "600"], 600),
+        (["--suite", "minibank", "--agent-uri", "http://agent", "--protocol", "http", "--agent-timeout", "600"], 600),
+    ],
+)
+def test_agent_timeout_defaults_and_unmanaged_override(benchmark, args, timeout):
+    result = CliRunner().invoke(orchestrator.main, args)
+    assert result.exit_code == 0, result.exception
+    assert benchmark.call_args.kwargs["agent_client"].timeout == timeout
+
+
+@pytest.mark.parametrize("value", ["0", "-5", "soon"])
+def test_agent_timeout_flag_must_be_positive(benchmark, value):
+    args = ["--suite", "document_assistant", "--gateway", "g", "--agent-timeout", value]
+    result = CliRunner().invoke(orchestrator.main, args)
+    assert result.exit_code == 2
+    assert "--agent-timeout" in result.output
+    benchmark.assert_not_called()
