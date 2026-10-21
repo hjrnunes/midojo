@@ -149,7 +149,7 @@ test("a start that fails throws, so PI blocks the call, and the tool doesn't run
 });
 
 for (const kind of ["hooks", "reportTools"]) {
-	test(`a ${kind} call without a tool call ID throws, so PI blocks it before the tool runs`, async () => {
+	test(`a ${kind} call without a tool call ID isn't started and is recorded once on tool_result`, async () => {
 		await withControlPlane({}, async (sent) => {
 			const config =
 				kind === "hooks"
@@ -157,9 +157,18 @@ for (const kind of ["hooks", "reportTools"]) {
 					: { reportTools: ["get_weather"] };
 			const { emit } = load(config);
 
-			await assert.rejects(emit("tool_call", { toolName: "get_weather", input }), /no tool call ID/);
-
+			const results = await emit("tool_call", { toolName: "get_weather", input });
+			assert.ok(results.every((result) => result === undefined));
 			assert.deepEqual(sent, []);
+
+			await emit("tool_result", { toolName: "get_weather", input, content });
+
+			assert.deepEqual(
+				sent.map(([path]) => path),
+				[FINISH],
+			);
+			assert.equal(sent[0][1].function, "get_weather");
+			assert.ok(sent[0][1].call_id);
 		});
 	});
 
