@@ -1,11 +1,19 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+from openshell import ExecResult, SandboxRef, SandboxStatusRef
 from openshell._proto import openshell_pb2
 
 import midojo.runtimes.openshell as openshell_runtime
 from midojo.runtimes import build_runtime
-from midojo.runtimes.openshell import OpenShellRuntime, _resolve_policy
+from midojo.runtimes.openshell import (
+    BUILTIN_POLICY_DIGEST,
+    OpenShellObservations,
+    OpenShellRuntime,
+    _policy_digest,
+    _resolve_policy,
+)
 from midojo.runtimes.openshell.logs import parse_ocsf_lines
 from midojo.suite_definition import OpenShellRuntimeDefinition
 
@@ -46,11 +54,61 @@ class TestPolicy:
         _resolve_policy(None, spec)
         assert not spec.HasField("policy")
 
+    def test_empty_dict_is_noop(self):
+        # `policy: {}` sets no field, so it means no policy, as when it is omitted.
+        spec = openshell_pb2.SandboxSpec()
+        _resolve_policy({}, spec)
+        assert not spec.HasField("policy")
+
     def test_inline_dict_fills_policy(self):
         spec = openshell_pb2.SandboxSpec()
         inline = {"networkPolicies": {"allow_all": {"endpoints": [{"host": "api.example.com", "port": 443}]}}}
         _resolve_policy(inline, spec)
         assert spec.policy.network_policies["allow_all"].endpoints[0].host == "api.example.com"
+
+
+def _digest(policy: dict | None) -> str:
+    spec = openshell_pb2.SandboxSpec()
+    _resolve_policy(policy, spec)
+    return _policy_digest(spec)
+
+
+TWO_RULES = {
+    "networkPolicies": {
+        "api": {"endpoints": [{"host": "api.example.com", "port": 443}]},
+        "control": {"endpoints": [{"host": "host.openshell.internal", "port": 8090}]},
+    }
+}
+# The same policy, with every mapping's keys in reverse order.
+TWO_RULES_REORDERED = {
+    "networkPolicies": {
+        "control": {"endpoints": [{"port": 8090, "host": "host.openshell.internal"}]},
+        "api": {"endpoints": [{"port": 443, "host": "api.example.com"}]},
+    }
+}
+
+
+class TestPolicyDigest:
+    """The policy digest identifies the effective policy, not its YAML spelling."""
+
+    def test_is_a_sha256_of_the_policy(self):
+        assert _digest(POLICY).startswith("sha256:")
+        assert len(_digest(POLICY).removeprefix("sha256:")) == 64
+
+    def test_stable_across_key_order(self):
+        assert _digest(TWO_RULES) == _digest(TWO_RULES_REORDERED)
+
+    def test_changes_when_the_policy_changes(self):
+        changed = {"networkPolicies": {"api": {"endpoints": [{"host": "api.example.com", "port": 8443}]}}}
+        assert _digest(POLICY) != _digest(changed)
+        assert _digest(POLICY) != _digest(TWO_RULES)
+
+    def test_no_policy_is_the_builtin_marker(self):
+        assert _digest(None) == BUILTIN_POLICY_DIGEST == "builtin"
+
+    def test_empty_policy_is_the_builtin_marker(self):
+        # `policy: {}` sends no policy, so the image's built-in policy applies.
+        assert _digest({}) == BUILTIN_POLICY_DIGEST
 
 
 class _FakeSandboxClient:
@@ -60,17 +118,21 @@ class _FakeSandboxClient:
         self.exec_calls = []
         self.logs_requests = []
         self.specs = []
+        self.created_specs = self.specs
         self._stub = self
 
-    def create(self, *, spec, name, **kwargs):
+    def create(self, *, spec, name, workspace="midojo-shell-abc123", labels=None, **kwargs):
         self.specs.append(spec)
-        return SimpleNamespace(name=name)
+        return SandboxRef(
+            id="sb-1", name=name, workspace=workspace, status=SandboxStatusRef(phase=0, current_policy_version=0)
+        )
 
     def wait_ready(self, name, **kwargs):
         pass
 
     def exec(self, sandbox_name, command, **kwargs):
         self.exec_calls.append((sandbox_name, command, kwargs))
+        return ExecResult(exit_code=0, stdout="", stderr="")
 
     def GetSandboxLogs(self, request, timeout):  # noqa: N802 - mirrors the gRPC stub
         self.logs_requests.append(request)
@@ -152,3 +214,51 @@ class TestLogSync:
         allowed = "NET:OPEN [INFO] ALLOWED /usr/bin/curl(0) -> ok.test:443"
         runtime = self._runtime(lambda: [allowed])
         assert runtime._sync_ocsf_messages() == [allowed]
+
+
+class TestObservedRun:
+    """observe() records what ran: the image and the effective policy's digest."""
+
+    def _observe(self, monkeypatch, policy: dict | None) -> OpenShellObservations:
+        runtime = OpenShellRuntime("shell_suite", image="localhost/agent:latest", policy=policy)
+        client = _FakeSandboxClient()
+        runtime._client = client
+        runtime._workspace_name = "midojo-shell-abc123"
+        monkeypatch.setattr(runtime, "_sync_ocsf_messages", lambda: [])
+        runtime.setup({}, session_token="tok", eval_id="e1", user_task_id="u1", injection_task_id=None)
+        assert client.created_specs[0].template.image == "localhost/agent:latest"
+        observed = runtime.observe()["openshell"]
+        assert isinstance(observed, OpenShellObservations)
+        return observed
+
+    def test_records_image_and_policy_digest(self, monkeypatch):
+        observed = self._observe(monkeypatch, POLICY)
+        assert observed.image == "localhost/agent:latest"
+        assert observed.policy_digest == _digest(POLICY)
+
+    @pytest.mark.parametrize("policy", [None, {}])
+    def test_builtin_policy_records_the_marker(self, monkeypatch, policy):
+        assert self._observe(monkeypatch, policy).policy_digest == BUILTIN_POLICY_DIGEST
+
+    def test_image_digest_is_null_because_openshell_does_not_report_one(self, monkeypatch):
+        # OpenShell 0.1.2 reports no resolved image digest: the SDK's SandboxRef
+        # carries no image, and the Sandbox proto (spec and status) only the
+        # requested SandboxTemplate.image. If a digest appears, record it.
+        def field_names(descriptor, seen):
+            if descriptor.full_name in seen:
+                return set()
+            seen.add(descriptor.full_name)
+            names = {f.name for f in descriptor.fields}
+            for f in descriptor.fields:
+                if f.message_type is not None:
+                    names |= field_names(f.message_type, seen)
+            return names
+
+        reported = field_names(openshell_pb2.Sandbox.DESCRIPTOR, set()) | set(SandboxRef.__dataclass_fields__)
+        assert not [name for name in reported if "digest" in name]
+        assert {name for name in reported if "image" in name} == {"image"}
+        assert self._observe(monkeypatch, POLICY).image_digest is None
+
+    @pytest.mark.parametrize("field", ["image", "image_digest", "policy_digest"])
+    def test_fields_are_optional(self, field):
+        assert getattr(OpenShellObservations(), field) is None
