@@ -13,6 +13,17 @@ from midojo.types import Environment, FunctionCallRecord, SuiteName
 
 
 @dataclass
+class Turn:
+    """One user message in an evaluation's conversation and the agent's reply to it."""
+
+    index: int
+    message: str
+    reply: str | None = None
+    started_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    ended_at: str | None = None
+
+
+@dataclass
 class Evaluation:
     """A single task execution within a Run. Captures the environment before and after tool execution, the function call trace, and grading results."""
 
@@ -23,6 +34,8 @@ class Evaluation:
     pre_environment: Environment
     environment: Environment
     function_calls: list[FunctionCallRecord] = field(default_factory=list)
+    # Turns in the order they were started; function calls name the latest one.
+    turns: list[Turn] = field(default_factory=list)
     # Runtime observations keyed by source (e.g. "openshell" -> OpenShellObservations),
     # recorded by the orchestrator and read by verifiers at grade time.
     observations: dict[str, BaseModel] = field(default_factory=dict)

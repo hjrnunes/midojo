@@ -39,7 +39,7 @@ from pydantic import BaseModel
 from midojo.types import Environment, FunctionCallRecord, SuiteName
 
 from .models import CreateFunctionCallRecord
-from .state import Evaluation, Run
+from .state import Evaluation, Run, Turn
 
 
 def _new_id() -> str:
@@ -74,6 +74,8 @@ class Store(Protocol):
     # --- per-evaluation mutations (ID-based) ---
     # Each returns the mutated evaluation, or None if (run_id, eval_id) is unknown.
     def append_function_call(self, run_id: str, eval_id: str, req: CreateFunctionCallRecord) -> Evaluation | None: ...
+    def start_turn(self, run_id: str, eval_id: str, message: str) -> Evaluation | None: ...
+    def record_turn_reply(self, run_id: str, eval_id: str, index: int, reply: str) -> Evaluation | None: ...
     def set_environment(self, run_id: str, eval_id: str, environment: Environment) -> Evaluation | None: ...
     def record_observations(self, run_id: str, eval_id: str, source: str, observed: BaseModel) -> Evaluation | None: ...
     def set_grade(
@@ -204,10 +206,27 @@ class InMemoryStore:
         record = FunctionCallRecord(
             **req.model_dump(),
             timestamp=datetime.now(UTC).isoformat(),
+            turn=evaluation.turns[-1].index if evaluation.turns else None,
             pre_environment=pre_env,
             post_environment=evaluation.environment.model_copy(deep=True),
         )
         evaluation.function_calls.append(record)
+        return evaluation
+
+    def start_turn(self, run_id: str, eval_id: str, message: str) -> Evaluation | None:
+        evaluation = self.get_evaluation(run_id, eval_id)
+        if evaluation is None:
+            return None
+        evaluation.turns.append(Turn(index=len(evaluation.turns), message=message))
+        return evaluation
+
+    def record_turn_reply(self, run_id: str, eval_id: str, index: int, reply: str) -> Evaluation | None:
+        evaluation = self.get_evaluation(run_id, eval_id)
+        if evaluation is None:
+            return None
+        turn = evaluation.turns[index]
+        turn.reply = reply
+        turn.ended_at = datetime.now(UTC).isoformat()
         return evaluation
 
     def set_environment(self, run_id: str, eval_id: str, environment: Environment) -> Evaluation | None:

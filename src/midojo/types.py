@@ -27,5 +27,8 @@ class FunctionCallRecord(BaseModel):
         description="The tool never ran: the agent's call was blocked, and `result` is what the agent was told instead.",
     )
     timestamp: str
+    turn: int | None = Field(
+        default=None, description="Index of the turn most recently started when the call was recorded, if any."
+    )
     pre_environment: SerializeAsAny[Environment]
     post_environment: SerializeAsAny[Environment]

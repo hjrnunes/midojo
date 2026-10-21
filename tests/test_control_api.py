@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 
 from midojo.control_plane.state import Evaluation
 from midojo.runtimes.openshell import OpenShellObservations
+from midojo.verifiers import ConversationTurn
 
 
 def _evaluation(client: TestClient, run_id: str, eval_id: str) -> Evaluation:
@@ -351,3 +352,156 @@ def test_nested_mutation_routes_unknown_run_404(client):
         resp = send()
         assert resp.status_code == 404, name
         assert resp.json()["detail"] == "Unknown run: BOGUS", name
+
+
+# --- Turns ---
+
+
+def test_create_evaluation_returns_a_prompt_task_as_one_turn(client):
+    run_id = _create_run(client)
+    data = _create_evaluation(client, run_id)
+    assert data["turns"] == [data["prompt"]]
+    assert client.get(f"/runs/{run_id}/evaluations/{data['id']}").json()["turns"] == []
+
+
+def test_create_evaluation_substitutes_probes_in_every_turn(client, suite, monkeypatch):
+    turns = [
+        "Weather in New York?{tornado_alert_via_prompt:main}",
+        "Thanks.",
+        "And now?{tornado_alert_via_prompt:main}",
+    ]
+    monkeypatch.setattr(suite.user_tasks["weather_new_york"], "turns", turns)
+    run_id = _create_run(client)
+    data = _create_evaluation(
+        client,
+        run_id,
+        injection_task_id="tornado_alert_via_prompt",
+        injections={"tornado_alert_via_prompt:main": " POISON"},
+    )
+    assert data["turns"] == ["Weather in New York? POISON", "Thanks.", "And now? POISON"]
+    assert data["prompt"] == data["turns"][0]
+    assert client.get(f"/runs/{run_id}/evaluations/{data['id']}").json()["agent_input"] == data["turns"][0]
+
+
+class _RecordingCheck:
+    """Stands in for a user task's check and keeps the context it was graded with."""
+
+    def __init__(self):
+        self.contexts = []
+
+    def evaluate(self, ctx):
+        self.contexts.append(ctx)
+        return True
+
+
+def test_grade_gives_verifiers_the_conversation(client, suite, monkeypatch):
+    check = _RecordingCheck()
+    monkeypatch.setattr(suite.user_tasks["weather_new_york"], "check", check)
+    run_id = _create_run(client)
+    eval_id = _create_evaluation(client, run_id)["id"]
+    turns_url = f"/runs/{run_id}/evaluations/{eval_id}/turns"
+    for index, (message, reply) in enumerate([("first", "one"), ("second", "two")]):
+        client.post(turns_url, json={"message": message})
+        client.post(f"{turns_url}/{index}/reply", json={"reply": reply})
+    client.post(f"/runs/{run_id}/evaluations/{eval_id}/complete", json={"agent_output": "two"})
+
+    assert client.post(f"/runs/{run_id}/evaluations/{eval_id}/grade").status_code == 200
+    (ctx,) = check.contexts
+    assert ctx.turns == [ConversationTurn("first", "one"), ConversationTurn("second", "two")]
+    assert ctx.agent_output == "two"
+
+
+def test_grade_without_turns_gives_an_empty_conversation(client, suite, monkeypatch):
+    check = _RecordingCheck()
+    monkeypatch.setattr(suite.user_tasks["weather_new_york"], "check", check)
+    run_id = _create_run(client)
+    eval_id = _create_evaluation(client, run_id)["id"]
+    client.post(f"/runs/{run_id}/evaluations/{eval_id}/complete", json={"agent_output": "done"})
+
+    assert client.post(f"/runs/{run_id}/evaluations/{eval_id}/grade").status_code == 200
+    assert check.contexts[0].turns == []
+
+
+def test_turns_start_and_record_replies_in_order(client):
+    run_id = _create_run(client)
+    eval_id = _create_evaluation(client, run_id)["id"]
+    turns_url = f"/runs/{run_id}/evaluations/{eval_id}/turns"
+
+    resp = client.post(turns_url, json={"message": "first"})
+    assert resp.status_code == 201
+    first = resp.json()
+    assert (first["index"], first["message"], first["reply"], first["ended_at"]) == (0, "first", None, None)
+    assert first["started_at"]
+
+    # The next turn waits for this one's reply.
+    resp = client.post(turns_url, json={"message": "second"})
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == "Turn 0 has no reply yet"
+
+    resp = client.post(f"{turns_url}/0/reply", json={"reply": "one"})
+    assert resp.status_code == 200
+    assert resp.json()["reply"] == "one"
+    assert resp.json()["ended_at"]
+
+    assert client.post(f"{turns_url}/0/reply", json={"reply": "again"}).status_code == 409
+    assert client.post(turns_url, json={"message": "second"}).json()["index"] == 1
+    client.post(f"{turns_url}/1/reply", json={"reply": "two"})
+
+    listed = client.get(turns_url).json()
+    assert [(t["index"], t["message"], t["reply"]) for t in listed] == [(0, "first", "one"), (1, "second", "two")]
+    assert client.get(f"/runs/{run_id}/evaluations/{eval_id}").json()["turns"] == listed
+
+
+@pytest.mark.parametrize("index", [0, 1, -1])
+def test_reply_to_a_turn_that_has_not_started_404(client, index):
+    run_id = _create_run(client)
+    eval_id = _create_evaluation(client, run_id)["id"]
+    turns_url = f"/runs/{run_id}/evaluations/{eval_id}/turns"
+    if index:
+        client.post(turns_url, json={"message": "first"})
+    resp = client.post(f"{turns_url}/{index}/reply", json={"reply": "x"})
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == f"Turn not started: {index}"
+
+
+def test_turn_routes_reject_unknown_and_completed_evaluations(client):
+    run_id = _create_run(client)
+    eval_id = _create_evaluation(client, run_id)["id"]
+    for path in ["turns", "turns/0/reply"]:
+        body = {"message": "x"} if path == "turns" else {"reply": "x"}
+        resp = client.post(f"/runs/{run_id}/evaluations/BOGUS/{path}", json=body)
+        assert (resp.status_code, resp.json()["detail"]) == (404, "Unknown evaluation: BOGUS")
+        assert client.post(f"/runs/BOGUS/evaluations/{eval_id}/{path}", json=body).status_code == 404
+
+    client.post(f"/runs/{run_id}/evaluations/{eval_id}/turns", json={"message": "x"})
+    client.post(f"/runs/{run_id}/evaluations/{eval_id}/complete", json={"agent_output": "x"})
+    for path, body in [("turns", {"message": "y"}), ("turns/0/reply", {"reply": "y"})]:
+        resp = client.post(f"/runs/{run_id}/evaluations/{eval_id}/{path}", json=body)
+        assert (resp.status_code, resp.json()["detail"]) == (409, "Evaluation already completed")
+
+
+def test_both_record_routes_stamp_the_latest_started_turn(client):
+    run_id = _create_run(client)
+    eval_id = _create_evaluation(client, run_id)["id"]
+    eval_url = f"/runs/{run_id}/evaluations/{eval_id}"
+    call = {"function": "get_weather", "args": {}, "result": "72°F"}
+
+    def record_both() -> list[int | None]:
+        return [
+            client.post("/agent/function-calls", json=call).json()["turn"],
+            client.post(f"{eval_url}/function-calls", json=call).json()["turn"],
+        ]
+
+    assert record_both() == [None, None]
+    client.post(f"{eval_url}/turns", json={"message": "first"})
+    assert record_both() == [0, 0]
+    # A call after the reply, before the next turn, still belongs to turn 0.
+    client.post(f"{eval_url}/turns/0/reply", json={"reply": "one"})
+    assert record_both() == [0, 0]
+    client.post(f"{eval_url}/turns", json={"message": "second"})
+    assert record_both() == [1, 1]
+
+    expected = [None, None, 0, 0, 0, 0, 1, 1]
+    assert [c["turn"] for c in client.get(f"{eval_url}").json()["function_calls"]] == expected
+    assert [c["turn"] for c in client.get("/agent/function-calls").json()] == expected
+    assert [c.turn for c in _evaluation(client, run_id, eval_id).function_calls] == expected

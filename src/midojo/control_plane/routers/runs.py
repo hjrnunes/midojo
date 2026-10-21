@@ -6,6 +6,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from midojo.types import FunctionCallRecord, SuiteName
+from midojo.verifiers import ConversationTurn
 from midojo.yaml_task_suite import YAMLTaskSuite
 
 from ..config import AppConfig
@@ -33,6 +34,9 @@ from ..models import (
     GradeResponse,
     RecordObservationsRequest,
     RunResponse,
+    StartTurnRequest,
+    TurnReplyRequest,
+    TurnResponse,
 )
 from ..state import Evaluation, Run
 from ..store import Store
@@ -95,7 +99,8 @@ async def create_evaluation(
 
     environment = suite.provision_environment(req.injections)
     pre_environment = environment.model_copy(deep=True)
-    prompt = suite.inject_user_task_prompt(req.user_task_id, req.injections)
+    turns = suite.inject_user_task_turns(req.user_task_id, req.injections)
+    prompt = turns[0]
 
     evaluation = store.create_evaluation(
         run.id,
@@ -107,7 +112,9 @@ async def create_evaluation(
         agent_input=prompt,
     )
     token, expires_at = store.create_session(run.id, evaluation.id, config.session_ttl_seconds)
-    return CreateEvaluationResponse(id=evaluation.id, prompt=prompt, session_token=token, session_expires_at=expires_at)
+    return CreateEvaluationResponse(
+        id=evaluation.id, prompt=prompt, turns=turns, session_token=token, session_expires_at=expires_at
+    )
 
 
 @router.get(
@@ -126,6 +133,7 @@ async def retrieve_evaluation(evaluation: Annotated[Evaluation, Depends(get_eval
         security_reason=evaluation.security_reason,
         agent_input=evaluation.agent_input,
         agent_output=evaluation.agent_output,
+        turns=[TurnResponse.model_validate(turn) for turn in evaluation.turns],
         function_calls=[FunctionCallResponse.model_validate(fc) for fc in evaluation.function_calls],
     )
 
@@ -160,6 +168,7 @@ async def grade_evaluation(
         post_environment=evaluation.environment,
         function_calls=evaluation.function_calls,
         observations=evaluation.observations,
+        turns=[ConversationTurn(message=turn.message, reply=turn.reply) for turn in evaluation.turns],
     )
     graded = GradeResponse.model_validate(result)
     store.set_grade(
@@ -240,6 +249,68 @@ async def record_function_call(
 ) -> FunctionCallRecord:
     evaluation = _require_eval(store.append_function_call(run.id, eval_id, req), eval_id)
     return evaluation.function_calls[-1]
+
+
+# --- Turn endpoints ---
+#
+# The orchestrator starts each turn before sending its message to the agent and
+# records the reply once the agent answers. Function calls recorded in between
+# carry that turn's index. Turns run one at a time: the next starts only after
+# the previous one's reply is recorded.
+
+
+def _require_open(evaluation: Evaluation) -> None:
+    if evaluation.completed:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Evaluation already completed")
+
+
+@router.get(
+    "/{run_id}/evaluations/{eval_id}/turns",
+    response_model=list[TurnResponse],
+    status_code=status.HTTP_200_OK,
+)
+async def list_turns(evaluation: Annotated[Evaluation, Depends(get_evaluation_by_id)]) -> list[TurnResponse]:
+    return [TurnResponse.model_validate(turn) for turn in evaluation.turns]
+
+
+@router.post(
+    "/{run_id}/evaluations/{eval_id}/turns",
+    response_model=TurnResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def start_turn(
+    req: StartTurnRequest,
+    evaluation: Annotated[Evaluation, Depends(get_evaluation_by_id)],
+    store: Annotated[Store, Depends(get_store)],
+) -> TurnResponse:
+    _require_open(evaluation)
+    if evaluation.turns and evaluation.turns[-1].ended_at is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Turn {evaluation.turns[-1].index} has no reply yet",
+        )
+    updated = _require_eval(store.start_turn(evaluation.run_id, evaluation.id, req.message), evaluation.id)
+    return TurnResponse.model_validate(updated.turns[-1])
+
+
+@router.post(
+    "/{run_id}/evaluations/{eval_id}/turns/{index}/reply",
+    response_model=TurnResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def record_turn_reply(
+    index: int,
+    req: TurnReplyRequest,
+    evaluation: Annotated[Evaluation, Depends(get_evaluation_by_id)],
+    store: Annotated[Store, Depends(get_store)],
+) -> TurnResponse:
+    _require_open(evaluation)
+    if index < 0 or index >= len(evaluation.turns):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Turn not started: {index}")
+    if evaluation.turns[index].ended_at is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Turn {index} already has a reply")
+    updated = _require_eval(store.record_turn_reply(evaluation.run_id, evaluation.id, index, req.reply), evaluation.id)
+    return TurnResponse.model_validate(updated.turns[index])
 
 
 # --- Observation endpoints ---

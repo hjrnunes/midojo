@@ -33,6 +33,29 @@ class FunctionCallResponse(CreateFunctionCallRecord):
     model_config = ConfigDict(from_attributes=True)
 
     timestamp: str
+    turn: int | None = Field(
+        default=None, description="Index of the turn most recently started when the call was recorded, if any."
+    )
+
+
+class StartTurnRequest(BaseModel):
+    message: str
+
+
+class TurnReplyRequest(BaseModel):
+    reply: str
+
+
+class TurnResponse(BaseModel):
+    """One user message in an evaluation's conversation and the agent's reply, once recorded."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    index: int
+    message: str
+    reply: str | None
+    started_at: str
+    ended_at: str | None
 
 
 class CreateEvaluationRequest(BaseModel):
@@ -52,7 +75,8 @@ class CreateRunResponse(BaseModel):
 
 class CreateEvaluationResponse(BaseModel):
     id: str
-    prompt: str
+    prompt: str = Field(description="The first user message, the same as turns[0].")
+    turns: list[str] = Field(description="The user's messages, one per turn, with probes substituted.")
     session_token: str
     session_expires_at: str
 
@@ -111,6 +135,7 @@ class EvaluationResponse(BaseModel):
     security_reason: str | None = None
     agent_input: str | None
     agent_output: str | None
+    turns: list[TurnResponse]
     function_calls: list[FunctionCallResponse]
 
 
@@ -128,4 +153,5 @@ class TaskDetailResponse(BaseModel):
     id: str
     type: str
     prompt: str | None = None
+    turns: list[str] | None = None
     description: str | None = None

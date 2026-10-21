@@ -144,3 +144,44 @@ def test_openshell_predicates_require_the_openshell_runtime(tmp_path, raw):
         load(tmp_path, raw)
     raw["agent_runtime"] = {"image": "pi"}
     assert isinstance(load(tmp_path, raw).runtime, OpenShellRuntime)
+
+
+@pytest.mark.parametrize(
+    "fields,message",
+    [
+        ({"prompt": "Read the text", "turns": ["Read the text"]}, "exactly one of 'prompt' or 'turns'"),
+        ({}, "exactly one of 'prompt' or 'turns'"),
+        ({"turns": []}, "at least 1 item"),
+        ({"turns": ["Read the text", ""]}, "at least 1 character"),
+        ({"turns": "Read the text"}, "valid list"),
+        ({"prompt": None, "turns": ["Read the text"]}, "exactly one of 'prompt' or 'turns'"),
+        ({"prompt": "Read the text", "turns": None}, "exactly one of 'prompt' or 'turns'"),
+        ({"prompt": None}, "'prompt' must not be null"),
+        ({"turns": None}, "'turns' must not be null"),
+    ],
+)
+def test_user_task_needs_a_prompt_or_non_empty_turns(tmp_path, raw, fields, message):
+    task = raw["user_tasks"][0]
+    del task["prompt"]
+    task.update(fields)
+    with pytest.raises(ValueError, match="suite.yaml") as error:
+        load(tmp_path, raw)
+    assert message in str(error.value)
+    assert "user_tasks.0" in str(error.value)
+
+
+def test_turns_task_substitutes_probes_in_every_turn(tmp_path, raw):
+    del raw["user_tasks"][0]["prompt"]
+    raw["user_tasks"][0]["turns"] = ["Read the text{inject:main}", "Anything else?", "Do it {inject:main}"]
+    suite = load(tmp_path, raw)
+    probes = suite.get_probes_for_task("inject")
+    assert suite.inject_user_task_turns("read", probes) == ["Read the textinjected", "Anything else?", "Do it injected"]
+    assert suite.inject_user_task_prompt("read", probes) == "Read the textinjected"
+    assert suite.inject_user_task_turns("read", {}) == ["Read the text", "Anything else?", "Do it "]
+
+
+def test_prompt_task_is_a_single_turn(tmp_path, raw):
+    suite = load(tmp_path, raw)
+    assert suite.user_tasks["read"].turns == ["Read the text"]
+    assert suite.user_tasks["read"].prompt == "Read the text"
+    assert suite.inject_user_task_turns("read", suite.get_probes_for_task("inject")) == ["Read the text"]

@@ -5,7 +5,13 @@ from __future__ import annotations
 import httpx
 from pydantic import BaseModel
 
-from midojo.control_plane.models import CreateEvaluationResponse, CreateRunResponse, EvaluationResponse, GradeResponse
+from midojo.control_plane.models import (
+    CreateEvaluationResponse,
+    CreateRunResponse,
+    EvaluationResponse,
+    GradeResponse,
+    TurnResponse,
+)
 
 
 class ControlPlaneClient:
@@ -52,6 +58,24 @@ class ControlPlaneClient:
         )
         response.raise_for_status()
         return CreateEvaluationResponse.model_validate(response.json())
+
+    async def start_turn(self, run_id: str, eval_id: str, message: str) -> TurnResponse:
+        response = await self._http.post(
+            f"{self._base_url}/runs/{run_id}/evaluations/{eval_id}/turns",
+            headers=self._headers,
+            json={"message": message},
+        )
+        response.raise_for_status()
+        return TurnResponse.model_validate(response.json())
+
+    async def record_turn_reply(self, run_id: str, eval_id: str, index: int, reply: str) -> TurnResponse:
+        response = await self._http.post(
+            f"{self._base_url}/runs/{run_id}/evaluations/{eval_id}/turns/{index}/reply",
+            headers=self._headers,
+            json={"reply": reply},
+        )
+        response.raise_for_status()
+        return TurnResponse.model_validate(response.json())
 
     async def complete_evaluation(self, run_id: str, eval_id: str, agent_output: str) -> None:
         response = await self._http.post(

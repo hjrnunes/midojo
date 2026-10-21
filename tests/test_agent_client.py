@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from midojo.agent_client import OGXResponsesClient, OpenAIResponsesAgentClient, OpenShellAgentClient
+from midojo.agent_client import AgentClient, OGXResponsesClient, OpenAIResponsesAgentClient, OpenShellAgentClient
 
 
 @pytest.mark.asyncio
@@ -161,3 +161,99 @@ class TestOpenAIResponsesAgentClient:
 
         call_kwargs = mock_openai_instance.responses.create.call_args.kwargs
         assert call_kwargs["instructions"] == "You are a weather assistant."
+
+    @pytest.mark.asyncio
+    async def test_conversation_chains_each_turn_to_the_previous_response(self):
+        """Each turn after the first continues from the previous reply's response ID."""
+        import sys
+
+        calls: list[dict] = []
+
+        class FakeResponses:
+            async def create(self, **kwargs):
+                calls.append(kwargs)
+                n = len(calls)
+                return MagicMock(id=f"resp_{n}", output_text=f"reply {n}")
+
+        clients: list[FakeAsyncOpenAI] = []
+
+        class FakeAsyncOpenAI:
+            def __init__(self, **kwargs):
+                self.responses = FakeResponses()
+                self.closed = False
+                clients.append(self)
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                self.closed = True
+
+        client = OpenAIResponsesAgentClient(
+            base_url="http://localhost:8321/v1",
+            model="gpt-4o-mini",
+            mcp_server_url="http://localhost:8082/mcp",
+            mcp_server_label="weather",
+            instructions="Be concise.",
+            api_key="x",
+        )
+        assert client.supports_multiturn
+        with patch.dict(sys.modules, {"openai": MagicMock(AsyncOpenAI=FakeAsyncOpenAI)}):
+            conversation = client.start_conversation(session_token="session-a")
+            replies = [await conversation.send(message) for message in ["first", "second", "third"]]
+            # One client serves every turn and stays open until the conversation closes.
+            assert len(clients) == 1
+            assert not clients[0].closed
+            await conversation.aclose()
+
+        assert clients[0].closed
+        assert replies == ["reply 1", "reply 2", "reply 3"]
+        assert [call["input"] for call in calls] == ["first", "second", "third"]
+        assert "previous_response_id" not in calls[0]
+        assert [call["previous_response_id"] for call in calls[1:]] == ["resp_1", "resp_2"]
+        tools = calls[0]["tools"]
+        assert tools[0]["headers"] == {"X-Midojo-Session": "session-a"}
+        for call in calls:
+            assert call["tools"] == tools
+            assert (call["model"], call["instructions"], call["stream"]) == ("gpt-4o-mini", "Be concise.", False)
+
+    @pytest.mark.asyncio
+    async def test_separate_conversations_do_not_share_responses(self):
+        """A new conversation, like each send_task, starts without previous_response_id."""
+        import sys
+
+        create = AsyncMock(return_value=MagicMock(id="resp_1", output_text="reply"))
+        openai_module = MagicMock()
+        openai_instance = openai_module.AsyncOpenAI.return_value
+        openai_instance.__aenter__ = AsyncMock(return_value=openai_instance)
+        openai_instance.responses.create = create
+        client = OpenAIResponsesAgentClient(
+            base_url="http://localhost:8321/v1", model="m", mcp_server_url="http://localhost:8082/mcp", api_key="x"
+        )
+        with patch.dict(sys.modules, {"openai": openai_module}):
+            await client.start_conversation(session_token="a").send("one")
+            await client.send_task("two", session_token="b")
+            await client.start_conversation(session_token="c").send("three")
+        assert all("previous_response_id" not in call.kwargs for call in create.call_args_list)
+        headers = [call.kwargs["tools"][0]["headers"]["X-Midojo-Session"] for call in create.call_args_list]
+        assert headers == ["a", "b", "c"]
+        # One client per conversation; send_task closes its own.
+        assert openai_module.AsyncOpenAI.call_count == 3
+        assert openai_instance.__aexit__.await_count == 1
+
+
+class _OneShotAgent(AgentClient):
+    async def send_task(self, prompt, *, session_token):
+        return f"{session_token}: {prompt}"
+
+
+@pytest.mark.asyncio
+async def test_clients_without_multiturn_send_one_message_per_conversation():
+    agent = _OneShotAgent()
+    assert not agent.supports_multiturn
+    assert not OGXResponsesClient("http://ogx", "m", "http://mcp").supports_multiturn
+    assert not OpenShellAgentClient(MagicMock()).supports_multiturn
+    conversation = agent.start_conversation(session_token="session-a")
+    assert await conversation.send("hello") == "session-a: hello"
+    with pytest.raises(RuntimeError, match="_OneShotAgent sends one message per evaluation"):
+        await conversation.send("again")

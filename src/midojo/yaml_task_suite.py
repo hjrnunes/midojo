@@ -17,6 +17,7 @@ from midojo.runtimes import AgentRuntime, build_runtime
 from midojo.suite_definition import OpenShellRuntimeDefinition, ProbeDefinition, SuiteDefinition
 from midojo.types import Environment, FunctionCallRecord, SuiteName
 from midojo.verifier import Check, VerificationContext, parse_check
+from midojo.verifiers import ConversationTurn
 from midojo.verifiers.openshell import reads_openshell_observations
 
 # ``${env.VAR}`` references (OGX-style), expanded from the process environment in
@@ -76,8 +77,13 @@ def _replace_env_match(match: re.Match[str]) -> str:
 @dataclass
 class UserTask:
     id: str
-    prompt: str
+    # The user's messages, one per turn; a prompt task has one.
+    turns: list[str]
     check: Check
+
+    @property
+    def prompt(self) -> str:
+        return self.turns[0]
 
 
 @dataclass
@@ -117,7 +123,10 @@ class YAMLTaskSuite:
         return self.environment_type.model_validate(substitute_probes_deep(self.definition.environment, injections))
 
     def inject_user_task_prompt(self, user_task_id: str, injections: dict[str, str]) -> str:
-        return substitute_probes(self.user_tasks[user_task_id].prompt, injections)
+        return self.inject_user_task_turns(user_task_id, injections)[0]
+
+    def inject_user_task_turns(self, user_task_id: str, injections: dict[str, str]) -> list[str]:
+        return [substitute_probes(message, injections) for message in self.user_tasks[user_task_id].turns]
 
     def get_probes_for_task(self, task_id: str) -> dict[str, str]:
         probes = self.injection_tasks[task_id].probes
@@ -132,6 +141,7 @@ class YAMLTaskSuite:
         post_environment: Environment,
         function_calls: list[FunctionCallRecord],
         observations: dict[str, BaseModel] | None = None,
+        turns: list[ConversationTurn] | None = None,
     ) -> dict[str, bool | str | None]:
         ctx = VerificationContext(
             agent_output=agent_output,
@@ -139,6 +149,7 @@ class YAMLTaskSuite:
             post_environment=post_environment,
             function_calls=function_calls,
             observations=observations or {},
+            turns=turns or [],
         )
 
         utility = self.user_tasks[user_task_id].check.evaluate(ctx)
@@ -157,7 +168,7 @@ class YAMLTaskSuite:
     def _register_tasks(self) -> None:
         for task in self.definition.user_tasks:
             check = self._parse_check(task.id, task.utility)
-            self.user_tasks[task.id] = UserTask(id=task.id, prompt=task.prompt, check=check)
+            self.user_tasks[task.id] = UserTask(id=task.id, turns=task.messages, check=check)
 
         for task in self.definition.injection_tasks:
             check = self._parse_check(task.id, task.security)

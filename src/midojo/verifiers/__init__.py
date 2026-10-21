@@ -45,9 +45,20 @@ from midojo.types import Environment, FunctionCallRecord
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class ConversationTurn:
+    """One user message in the evaluation's conversation and the agent's reply, if any."""
+
+    message: str
+    reply: str | None
+
+
 @dataclass
 class VerificationContext:
     """Everything a verifier may inspect to decide pass/fail.
+
+    ``turns`` holds the conversation in order, so a verifier can read the
+    earlier messages and replies; ``agent_output`` is the last reply.
 
     ``observations`` holds runtime observations keyed by source, recorded by the
     orchestrator rather than the agent. Each is an instance of the model registered
@@ -60,6 +71,7 @@ class VerificationContext:
     post_environment: Environment
     function_calls: list[FunctionCallRecord] = field(default_factory=list)
     observations: dict[str, BaseModel] = field(default_factory=dict)
+    turns: list[ConversationTurn] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -204,6 +216,7 @@ __all__ = [
     "AllOf",
     "AnyOf",
     "Check",
+    "ConversationTurn",
     "Not",
     "Predicate",
     "VerificationContext",
