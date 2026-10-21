@@ -347,6 +347,11 @@ class OpenShellRuntime:
         self._agent_command: list[str] | None = agent_command
         # Seed-file templates (probe placeholders intact), rendered in setup().
         self._files: dict[str, str] = files or {}
+        # setup() touches the baseline after seeding, so a seed there could never
+        # look modified.
+        for path in self._files:
+            if _seed_path(path) == _BASELINE:
+                raise ValueError(f"files entry {path!r} would overwrite midojo's observation baseline {_BASELINE}")
 
         # Deployment config — set by configure() before start_run()
         self._cluster: str = ""

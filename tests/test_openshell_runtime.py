@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -207,6 +208,13 @@ def _file_changes(runtime: OpenShellRuntime) -> tuple[list[str], list[str], list
     observed = runtime.observe()["openshell"]
     assert isinstance(observed, OpenShellObservations)
     return observed.files_created, observed.files_modified, observed.files_deleted
+
+
+@pytest.mark.parametrize("seed", ["/tmp/.midojo_baseline", "//tmp/.midojo_baseline", "/tmp/./.midojo_baseline"])
+def test_seeding_the_baseline_path_is_rejected_at_suite_load(seed):
+    definition = OpenShellRuntimeDefinition(image="pi", files={"notes.txt": "n", seed: "x"})
+    with pytest.raises(ValueError, match=f"files entry '{re.escape(seed)}' .* baseline /tmp/.midojo_baseline"):
+        build_runtime("shell_suite", definition)
 
 
 class TestSeededFileChanges:
