@@ -8,7 +8,7 @@ import pytest
 
 from midojo.control_plane.models import CreateFunctionCallRecord
 from midojo.control_plane.store import InMemoryStore
-from midojo.types import Environment
+from midojo.types import CheckValidity, Environment, GradeValidity, ValidityReason
 
 
 @pytest.fixture
@@ -184,7 +184,7 @@ def test_set_grade(store):
 def test_set_grade_security_reason_defaults_to_none(store):
     run = store.create_run("test")
     ev = _make_eval(store, run.id)
-    # Reason is optional: an attack that failed (or a utility-only grade) leaves it None.
+    # Reason is optional at the store: a utility-only grade leaves it None.
     assert store.set_grade(run.id, ev.id, utility=True, security=False) is ev
     assert ev.security_reason is None
 
@@ -223,3 +223,26 @@ def test_set_grade_unknown_returns_none(store):
 
 def test_complete_evaluation_unknown_returns_none(store):
     assert store.complete_evaluation("nope", "nope", "out") is None
+
+
+def test_set_grade_persists_validity_and_evidence(store):
+    run = store.create_run("test")
+    ev = _make_eval(store, run.id)
+    assert ev.grade_validity is None  # not graded yet
+    validity = GradeValidity(
+        utility=CheckValidity(status="valid"),
+        security=CheckValidity(status="invalid", reasons=[ValidityReason(check="c", reason="r")]),
+    )
+    store.set_grade(
+        run.id,
+        ev.id,
+        utility=True,
+        security=None,
+        utility_reason="u",
+        security_reason="s",
+        grade_validity=validity,
+        evidence_status={"openshell.ocsf": "failed"},
+    )
+    assert (ev.utility, ev.security, ev.utility_reason, ev.security_reason) == (True, None, "u", "s")
+    assert ev.grade_validity == validity
+    assert ev.evidence_status == {"openshell.ocsf": "failed"}

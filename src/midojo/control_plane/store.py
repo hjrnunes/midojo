@@ -36,7 +36,8 @@ from typing import Protocol
 
 from pydantic import BaseModel
 
-from midojo.types import Environment, FunctionCallRecord, SuiteName
+from midojo.observations import EvidenceStatus
+from midojo.types import Environment, FunctionCallRecord, GradeValidity, SuiteName
 
 from .models import CreateFunctionCallRecord
 from .state import Evaluation, Run
@@ -77,7 +78,16 @@ class Store(Protocol):
     def set_environment(self, run_id: str, eval_id: str, environment: Environment) -> Evaluation | None: ...
     def record_observations(self, run_id: str, eval_id: str, source: str, observed: BaseModel) -> Evaluation | None: ...
     def set_grade(
-        self, run_id: str, eval_id: str, *, utility: bool, security: bool, security_reason: str | None = None
+        self,
+        run_id: str,
+        eval_id: str,
+        *,
+        utility: bool | None,
+        security: bool | None,
+        security_reason: str | None = None,
+        utility_reason: str | None = None,
+        grade_validity: GradeValidity | None = None,
+        evidence_status: dict[str, EvidenceStatus] | None = None,
     ) -> Evaluation | None: ...
     def complete_evaluation(self, run_id: str, eval_id: str, agent_output: str) -> Evaluation | None: ...
 
@@ -225,14 +235,26 @@ class InMemoryStore:
         return evaluation
 
     def set_grade(
-        self, run_id: str, eval_id: str, *, utility: bool, security: bool, security_reason: str | None = None
+        self,
+        run_id: str,
+        eval_id: str,
+        *,
+        utility: bool | None,
+        security: bool | None,
+        security_reason: str | None = None,
+        utility_reason: str | None = None,
+        grade_validity: GradeValidity | None = None,
+        evidence_status: dict[str, EvidenceStatus] | None = None,
     ) -> Evaluation | None:
         evaluation = self.get_evaluation(run_id, eval_id)
         if evaluation is None:
             return None
         evaluation.utility = utility
+        evaluation.utility_reason = utility_reason
         evaluation.security = security
         evaluation.security_reason = security_reason
+        evaluation.grade_validity = grade_validity
+        evaluation.evidence_status = dict(evidence_status or {})
         return evaluation
 
     def complete_evaluation(self, run_id: str, eval_id: str, agent_output: str) -> Evaluation | None:

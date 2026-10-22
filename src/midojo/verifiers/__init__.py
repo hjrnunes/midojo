@@ -29,6 +29,12 @@ built-in predicates), which owns ``output_contains``, ``env_field_equals``,
 A verifier sees the full :class:`VerificationContext`, not just the env — the
 ``observations`` bag holds runtime observations, evidence collected outside the
 agent and keyed by source (e.g. ``openshell``).
+
+Checks are three-valued: a result is True, False, or None (unknown). A check
+that needs evidence which wasn't completely collected resolves to None instead
+of guessing, and the combinators follow Kleene's three-valued logic, so an
+unknown branch only makes the whole check unknown when it could change the
+verdict. A grade whose top-level check is unknown is *invalid*.
 """
 
 from __future__ import annotations
@@ -38,7 +44,7 @@ from typing import Any, Protocol, cast, runtime_checkable
 
 from pydantic import BaseModel
 
-from midojo.types import Environment, FunctionCallRecord
+from midojo.types import Environment, FunctionCallRecord, ValidityReason
 
 # ---------------------------------------------------------------------------
 # Context & protocols
@@ -66,16 +72,27 @@ class VerificationContext:
 class VerificationResult:
     """Result of one grading traversal: the verdict *and* the reason for it.
 
-    ``reason`` names only the criterion that determined ``passed`` — for an
-    :class:`AnyOf` it is the single branch that fired, for an :class:`AllOf` the
-    conjunction, for a leaf its own criterion. Because it is produced in the same
-    pass that decides ``passed``, the human explanation can never disagree with
-    the boolean, and expensive/one-shot verifiers evaluate exactly once (no
-    separate "explain" re-evaluation).
+    ``passed`` is True, False, or None when the check can't be decided (the
+    evidence it needs wasn't completely collected). ``reason`` names only the
+    criterion that determined ``passed`` — for an :class:`AnyOf` it is the single
+    branch that fired, for an :class:`AllOf` the conjunction, for a leaf its own
+    criterion. Because it is produced in the same pass that decides ``passed``,
+    the human explanation can never disagree with the verdict, and
+    expensive/one-shot verifiers evaluate exactly once (no separate "explain"
+    re-evaluation).
+
+    ``unknowns`` lists the leaf checks that resolved to None, and why. It is
+    empty whenever ``passed`` is decided.
     """
 
-    passed: bool
+    passed: bool | None
     reason: str
+    unknowns: tuple[ValidityReason, ...] = ()
+
+    @classmethod
+    def unknown(cls, check: str, why: str) -> VerificationResult:
+        """An undecided leaf check: ``check`` names the criterion, ``why`` the missing evidence."""
+        return cls(None, f"{check} (unknown: {why})", (ValidityReason(check=check, reason=why),))
 
 
 @runtime_checkable
@@ -83,12 +100,13 @@ class Predicate(Protocol):
     """A grading check that assesses itself against a verification context.
 
     ``assess`` is the single traversal that yields both the verdict and its
-    reason; ``evaluate`` is the boolean shorthand for ``assess(ctx).passed``.
+    reason; ``evaluate`` is the shorthand for ``assess(ctx).passed`` (None when
+    unknown).
     """
 
     def assess(self, ctx: VerificationContext) -> VerificationResult: ...
 
-    def evaluate(self, ctx: VerificationContext) -> bool: ...
+    def evaluate(self, ctx: VerificationContext) -> bool | None: ...
 
 
 @runtime_checkable
@@ -113,8 +131,8 @@ class Verifier(Protocol):
         """Validate/compile a raw check spec into a reusable check object."""
         ...
 
-    def evaluate(self, check: Any, ctx: VerificationContext) -> bool:
-        """Return whether ``check`` holds for ``ctx``."""
+    def evaluate(self, check: Any, ctx: VerificationContext) -> bool | None:
+        """Return whether ``check`` holds for ``ctx``, or None if that can't be decided."""
         ...
 
 
@@ -140,9 +158,12 @@ class Check:
         verifier_assess = getattr(self.verifier, "assess", None)
         if callable(verifier_assess):
             return cast(VerificationResult, verifier_assess(self.parsed, ctx))
-        return VerificationResult(self.verifier.evaluate(self.parsed, ctx), self.verifier.name)
+        passed = self.verifier.evaluate(self.parsed, ctx)
+        if passed is None:
+            return VerificationResult.unknown(self.verifier.name, "the verifier returned no verdict")
+        return VerificationResult(passed, self.verifier.name)
 
-    def evaluate(self, ctx: VerificationContext) -> bool:
+    def evaluate(self, ctx: VerificationContext) -> bool | None:
         return self.verifier.evaluate(self.parsed, ctx)
 
 
