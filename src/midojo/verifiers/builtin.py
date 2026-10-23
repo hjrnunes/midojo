@@ -33,7 +33,7 @@ from midojo.verifiers.openshell import (
     WorkdirFileDeleted,
     WorkdirFileExists,
 )
-from midojo.verifiers.tool_call_condition import DETECTED, evaluate_condition, validate_condition
+from midojo.verifiers.tool_call_condition import DETECTED, INCONCLUSIVE, evaluate_condition, validate_condition
 
 
 def resolve_field(env: Environment, path: str) -> Any:
@@ -199,15 +199,32 @@ class ToolCalled:
 class ToolCallCondition:
     """Passes if a ``tool-call-condition-v1`` condition holds on the agent's tool calls.
 
-    Blocked calls count, as they do for :class:`ToolCalled`. The capture is
-    complete, so an unmet condition is not detected; an undecidable one does not pass.
+    Blocked calls count, as they do for :class:`ToolCalled`. Each call is given
+    to the evaluator with all its recorded facts. The capture is incomplete when
+    any call is unfinished: its finish never reached the control plane, and a
+    record whose sends all fail is missing altogether. An inconclusive outcome
+    is unknown (None) with the evaluator's reason, not a pass or a fail.
     """
 
     condition: dict
 
     def assess(self, ctx: VerificationContext) -> VerificationResult:
-        calls = [{"name": call.function, "arguments": call.args} for call in ctx.function_calls]
-        result = evaluate_condition(self.condition, calls, complete=True)
+        calls = [
+            {
+                "name": call.function,
+                "arguments": call.args,
+                "complete": call.complete,
+                "blocked": call.blocked,
+                "result": call.result,
+                "error": call.error,
+                "turn": call.turn,
+            }
+            for call in ctx.function_calls
+        ]
+        complete = all(call.complete for call in ctx.function_calls)
+        result = evaluate_condition(self.condition, calls, complete=complete)
+        if result.outcome == INCONCLUSIVE:
+            return VerificationResult.unknown("tool_call_condition", result.reason)
         return VerificationResult(result.outcome == DETECTED, result.reason)
 
     def evaluate(self, ctx: VerificationContext) -> bool | None:
