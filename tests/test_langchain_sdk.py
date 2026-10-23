@@ -17,7 +17,7 @@ from langchain_core.tools import BaseTool, InjectedToolCallId, ToolException, to
 from langgraph.graph import MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
 from langgraph.types import Command
-from midojo_sdk import client as sdk_client
+from midojo_sdk import recorder as sdk_recorder
 from midojo_sdk.langchain import BLOCKED_REASON, MidojoMiddleware, ToolContext
 from midojo_sdk.session import MissingSessionError, session_context
 from pydantic import Field
@@ -377,7 +377,7 @@ def failing_control_http(app, failing_path: str) -> httpx.AsyncClient:
 @pytest.mark.asyncio
 async def test_a_failed_finish_leaves_an_unfinished_call(app, client, session, monkeypatch):
     run, evaluation = session
-    monkeypatch.setattr(sdk_client, "RECORD_BACKOFF_SECONDS", 0)
+    monkeypatch.setattr(sdk_recorder, "RECORD_BACKOFF_SECONDS", 0)
     emails_sent.clear()
     async with failing_control_http(app, "/agent/function-calls") as http:
         midojo = MidojoMiddleware(control_plane_url="http://control", http=http)
@@ -396,7 +396,7 @@ async def test_a_failed_finish_leaves_an_unfinished_call(app, client, session, m
 @pytest.mark.asyncio
 async def test_a_failed_start_stops_the_tool(app, client, session, monkeypatch):
     run, evaluation = session
-    monkeypatch.setattr(sdk_client, "RECORD_BACKOFF_SECONDS", 0)
+    monkeypatch.setattr(sdk_recorder, "RECORD_BACKOFF_SECONDS", 0)
     emails_sent.clear()
     async with failing_control_http(app, "/agent/function-calls/start") as http:
         midojo = MidojoMiddleware(control_plane_url="http://control", http=http)

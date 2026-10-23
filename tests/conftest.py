@@ -1,11 +1,13 @@
 import os
 
 import pytest
+import pytest_asyncio
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from midojo.control_plane.main import create_app
 from midojo.suites import get_suite
+from tests.backends import NAMES, Backend
 
 # The weather suite requires its model server settings to load. Tests never
 # start its agent, so placeholders do.
@@ -39,3 +41,11 @@ def app() -> FastAPI:
 @pytest.fixture()
 def client(app) -> TestClient:
     return TestClient(app)
+
+
+@pytest_asyncio.fixture(params=NAMES)
+async def backend(request, app, monkeypatch):
+    """The SDK's seams for ``app``, over HTTP and in process: a test using it runs once on each."""
+    backend = Backend(request.param, app, monkeypatch)
+    yield backend
+    await backend.aclose()

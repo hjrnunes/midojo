@@ -14,7 +14,7 @@ import httpx
 import pytest
 from midojo_sdk.client import AgentControlPlaneClient
 from midojo_sdk.mcp import BLOCKED_REASON, MidojoMCP, ToolContext, UpstreamClient
-from midojo_sdk.recorder import ControlPlaneRecorder, Disposition
+from midojo_sdk.recorder import Disposition
 
 from midojo.types import CallDisposition, FunctionCallRecord
 from tests.scripted_mcp import PROTOCOL_ERROR, SESSION_CALL, TOOLS, ScriptedMCP, wire_session
@@ -73,12 +73,13 @@ class CapturingRecorder:
 
 
 async def _mirror(*, hang: tuple[str, ...] = ()) -> tuple[MidojoMCP, ScriptedMCP, CapturingRecorder]:
-    """A MidojoMCP for a fresh scripted server, with no injection, recording into a capturing recorder."""
+    """A MidojoMCP for a fresh scripted server, with no injection, recording into a capturing recorder.
+
+    It has a recorder and nothing else: no control plane and no environment.
+    """
     upstream = ScriptedMCP(hang=hang)
     recorder = CapturingRecorder()
-    mcp = MidojoMCP(
-        "proxy", control_plane_url="http://control.invalid", upstream_transport=upstream.transport, recorder=recorder
-    )
+    mcp = MidojoMCP("proxy", upstream_transport=upstream.transport, recorder=recorder)
     return mcp, upstream, recorder
 
 
@@ -329,7 +330,7 @@ async def test_a_blocked_tool_the_layer_defines_never_runs(monkeypatch):
 @pytest.mark.parametrize(
     ("disposition", "blocked"), [("forwarded", False), ("simulated", False), ("denied", True), ("blocked", True)]
 )
-async def test_the_control_plane_recorder_sends_blocked_for_a_refused_call(disposition, blocked):
+async def test_the_http_recorder_sends_blocked_for_a_refused_call(disposition, blocked):
     sent = []
 
     def handle(request: httpx.Request) -> httpx.Response:
@@ -337,7 +338,7 @@ async def test_the_control_plane_recorder_sends_blocked_for_a_refused_call(dispo
         return httpx.Response(201, json={})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
-        recorder = ControlPlaneRecorder(AgentControlPlaneClient("http://control", "session", http=http))
+        recorder = AgentControlPlaneClient("http://control", "session", http=http)
         if not blocked:
             await recorder.start_call(call_id="c1", function="f", args={}, disposition=disposition)
         await recorder.finish_call(call_id="c1", function="f", args={}, result="r", disposition=disposition)
@@ -348,18 +349,14 @@ async def test_the_control_plane_recorder_sends_blocked_for_a_refused_call(dispo
 
 
 @pytest.mark.asyncio
-async def test_a_refused_call_recorded_over_http_is_blocked_on_the_control_plane(client, monkeypatch, app):
+async def test_a_refused_call_is_blocked_on_the_control_plane(client, backend):
     run = client.post("/runs", json={"suite_name": "weather"}).json()
     evaluation = client.post(f"/runs/{run['id']}/evaluations", json={"user_task_id": "weather_new_york"}).json()
-    monkeypatch.setenv("MIDOJO_SESSION_TOKEN", evaluation["session_token"])
 
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app)) as http:
-        mcp = MidojoMCP(
-            "proxy", control_plane_url="http://control", http=http, upstream_transport=ScriptedMCP().transport
-        )
-        mcp.block("transfer_funds")
-        await mcp.mirror_upstream()
-        await _session(mcp, [_call("transfer_funds", TRANSFER), _call("ping", {})])
+    mcp = backend.mcp("proxy", evaluation["session_token"], upstream_transport=ScriptedMCP().transport)
+    mcp.block("transfer_funds")
+    await mcp.mirror_upstream()
+    await _session(mcp, [_call("transfer_funds", TRANSFER), _call("ping", {})])
 
     calls = client.get(f"/runs/{run['id']}/evaluations/{evaluation['id']}/function-calls").json()
     assert [(call["function"], call["blocked"], call["result"]) for call in calls] == [
@@ -485,9 +482,56 @@ def test_upstream_client_needs_exactly_one_upstream(kwargs):
 
 @pytest.mark.asyncio
 async def test_mirror_upstream_raises_without_an_upstream():
-    mcp = MidojoMCP("proxy", control_plane_url="http://control.invalid", recorder=CapturingRecorder())
+    mcp = MidojoMCP("proxy", recorder=CapturingRecorder())
     with pytest.raises(RuntimeError, match="no upstream is configured"):
         await mcp.mirror_upstream()
+
+
+def test_midojo_mcp_needs_a_control_plane_or_a_recorder():
+    with pytest.raises(ValueError, match="control_plane_url or a recorder"):
+        MidojoMCP("proxy", upstream_url="http://localhost:8081/mcp")
+
+
+@pytest.mark.asyncio
+async def test_a_simulated_tool_without_a_world_has_no_environment():
+    mcp = MidojoMCP("proxy", recorder=(recorder := CapturingRecorder()))
+
+    @mcp.tool()
+    async def read_alerts(ctx: ToolContext) -> str:
+        """Read the alerts."""
+        return await ctx.env("weather_alerts")
+
+    with pytest.raises(Exception, match="no WorldState"):
+        await mcp._fastmcp.call_tool("read_alerts", {})
+    [finish] = recorder.finishes
+    assert (finish["function"], finish["disposition"]) == ("read_alerts", "simulated")
+    assert "no WorldState" in (finish["error"] or "")
+
+
+@pytest.mark.asyncio
+async def test_a_simulated_tool_reads_and_changes_the_world_it_is_given(client, backend):
+    run = client.post("/runs", json={"suite_name": "weather"}).json()
+    evaluation = client.post(f"/runs/{run['id']}/evaluations", json={"user_task_id": "weather_new_york"}).json()
+    mcp = backend.mcp("proxy", evaluation["session_token"], upstream_transport=ScriptedMCP().transport)
+
+    @mcp.tool()
+    async def send_alert(ctx: ToolContext, text: str) -> str:
+        """Add an alert to the simulated environment."""
+        revision, environment = await ctx.read()
+        alerts = [*environment["weather_alerts"], {"city": "Lisbon", "message": text}]
+        assert await ctx.env_update("weather_alerts", alerts, expected_revision=revision)
+        return "sent"
+
+    await mcp.mirror_upstream()
+    await _session(mcp, [_call("send_alert", {"text": "storm"}), _call("ping", {})])
+
+    url = f"/runs/{run['id']}/evaluations/{evaluation['id']}"
+    assert client.get(f"{url}/environment").json()["weather_alerts"] == [{"city": "Lisbon", "message": "storm"}]
+    calls = client.get(f"{url}/function-calls").json()
+    assert [(call["function"], call["result"], call["blocked"]) for call in calls] == [
+        ("send_alert", "sent", False),
+        ("ping", "pong", False),
+    ]
 
 
 def test_the_sdk_and_the_record_name_the_same_dispositions():

@@ -1,8 +1,9 @@
 """MCP SDK — Python equivalent of the PI SDK.
 
-Lets suite authors write standalone fake MCP servers whose tools talk to the
-midojo control plane for environment access and function-call recording, and
-mirror a real MCP server's tools through a forwarding layer.
+Lets suite authors write standalone fake MCP servers whose calls are recorded
+through a ``Recorder`` and whose simulated tools read and change the
+environment through a ``WorldState`` (by default, both on the midojo control
+plane), and mirror a real MCP server's tools through a forwarding layer.
 """
 
 from __future__ import annotations
@@ -28,9 +29,9 @@ from mcp.types import CallToolRequest, CallToolResult, ContentBlock, TextContent
 from mcp.types import Tool as MCPTool
 from pydantic import PrivateAttr
 
-from midojo_sdk.client import AgentControlPlaneClient
+from midojo_sdk.client import AgentControlPlaneClient, transient
 from midojo_sdk.context import ToolContext
-from midojo_sdk.recorder import CallRecorder, ControlPlaneRecorder, Disposition
+from midojo_sdk.recorder import Disposition, Recorder, RetryingRecorder, WorldState
 from midojo_sdk.session import SESSION_HEADER, session_token
 
 __all__ = ["BLOCKED_REASON", "MidojoMCP", "ToolContext", "UpstreamClient"]
@@ -190,36 +191,48 @@ class MidojoMCP:
 
     The SDK records each call's start before the tool runs and its finish
     after, with a fresh UUID ``call_id``: an MCP request ID only numbers the
-    requests of one connection, so it isn't unique per evaluation. Resends
-    create at most one record per ``call_id``. When the start fails the tool
-    doesn't run; when the finish never reaches the control plane, the call
-    stays there as unfinished. A refused call never runs, so it's recorded once.
+    requests of one connection, so it isn't unique per evaluation. When the
+    start fails the tool doesn't run; when the finish never reaches the
+    control plane, the call stays there as unfinished. A refused call never
+    runs, so it's recorded once. A record, a simulated tool's environment
+    changes and a forwarded call's effect on the real tool's system are
+    separate: none of them waits for or undoes another.
 
-    Calls are recorded on the control plane at ``control_plane_url``, for the
-    evaluation session the agent sends (the ``X-Midojo-Session`` header or
-    ``MIDOJO_SESSION_TOKEN``), unless ``recorder`` is given: then every call is
-    recorded there, with its disposition.
+    ``recorder`` records every call, with its disposition, and ``world`` is the
+    environment simulated tools get through their ``ToolContext``. Without
+    ``recorder``, calls are recorded on the control plane at
+    ``control_plane_url``, for the evaluation session the agent sends (the
+    ``X-Midojo-Session`` header or ``MIDOJO_SESSION_TOKEN``), resending after
+    a transient failure (see ``RetryingRecorder``); without ``world``, the
+    environment is that session's on the same control plane, or none when
+    there's no ``control_plane_url``. Forwarding (``mirror_upstream``) needs
+    only a recorder: a server with ``recorder`` and no ``control_plane_url``
+    mirrors and records with no environment at all.
     """
 
     def __init__(
         self,
         name: str,
         *,
-        control_plane_url: str,
+        control_plane_url: str | None = None,
         upstream_url: str | None = None,
         http: httpx.AsyncClient | None = None,
         upstream_transport: Any = None,
-        recorder: CallRecorder | None = None,
+        recorder: Recorder | None = None,
+        world: WorldState | None = None,
     ) -> None:
+        if control_plane_url is None and recorder is None:
+            raise ValueError("MidojoMCP needs a control_plane_url or a recorder.")
         self._fastmcp = FastMCP(name)
         self._control_plane_url = control_plane_url
-        self._http = http or httpx.AsyncClient(timeout=300.0)
+        self._http = http
         self._upstream = (
             UpstreamClient(upstream_url, transport=upstream_transport)
             if upstream_url is not None or upstream_transport is not None
             else None
         )
         self._recorder = recorder
+        self._world = world
         self._blocked: set[str] = set()
         self._denials: dict[str, Denial] = {}
         self._pass_protocol_errors()
@@ -268,9 +281,26 @@ class MidojoMCP:
 
         setattr(server, "run", run_with_upstream)
 
-    def _agent(self) -> AgentControlPlaneClient:
+    def _session_client(self) -> AgentControlPlaneClient:
+        """The control plane client for the session of the request being handled."""
+        assert self._control_plane_url is not None
+        if self._http is None:
+            self._http = httpx.AsyncClient(timeout=300.0)
         incoming = get_http_headers().get(SESSION_HEADER.lower())
         return AgentControlPlaneClient(self._control_plane_url, session_token(incoming), http=self._http)
+
+    def _bindings(self, *, world: bool) -> tuple[Recorder, WorldState | None]:
+        """The recorder for the request being handled, and its environment when ``world`` asks for one."""
+        client = None
+        if self._recorder is None or (world and self._world is None and self._control_plane_url is not None):
+            client = self._session_client()
+        recorder = self._recorder
+        if recorder is None:
+            assert client is not None
+            recorder = RetryingRecorder(client, retryable=transient)
+        if not world:
+            return recorder, None
+        return recorder, self._world or client
 
     def tool(self):
         def decorator(fn):
@@ -283,10 +313,9 @@ class MidojoMCP:
 
             @functools.wraps(fn)
             async def wrapper(**kwargs):
-                agent = self._agent()
-                recorder = self._recorder or ControlPlaneRecorder(agent)
+                recorder, world = self._bindings(world=True)
                 await self._refuse(recorder, fn.__name__, kwargs)
-                ctx = ToolContext(agent, self._upstream.call_tool if self._upstream else None)
+                ctx = ToolContext(world, self._upstream.call_tool if self._upstream else None)
                 call_id = str(uuid.uuid4())
                 await recorder.start_call(call_id=call_id, function=fn.__name__, args=kwargs, disposition="simulated")
                 # Finish the call when the tool returns or raises. A cancelled
@@ -341,7 +370,7 @@ class MidojoMCP:
 
         return decorator
 
-    async def _refuse(self, recorder: CallRecorder, name: str, args: dict[str, Any]) -> None:
+    async def _refuse(self, recorder: Recorder, name: str, args: dict[str, Any]) -> None:
         """Record the call and raise its error result when the tool is blocked or a denial check refuses it."""
         disposition: Disposition
         if name in self._blocked:
@@ -389,7 +418,7 @@ class MidojoMCP:
 
     async def _forward_call(self, name: str, arguments: dict[str, Any]) -> ToolResult:
         assert self._upstream is not None
-        recorder = self._recorder or ControlPlaneRecorder(self._agent())
+        recorder, _ = self._bindings(world=False)
         await self._refuse(recorder, name, arguments)
         call_id = str(uuid.uuid4())
         await recorder.start_call(call_id=call_id, function=name, args=arguments, disposition="forwarded")
