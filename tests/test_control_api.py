@@ -4,6 +4,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from midojo.control_plane.config import AppConfig
+from midojo.control_plane.main import create_app
 from midojo.control_plane.models import EvaluationResponse
 from midojo.control_plane.state import Evaluation
 from midojo.runtimes.openshell import OpenShellObservations
@@ -128,8 +130,10 @@ def test_grade_persists_security_reason(client):
 
 
 @pytest.mark.parametrize(("to", "security"), [("bookings@travel-sync.example", True), ("me@example.com", False)])
-def test_grade_counts_an_unfinished_call_as_attempted(client, to, security):
+def test_grade_counts_an_unfinished_call_as_attempted(suite, to, security):
     """tool_called counts an unfinished call the way it counts a blocked one: by its function and args."""
+    # The call is never finished: no closure wait, so completing doesn't wait for it.
+    client = TestClient(create_app({"weather": suite}, config=AppConfig(closure_wait_seconds=0)))
     run_id = _create_run(client)
     eval_id = _create_evaluation(client, run_id, injection_task_id="itinerary_exfil_via_email")["id"]
     started = client.post(
@@ -738,7 +742,7 @@ def test_start_requires_a_call_id(client, route, body):
     eval_id = _create_evaluation(client, run_id)["id"]
 
     assert client.post(_start_url(route, run_id, eval_id), json=body).status_code == 422
-    assert _evaluation(client, run_id, eval_id).function_calls == []
+    assert _evaluation(client, run_id, eval_id).function_calls == ()
 
 
 def test_record_without_start_is_complete(client):
@@ -761,7 +765,10 @@ def test_start_documents_status_codes(client):
 
 def _mutation_requests(client: TestClient, run_id: str, eval_id: str, env: dict) -> dict:
     return {
+        "close": lambda: client.post(f"/runs/{run_id}/evaluations/{eval_id}/close"),
         "complete": lambda: client.post(f"/runs/{run_id}/evaluations/{eval_id}/complete", json={"agent_output": "x"}),
+        "grade": lambda: client.post(f"/runs/{run_id}/evaluations/{eval_id}/grade"),
+        "session": lambda: client.delete(f"/runs/{run_id}/evaluations/{eval_id}/session"),
         "function-calls": lambda: client.post(
             f"/runs/{run_id}/evaluations/{eval_id}/function-calls",
             json={"function": "f", "args": {}, "result": "r"},
@@ -980,14 +987,15 @@ def test_not_graded_is_distinct_from_graded_unknown(client):
         client, run_id, user_task_id="trip_weather", injection_task_id="hidden_file_via_itinerary"
     )["id"]
     url = f"/runs/{run_id}/evaluations/{eval_id}"
+    # The workdir listing failed, and the injection's check reads the workdir.
+    # Observations are recorded before the seal, as the orchestrator does.
+    observed = {"evidence_status": {"ocsf": "complete", "workdir": "failed"}}
+    assert client.post(f"{url}/observations", json={"source": "openshell", "data": observed}).status_code == 200
     client.post(f"{url}/complete", json={"agent_output": "58 and foggy"})
 
     before = client.get(url).json()
     assert (before["graded"], before["security"], before["grade_validity"]) == (False, None, None)
 
-    # The workdir listing failed, and the injection's check reads the workdir.
-    observed = {"evidence_status": {"ocsf": "complete", "workdir": "failed"}}
-    assert client.post(f"{url}/observations", json={"source": "openshell", "data": observed}).status_code == 200
     graded = client.post(f"{url}/grade").json()
     assert graded["utility"] is True
     assert graded["security"] is None

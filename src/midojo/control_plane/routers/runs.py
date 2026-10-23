@@ -6,26 +6,23 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 
 from midojo.types import FunctionCallRecord, SuiteName
-from midojo.verifiers import ConversationTurn
 from midojo.yaml_task_suite import YAMLTaskSuite
 
-from ..config import AppConfig
 from ..dependencies import (
     RECORD_FUNCTION_CALL_RESPONSES,
     START_FUNCTION_CALL_RESPONSES,
-    get_config,
+    created_or_replayed,
+    get_control,
     get_evaluation_by_id,
     get_run,
     get_run_suite,
-    get_store,
     get_suites,
-    record_function_call,
     resolve_suite,
-    start_function_call,
     validate_environment,
     validate_observations,
 )
 from ..models import (
+    CloseResponse,
     CompleteRequest,
     CreateEvaluationRequest,
     CreateEvaluationResponse,
@@ -37,38 +34,32 @@ from ..models import (
     EvaluationSummary,
     FunctionCallResponse,
     GradeResponse,
+    LateFactResponse,
     RecordObservationsRequest,
     RunResponse,
     StartTurnRequest,
     TurnReplyRequest,
     TurnResponse,
 )
+from ..service import ById, ControlPlane
 from ..state import Evaluation, Run
-from ..store import Store
 
 router = APIRouter(prefix="/runs")
-
-
-def _require_eval(evaluation: Evaluation | None, eval_id: str) -> Evaluation:
-    """404 when an ID-based store mutation reports the evaluation doesn't exist."""
-    if evaluation is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown evaluation: {eval_id}")
-    return evaluation
 
 
 @router.post("", response_model=CreateRunResponse, status_code=status.HTTP_201_CREATED)
 async def create_run(
     req: CreateRunRequest,
     suites: Annotated[Mapping[SuiteName, YAMLTaskSuite], Depends(get_suites)],
-    store: Annotated[Store, Depends(get_store)],
+    control: Annotated[ControlPlane, Depends(get_control)],
 ):
     resolve_suite(suites, req.suite_name)
-    run = store.create_run(req.suite_name)
+    run = control.create_run(req.suite_name)
     return CreateRunResponse(id=run.id, suite_name=run.suite_name)
 
 
 @router.get("/{run_id}", response_model=RunResponse, status_code=status.HTTP_200_OK)
-async def retrieve_run(run: Annotated[Run, Depends(get_run)]):
+async def retrieve_run(run: Annotated[Run, Depends(get_run)], control: Annotated[ControlPlane, Depends(get_control)]):
     return RunResponse(
         id=run.id,
         suite_name=run.suite_name,
@@ -79,12 +70,13 @@ async def retrieve_run(run: Annotated[Run, Depends(get_run)]):
                 user_task_id=e.user_task_id,
                 injection_task_id=e.injection_task_id,
                 completed=e.completed,
+                stage=e.stage.value,
                 graded=e.graded,
-                utility=e.utility,
-                security=e.security,
-                grade_validity=e.grade_validity,
+                utility=e.grade.utility if e.grade else None,
+                security=e.grade.security if e.grade else None,
+                grade_validity=e.grade.grade_validity if e.grade else None,
             )
-            for e in list(run.evaluations.values())
+            for e in control.evaluations(run.id)
         ],
     )
 
@@ -92,36 +84,10 @@ async def retrieve_run(run: Annotated[Run, Depends(get_run)]):
 @router.post("/{run_id}/evaluations", response_model=CreateEvaluationResponse, status_code=status.HTTP_201_CREATED)
 async def create_evaluation(
     req: CreateEvaluationRequest,
-    config: Annotated[AppConfig, Depends(get_config)],
     run: Annotated[Run, Depends(get_run)],
-    suite: Annotated[YAMLTaskSuite, Depends(get_run_suite)],
-    store: Annotated[Store, Depends(get_store)],
+    control: Annotated[ControlPlane, Depends(get_control)],
 ):
-    if req.user_task_id not in suite.user_tasks:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unknown user task: {req.user_task_id}")
-    if req.injection_task_id is not None and req.injection_task_id not in suite.injection_tasks:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unknown injection task: {req.injection_task_id}"
-        )
-
-    environment = suite.provision_environment(req.injections)
-    pre_environment = environment.model_copy(deep=True)
-    turns = suite.inject_user_task_turns(req.user_task_id, req.injections)
-    prompt = turns[0]
-
-    evaluation = store.create_evaluation(
-        run.id,
-        user_task_id=req.user_task_id,
-        injection_task_id=req.injection_task_id,
-        pre_environment=pre_environment,
-        environment=environment,
-        active_injections=req.injections,
-        agent_input=prompt,
-    )
-    token, expires_at = store.create_session(run.id, evaluation.id, config.session_ttl_seconds)
-    return CreateEvaluationResponse(
-        id=evaluation.id, prompt=prompt, turns=turns, session_token=token, session_expires_at=expires_at
-    )
+    return control.create_evaluation(run.id, req.user_task_id, req.injection_task_id, req.injections)
 
 
 @router.get(
@@ -130,25 +96,56 @@ async def create_evaluation(
     status_code=status.HTTP_200_OK,
 )
 async def retrieve_evaluation(evaluation: Annotated[Evaluation, Depends(get_evaluation_by_id)]):
+    grade = evaluation.grade
     return EvaluationResponse(
         id=evaluation.id,
         user_task_id=evaluation.user_task_id,
         injection_task_id=evaluation.injection_task_id,
         completed=evaluation.completed,
+        stage=evaluation.stage.value,
         graded=evaluation.graded,
-        utility=evaluation.utility,
-        utility_reason=evaluation.utility_reason,
-        security=evaluation.security,
-        security_reason=evaluation.security_reason,
-        grade_validity=evaluation.grade_validity,
+        utility=grade.utility if grade else None,
+        utility_reason=grade.utility_reason if grade else None,
+        security=grade.security if grade else None,
+        security_reason=grade.security_reason if grade else None,
+        grade_validity=grade.grade_validity if grade else None,
         evidence_status=evaluation.evidence_status,
         agent_input=evaluation.agent_input,
         agent_output=evaluation.agent_output,
         turns=[TurnResponse.model_validate(turn) for turn in evaluation.turns],
         function_calls=[FunctionCallResponse.model_validate(fc) for fc in evaluation.function_calls],
-        observations=_observations_json(evaluation),
+        observations=_observations_json(evaluation.observations),
         pre_environment=evaluation.pre_environment.model_dump(),
         environment=evaluation.environment.model_dump(),
+        late_facts=[LateFactResponse.model_validate(fact) for fact in evaluation.late_facts],
+    )
+
+
+# --- Closure ---
+#
+# Closure is staged: POST .../close stops admitting new calls and waits, up to
+# the control plane's closure wait (midojo-serve --closure-wait), for calls
+# already admitted to finish; then the orchestrator records the final
+# observations; POST .../complete seals the snapshot that grading reads. A
+# complete without a close closes first. Writes that closure refuses are
+# recorded as late facts.
+
+
+@router.post("/{run_id}/evaluations/{eval_id}/close", response_model=CloseResponse, status_code=status.HTTP_200_OK)
+async def close_evaluation(
+    eval_id: str,
+    run: Annotated[Run, Depends(get_run)],
+    control: Annotated[ControlPlane, Depends(get_control)],
+) -> CloseResponse:
+    """Stop admitting new calls, and wait for admitted calls to finish, up to the closure wait.
+
+    Idempotent: closing again waits for what is left of the same closure wait,
+    or returns at once when it's over.
+    """
+    evaluation = await control.close(run.id, eval_id)
+    return CloseResponse(
+        stage=evaluation.stage.value,
+        unfinished_calls=[call.call_id for call in evaluation.function_calls if not call.complete],
     )
 
 
@@ -157,45 +154,25 @@ async def complete_evaluation(
     eval_id: str,
     req: CompleteRequest,
     run: Annotated[Run, Depends(get_run)],
-    store: Annotated[Store, Depends(get_store)],
+    control: Annotated[ControlPlane, Depends(get_control)],
 ):
-    _require_eval(store.complete_evaluation(run.id, eval_id, req.agent_output), eval_id)
+    """Seal the evaluation with the agent's final output, closing it first if it isn't closed.
+
+    Completing again with the same output is a no-op; another output is a 409,
+    recorded as a late fact.
+    """
+    await control.complete(run.id, eval_id, req.agent_output)
     return {"status": "completed"}
 
 
 @router.post("/{run_id}/evaluations/{eval_id}/grade", response_model=GradeResponse, status_code=status.HTTP_200_OK)
 async def grade_evaluation(
-    evaluation: Annotated[Evaluation, Depends(get_evaluation_by_id)],
-    suite: Annotated[YAMLTaskSuite, Depends(get_run_suite)],
-    store: Annotated[Store, Depends(get_store)],
+    eval_id: str,
+    run: Annotated[Run, Depends(get_run)],
+    control: Annotated[ControlPlane, Depends(get_control)],
 ):
-    if not evaluation.completed:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="Evaluation not completed. Call complete first."
-        )
-
-    result = suite.grade(
-        user_task_id=evaluation.user_task_id,
-        injection_task_id=evaluation.injection_task_id,
-        agent_output=evaluation.agent_output or "",
-        pre_environment=evaluation.pre_environment,
-        post_environment=evaluation.environment,
-        function_calls=evaluation.function_calls,
-        observations=evaluation.observations,
-        turns=[ConversationTurn(message=turn.message, reply=turn.reply) for turn in evaluation.turns],
-    )
-    graded = GradeResponse.model_validate(result)
-    store.set_grade(
-        evaluation.run_id,
-        evaluation.id,
-        utility=graded.utility,
-        security=graded.security,
-        security_reason=graded.security_reason,
-        utility_reason=graded.utility_reason,
-        grade_validity=graded.grade_validity,
-        evidence_status=graded.evidence_status,
-    )
-    return graded
+    """Grade the sealed snapshot. The first grade is kept: grading again returns it."""
+    return control.grade(run.id, eval_id)
 
 
 # --- Environment endpoints (nested under evaluation) ---
@@ -211,19 +188,19 @@ async def update_environment(
     body: dict,
     evaluation: Annotated[Evaluation, Depends(get_evaluation_by_id)],
     suite: Annotated[YAMLTaskSuite, Depends(get_run_suite)],
-    store: Annotated[Store, Depends(get_store)],
+    control: Annotated[ControlPlane, Depends(get_control)],
 ) -> dict:
     env = validate_environment(suite, body)
-    updated = _require_eval(store.set_environment(evaluation.run_id, evaluation.id, env), evaluation.id)
-    return updated.environment.model_dump()
+    return control.replace_environment(ById(evaluation.run_id, evaluation.id), env).model_dump()
 
 
 @router.delete("/{run_id}/evaluations/{eval_id}/session", status_code=204)
 async def close_session(
-    evaluation: Annotated[Evaluation, Depends(get_evaluation_by_id)],
-    store: Annotated[Store, Depends(get_store)],
+    eval_id: str,
+    run: Annotated[Run, Depends(get_run)],
+    control: Annotated[ControlPlane, Depends(get_control)],
 ) -> None:
-    store.close_session(evaluation.run_id, evaluation.id)
+    control.close_session(run.id, eval_id)
 
 
 # --- Function call endpoints ---
@@ -237,7 +214,7 @@ async def close_session(
 async def list_function_calls(
     evaluation: Annotated[Evaluation, Depends(get_evaluation_by_id)],
 ) -> list[FunctionCallRecord]:
-    return evaluation.function_calls
+    return list(evaluation.function_calls)
 
 
 @router.get(
@@ -266,19 +243,17 @@ async def record_run_function_call(
     req: CreateFunctionCallRecord,
     response: Response,
     run: Annotated[Run, Depends(get_run)],
-    store: Annotated[Store, Depends(get_store)],
+    control: Annotated[ControlPlane, Depends(get_control)],
 ) -> FunctionCallRecord:
     """Record a call in the evaluation, at most once per ``call_id``.
 
     201 when recorded, or when it finishes a started ``call_id`` in place; 200
     with the stored record when ``call_id`` is already finished with the same
     body; 409 when it's finished with another body, or was started with
-    another function or args.
+    another function or args, or when closure no longer admits it (recorded as
+    a late fact), as on ``POST /agent/function-calls``.
     """
-    record = record_function_call(store, run.id, eval_id, req, response)
-    if record is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown evaluation: {eval_id}")
-    return record
+    return created_or_replayed(control.finish_call(ById(run.id, eval_id), req), response)
 
 
 @router.post(
@@ -292,18 +267,16 @@ async def start_run_function_call(
     req: CreateFunctionCallStart,
     response: Response,
     run: Annotated[Run, Depends(get_run)],
-    store: Annotated[Store, Depends(get_store)],
+    control: Annotated[ControlPlane, Depends(get_control)],
 ) -> FunctionCallRecord:
     """Start a call in the evaluation: an unfinished record that ``POST .../function-calls`` finishes.
 
     201 when started; 200 with the stored record when ``call_id`` is already
     recorded, finished or not, with the same function and args; 409 when it's
-    recorded with another function or args.
+    recorded with another function or args, or once closure has begun
+    (recorded as a late fact), as on ``POST /agent/function-calls/start``.
     """
-    record = start_function_call(store, run.id, eval_id, req, response)
-    if record is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown evaluation: {eval_id}")
-    return record
+    return created_or_replayed(control.start_call(ById(run.id, eval_id), req), response)
 
 
 # --- Turn endpoints ---
@@ -312,11 +285,6 @@ async def start_run_function_call(
 # records the reply once the agent answers. Function calls recorded in between
 # carry that turn's index. Turns run one at a time: the next starts only after
 # the previous one's reply is recorded.
-
-
-def _require_open(evaluation: Evaluation) -> None:
-    if evaluation.completed:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Evaluation already completed")
 
 
 @router.get(
@@ -334,18 +302,12 @@ async def list_turns(evaluation: Annotated[Evaluation, Depends(get_evaluation_by
     status_code=status.HTTP_201_CREATED,
 )
 async def start_turn(
+    eval_id: str,
     req: StartTurnRequest,
-    evaluation: Annotated[Evaluation, Depends(get_evaluation_by_id)],
-    store: Annotated[Store, Depends(get_store)],
+    run: Annotated[Run, Depends(get_run)],
+    control: Annotated[ControlPlane, Depends(get_control)],
 ) -> TurnResponse:
-    _require_open(evaluation)
-    if evaluation.turns and evaluation.turns[-1].ended_at is None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Turn {evaluation.turns[-1].index} has no reply yet",
-        )
-    updated = _require_eval(store.start_turn(evaluation.run_id, evaluation.id, req.message), evaluation.id)
-    return TurnResponse.model_validate(updated.turns[-1])
+    return TurnResponse.model_validate(control.start_turn(run.id, eval_id, req.message))
 
 
 @router.post(
@@ -354,18 +316,13 @@ async def start_turn(
     status_code=status.HTTP_200_OK,
 )
 async def record_turn_reply(
+    eval_id: str,
     index: int,
     req: TurnReplyRequest,
-    evaluation: Annotated[Evaluation, Depends(get_evaluation_by_id)],
-    store: Annotated[Store, Depends(get_store)],
+    run: Annotated[Run, Depends(get_run)],
+    control: Annotated[ControlPlane, Depends(get_control)],
 ) -> TurnResponse:
-    _require_open(evaluation)
-    if index < 0 or index >= len(evaluation.turns):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Turn not started: {index}")
-    if evaluation.turns[index].ended_at is not None:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Turn {index} already has a reply")
-    updated = _require_eval(store.record_turn_reply(evaluation.run_id, evaluation.id, index, req.reply), evaluation.id)
-    return TurnResponse.model_validate(updated.turns[index])
+    return TurnResponse.model_validate(control.record_turn_reply(run.id, eval_id, index, req.reply))
 
 
 # --- Observation endpoints ---
@@ -374,17 +331,18 @@ async def record_turn_reply(
 # (e.g. OpenShell's workdir diff and OCSF events), keyed by source. There is no
 # /agent route for them, so an agent's session token can't write them. Each
 # source's data is validated against its registered model (midojo.observations)
-# when it's recorded. Verifiers read the models from
-# VerificationContext.observations at grade time.
+# when it's recorded. They're accepted until the seal; after it, they're late
+# facts. Verifiers read the models from VerificationContext.observations at
+# grade time.
 
 
-def _observations_json(evaluation: Evaluation) -> dict:
-    return {source: observed.model_dump(mode="json") for source, observed in evaluation.observations.items()}
+def _observations_json(observations: Mapping) -> dict:
+    return {source: observed.model_dump(mode="json") for source, observed in observations.items()}
 
 
 @router.get("/{run_id}/evaluations/{eval_id}/observations", status_code=status.HTTP_200_OK)
 async def get_observations(evaluation: Annotated[Evaluation, Depends(get_evaluation_by_id)]) -> dict:
-    return _observations_json(evaluation)
+    return _observations_json(evaluation.observations)
 
 
 @router.post("/{run_id}/evaluations/{eval_id}/observations", status_code=status.HTTP_200_OK)
@@ -392,8 +350,7 @@ async def record_observations(
     eval_id: str,
     req: RecordObservationsRequest,
     run: Annotated[Run, Depends(get_run)],
-    store: Annotated[Store, Depends(get_store)],
+    control: Annotated[ControlPlane, Depends(get_control)],
 ) -> dict:
     observed = validate_observations(req.source, req.data)
-    evaluation = _require_eval(store.record_observations(run.id, eval_id, req.source, observed), eval_id)
-    return _observations_json(evaluation)
+    return _observations_json(control.record_observations(run.id, eval_id, req.source, observed))

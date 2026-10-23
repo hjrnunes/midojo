@@ -10,9 +10,11 @@ from midojo.types import SuiteName
 from midojo.yaml_task_suite import YAMLTaskSuite
 
 from .config import AppConfig
-from .dependencies import require_control_token
+from .dependencies import rejection_response, require_control_token
+from .lifecycle import RejectedError
 from .routers import agent, runs, suite, tasks
-from .store import InMemoryStore, InvalidSessionError, Store
+from .service import ControlPlane
+from .store import InMemoryStore, Store
 
 _SUITE_NAME = TypeAdapter(SuiteName)
 
@@ -27,6 +29,8 @@ def create_app(
     app.state.suites = {_SUITE_NAME.validate_python(name): suite for name, suite in suites.items()}
     app.state.store = store if store is not None else InMemoryStore()
     app.state.config = config if config is not None else AppConfig()
+    # Every route that reads or writes an evaluation goes through this one writer.
+    app.state.control = ControlPlane(app.state.suites, store=app.state.store, config=app.state.config)
     # /agent routes take an evaluation session token instead.
     control = [Depends(require_control_token)]
     app.include_router(suite.router, dependencies=control)
@@ -34,9 +38,9 @@ def create_app(
     app.include_router(runs.router, dependencies=control)
     app.include_router(agent.router)
 
-    @app.exception_handler(InvalidSessionError)
-    async def invalid_session(request: Request, exc: InvalidSessionError) -> JSONResponse:
-        return JSONResponse(status_code=401, content={"detail": str(exc)}, headers={"WWW-Authenticate": "Bearer"})
+    @app.exception_handler(RejectedError)
+    async def rejected(request: Request, exc: RejectedError) -> JSONResponse:
+        return rejection_response(exc)
 
     @app.get("/health")
     async def health() -> dict:
