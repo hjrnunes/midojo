@@ -18,6 +18,7 @@ from pydantic import ValidationError
 
 from midojo.control_plane.config import AppConfig
 from midojo.control_plane.main import create_app
+from midojo.control_plane.service import ById
 from midojo.yaml_task_suite import YAMLTaskSuite
 from tests.backends import Agent
 
@@ -67,6 +68,7 @@ async def test_interleaved_suites_validate_and_grade_their_own_environment(tmp_p
     with pytest.raises(ControlPlaneRejectedError) as refused:
         await agent_a.change({"label": "wrong"})
     assert refused.value.kind is RejectionKind.INVALID_ENVIRONMENT
+    assert await agent_a.read() == (0, {"count": 3})  # neither the environment nor its revision changed
     assert await agent_b.change({"label": "changed"}) == (1, {"label": "changed"})
     for run, ev, agent, expected in [(run_a, a, agent_a, True), (run_b, b, agent_b, False)]:
         url = f"/runs/{run['id']}/evaluations/{ev['id']}"
@@ -230,6 +232,35 @@ async def test_a_change_at_a_stale_revision_changes_nothing(client, backend):
         revision + 1,
         {**environment, "weather_alerts": [{"city": "Boston", "message": "first"}]},
     )
+
+
+@pytest.mark.asyncio
+async def test_an_environment_change_after_the_seal_is_the_same_late_fact(client, backend):
+    run, ev = new_evaluation(client)
+    url = f"/runs/{run['id']}/evaluations/{ev['id']}"
+    agent = backend.agent(ev["session_token"])
+    assert await agent.change({"weather_alerts": [{"city": "Boston", "message": "before"}]}) is not None
+    client.post(f"{url}/complete", json={"agent_output": "done"})
+    sealed = client.get(url).json()
+
+    late = [{"city": "Boston", "message": "late"}]
+    with pytest.raises(ControlPlaneRejectedError) as refused:
+        await agent.change({"weather_alerts": late}, expected_revision=1)
+
+    assert (refused.value.kind, refused.value.late_fact) == (RejectionKind.SESSION_CLOSED, True)
+    after = client.get(url).json()
+    assert after["environment"] == sealed["environment"]
+    assert backend.app.state.control.evaluation(ById(run["id"], ev["id"])).environment_revision == 1
+    [fact] = after["late_facts"]
+    del fact["at"]
+    assert fact == {
+        "event": "change_environment",
+        "stage": "sealed",
+        "by": "agent",
+        "evidence": ["environment"],
+        "payload": {"set": {"weather_alerts": late}, "expected_revision": 1},
+        "call_id": None,
+    }
 
 
 @pytest.mark.asyncio

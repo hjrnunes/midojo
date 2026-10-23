@@ -224,3 +224,16 @@ async def test_midojo_mcp_raises_the_same_rejection_on_both_implementations(clie
     cause = refused.value.__cause__
     assert isinstance(cause, ControlPlaneRejectedError)
     assert cause.kind is RejectionKind.INVALID_SESSION
+
+
+@pytest.mark.asyncio
+async def test_tool_context_still_takes_the_deprecated_client_keyword(client, backend):
+    _, evaluation = _new_evaluation(client)
+    agent = backend.agent(evaluation["session_token"])
+
+    with pytest.warns(DeprecationWarning, match=r"ToolContext\(client=\.\.\.\) is deprecated"):
+        ctx = ToolContext(client=agent)
+
+    assert "New York" in await ctx.env("cities")
+    with pytest.raises(TypeError, match="world or client, not both"):
+        ToolContext(agent, client=agent)

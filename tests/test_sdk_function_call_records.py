@@ -7,7 +7,14 @@ import pytest
 from midojo_sdk import client as sdk_client
 from midojo_sdk import recorder as sdk_recorder
 from midojo_sdk.client import RECORD_ATTEMPTS, AgentControlPlaneClient, CallIds, transient
-from midojo_sdk.recorder import ControlPlaneRejectedError, RejectionKind, RetryingRecorder
+from midojo_sdk.recorder import (
+    ControlPlaneRecorder,
+    ControlPlaneRejectedError,
+    InvalidRequestError,
+    RejectionKind,
+    RetryingRecorder,
+    retry,
+)
 
 from midojo.control_plane.lifecycle import Rejection
 
@@ -372,3 +379,105 @@ async def test_both_implementations_record_the_same_call(client, backend):
         "complete": True,
         "turn": None,
     }
+
+
+class Refusing:
+    """A recorder whose every start and finish raises ``error``, counting the attempts."""
+
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+        self.attempts = 0
+
+    async def start_call(self, **kwargs) -> None:
+        self.attempts += 1
+        raise self.error
+
+    async def finish_call(self, **kwargs) -> None:
+        self.attempts += 1
+        raise self.error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [ControlPlaneRejectedError(RejectionKind.CALL_CONFLICT, "conflict"), InvalidRequestError("call_id too long")],
+    ids=["rejection", "invalid-request"],
+)
+async def test_a_retrying_recorder_never_resends_a_final_error_whatever_its_predicate(error):
+    refusing = Refusing(error)
+    recorder = RetryingRecorder(refusing, retryable=lambda e: True)
+
+    with pytest.raises(type(error)):
+        await recorder.start_call(call_id="c1", function="f", args={}, disposition="simulated")
+    with pytest.raises(type(error)):
+        await recorder.finish_call(call_id="c1", function="f", args={}, result="r", disposition="simulated")
+
+    assert refusing.attempts == 2  # one attempt each
+
+
+@pytest.mark.asyncio
+async def test_the_retry_helper_never_resends_a_rejection_whatever_its_predicate():
+    refusing = Refusing(ControlPlaneRejectedError(RejectionKind.SEALED, "sealed"))
+    with pytest.raises(ControlPlaneRejectedError):
+        await retry(lambda: refusing.finish_call(), retryable=lambda e: True)
+    assert refusing.attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_a_lost_start_response_is_resent_and_records_one_call(client, app):
+    """The start commits, its response is lost, and the resend replays it: one record, not two."""
+    run_id, eval_id, token = new_evaluation(client)
+    control = httpx.ASGITransport(app)
+    lost: list[str] = []
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        response = await control.handle_async_request(request)
+        if request.url.path.endswith("/start") and not lost:
+            lost.append(request.url.path)  # committed on the control plane; the response never arrives
+            raise httpx.ReadError("connection reset after the commit")
+        return response
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        recorder = RetryingRecorder(AgentControlPlaneClient("http://control", token, http=http), retryable=transient)
+        await recorder.start_call(call_id="c1", function="f", args={"x": 1}, disposition="forwarded")
+        await recorder.finish_call(call_id="c1", function="f", args={"x": 1}, result="r", disposition="forwarded")
+
+    assert lost == ["/agent/function-calls/start"]
+    calls = client.get(f"/runs/{run_id}/evaluations/{eval_id}/function-calls").json()
+    assert [(call["call_id"], call["complete"], call["result"]) for call in calls] == [("c1", True, "r")]
+
+
+@pytest.mark.asyncio
+async def test_the_deprecated_control_plane_recorder_still_records_and_resends():
+    http, sent = scripted([503, 201, 201])
+    with pytest.warns(DeprecationWarning, match="ControlPlaneRecorder is deprecated"):
+        recorder = ControlPlaneRecorder(AgentControlPlaneClient("http://control", "session", http=http))
+
+    await recorder.start_call(call_id="c1", function="f", args={}, disposition="simulated")
+    await recorder.finish_call(call_id="c1", function="f", args={}, result="r", disposition="denied")
+
+    start = {"call_id": "c1", "function": "f", "args": {}}
+    finish = {**start, "result": "r", "error": None, "blocked": True}
+    assert [json.loads(body) for body in sent] == [start, start, finish]
+
+
+# --- a malformed request is the same error on both implementations ---
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("call_id", ["", "x" * 257], ids=["empty", "too-long"])
+@pytest.mark.parametrize("event", ["start", "finish"])
+async def test_a_malformed_call_is_an_invalid_request_on_both_implementations(client, backend, call_id, event):
+    run_id, eval_id, token = new_evaluation(client)
+    agent = backend.agent(token)
+
+    with pytest.raises(InvalidRequestError) as invalid:
+        if event == "start":
+            await agent.start_call(call_id=call_id, function="f", args={}, disposition="forwarded")
+        else:
+            await agent.finish_call(call_id=call_id, function="f", args={}, result="r", disposition="forwarded")
+
+    assert "call_id" in invalid.value.detail
+    # Over HTTP it is still the API's 422, for callers that catch httpx errors.
+    assert isinstance(invalid.value, httpx.HTTPStatusError) is (backend.name == "http")
+    assert client.get(f"/runs/{run_id}/evaluations/{eval_id}/function-calls").json() == []

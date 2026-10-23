@@ -275,8 +275,12 @@ def test_a_change_without_a_revision_applies_at_any_revision():
 
 @pytest.mark.parametrize("values", [{"unknown": 1}, {"counter": "not a number"}], ids=["unknown", "invalid"])
 def test_a_change_that_does_not_fit_the_environment_is_refused(values):
-    outcome = transition(_evaluation(), AGENT, ChangeEnvironment(values, AT))
+    evaluation = _apply(_evaluation(), ChangeEnvironment({"counter": 1}, AT))
+    outcome = transition(evaluation, AGENT, ChangeEnvironment(values, AT))
     assert isinstance(outcome, Rejected) and outcome.kind is Rejection.INVALID_ENVIRONMENT
+    # A rejection leaves nothing behind: the next change still applies at the same revision.
+    after = _accept(evaluation, ChangeEnvironment({"counter": 2}, AT, expected_revision=1), AGENT)
+    assert after.result == (2, _Env(counter=2))
 
 
 # --- calls: idempotency, conflicts and unfinished calls ---

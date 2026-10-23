@@ -308,6 +308,7 @@ def test_agent_environment_patch_refuses_an_environment_the_suite_does_not_allow
 
     assert (response.status_code, response.json()["kind"]) == (422, "invalid_environment")
     assert client.get(f"/runs/{run_id}/evaluations/{eval_id}/environment").json() == before
+    assert client.get("/agent/environment").headers["X-Midojo-Environment-Revision"] == "0"
 
 
 def test_agent_environment_patch_after_the_seal_is_a_late_fact(client):

@@ -15,6 +15,7 @@ from midojo_sdk.recorder import (
     ControlPlaneRejectedError,
     Disposition,
     EnvironmentRevision,
+    InvalidRequestError,
     RejectionKind,
     retry,
 )
@@ -26,6 +27,7 @@ __all__ = [
     "REVISION_HEADER",
     "AgentControlPlaneClient",
     "CallIds",
+    "InvalidHTTPRequestError",
     "transient",
 ]
 
@@ -65,6 +67,14 @@ class CallIds:
                 self._used.add(call_id)
                 return call_id
         return str(uuid.uuid4())
+
+
+class InvalidHTTPRequestError(InvalidRequestError, httpx.HTTPStatusError):
+    """The API's 422 for a request it can't take as sent: an :class:`InvalidRequestError` and an HTTP error."""
+
+    def __init__(self, detail: str, *, request: httpx.Request, response: httpx.Response) -> None:
+        httpx.HTTPStatusError.__init__(self, f"invalid request: {detail}", request=request, response=response)
+        self.detail = detail
 
 
 def transient(error: Exception) -> bool:
@@ -221,8 +231,10 @@ def _raise_for_status(response: httpx.Response) -> None:
     """Raise the control plane's rejection as a ``ControlPlaneRejectedError``, and any other error as ``httpx``'s.
 
     Only a response whose body names one of the control plane's rejection
-    kinds is a rejection. Anything else, such as a proxy's 503 or a body that
-    isn't JSON, is an HTTP error like any other.
+    kinds is a rejection. A 422 whose ``detail`` is a list of errors, the
+    API's answer to a malformed request, is an :class:`InvalidHTTPRequestError`.
+    Anything else, such as a proxy's 503 or a body that isn't JSON, is an HTTP
+    error like any other.
     """
     if response.is_success:
         return
@@ -241,4 +253,6 @@ def _raise_for_status(response: httpx.Response) -> None:
             raise ControlPlaneRejectedError(
                 kind, detail if isinstance(detail, str) else str(detail), late_fact=late_fact
             )
+    if response.status_code == 422 and isinstance(body, dict) and isinstance(body.get("detail"), list):
+        raise InvalidHTTPRequestError(str(body["detail"]), request=response.request, response=response)
     response.raise_for_status()

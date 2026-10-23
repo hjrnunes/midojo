@@ -32,8 +32,12 @@ from __future__ import annotations
 
 import asyncio
 import enum
+import warnings
 from collections.abc import Awaitable, Callable
-from typing import Any, Literal, NamedTuple, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, Protocol, TypeVar
+
+if TYPE_CHECKING:
+    from midojo_sdk.client import AgentControlPlaneClient
 
 Disposition = Literal["forwarded", "denied", "simulated", "blocked"]
 """What the interception layer did with a call.
@@ -91,6 +95,25 @@ class ControlPlaneRejectedError(RuntimeError):
         self.kind = kind
         self.detail = detail
         self.late_fact = late_fact
+
+
+class InvalidRequestError(ValueError):
+    """The control plane can't take the request as sent: a field is missing, too long, or of the wrong type.
+
+    Unlike a :class:`ControlPlaneRejectedError`, nothing was decided about the
+    evaluation: the request never reached its lifecycle rules. Over HTTP it's
+    the 422 the API answers before the control plane decides anything (and is
+    also an ``httpx.HTTPStatusError``); in process, the same check fails before
+    the event is submitted. Resending it gets the same answer.
+    """
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(f"invalid request: {detail}")
+        self.detail = detail
+
+
+FINAL_ERRORS: tuple[type[Exception], ...] = (ControlPlaneRejectedError, InvalidRequestError)
+"""The errors no resend can change: :func:`retry` raises them at once, whatever its ``retryable`` says."""
 
 
 class Recorder(Protocol):
@@ -181,13 +204,16 @@ async def retry(
     Up to ``attempts`` calls in all (``RECORD_ATTEMPTS`` by default), waiting
     ``backoff_seconds`` (``RECORD_BACKOFF_SECONDS``) before the first resend
     and twice as long before each later one. Any other error, and the last
-    attempt's, is raised at once.
+    attempt's, is raised at once, and so is one of :data:`FINAL_ERRORS` (a
+    rejection or an invalid request) whatever ``retryable`` says.
     """
     attempts = RECORD_ATTEMPTS if attempts is None else attempts
     backoff = RECORD_BACKOFF_SECONDS if backoff_seconds is None else backoff_seconds
     for attempt in range(1, attempts + 1):
         try:
             return await send()
+        except FINAL_ERRORS:
+            raise
         except Exception as e:
             if attempt == attempts or not retryable(e):
                 raise
@@ -201,7 +227,8 @@ class RetryingRecorder:
     ``retryable`` says which errors are transient: for the HTTP recorder,
     :func:`midojo_sdk.client.transient` (a transport error, or a 5xx response
     that isn't the control plane's own rejection). A
-    :class:`ControlPlaneRejectedError` is never transient.
+    :class:`ControlPlaneRejectedError` or an :class:`InvalidRequestError` is
+    never resent, whatever ``retryable`` says.
 
     Resends keep the ``call_id``, and the control plane keeps at most one
     record per ``call_id``, so a resent event that had already arrived isn't
@@ -246,3 +273,40 @@ class RetryingRecorder:
 
     async def _retry(self, send: Callable[[], Awaitable[None]]) -> None:
         await retry(send, retryable=self._retryable, attempts=self._attempts, backoff_seconds=self._backoff_seconds)
+
+
+class ControlPlaneRecorder:
+    """Deprecated: records calls through an :class:`~midojo_sdk.client.AgentControlPlaneClient`.
+
+    The client is a :class:`Recorder` itself; wrap it in
+    ``RetryingRecorder(client, retryable=midojo_sdk.client.transient)`` for
+    resends. This adapter does exactly that, as it resent records before.
+    """
+
+    def __init__(self, client: AgentControlPlaneClient) -> None:
+        from midojo_sdk.client import transient
+
+        warnings.warn(
+            "ControlPlaneRecorder is deprecated: use the AgentControlPlaneClient as the recorder, wrapped in "
+            "RetryingRecorder(client, retryable=midojo_sdk.client.transient) for resends.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        self._recorder = RetryingRecorder(client, retryable=transient)
+
+    async def start_call(self, *, call_id: str, function: str, args: dict[str, Any], disposition: Disposition) -> None:
+        await self._recorder.start_call(call_id=call_id, function=function, args=args, disposition=disposition)
+
+    async def finish_call(
+        self,
+        *,
+        call_id: str,
+        function: str,
+        args: dict[str, Any],
+        result: str,
+        disposition: Disposition,
+        error: str | None = None,
+    ) -> None:
+        await self._recorder.finish_call(
+            call_id=call_id, function=function, args=args, result=result, disposition=disposition, error=error
+        )

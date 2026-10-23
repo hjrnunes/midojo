@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -17,9 +18,20 @@ class ToolContext:
     has none, and reading or changing the environment then raises. Changing
     the environment is atomic on its own, never together with the tool's
     record or with what a forwarded call did to the real tool's system.
+
+    ``client`` is the deprecated name of ``world``.
     """
 
-    def __init__(self, world: WorldState | None = None, forward: Forward | None = None) -> None:
+    def __init__(
+        self, world: WorldState | None = None, forward: Forward | None = None, *, client: WorldState | None = None
+    ) -> None:
+        if client is not None:
+            if world is not None:
+                raise TypeError("ToolContext takes world or client, not both: client is the deprecated name of world.")
+            warnings.warn(
+                "ToolContext(client=...) is deprecated: pass the WorldState as world.", DeprecationWarning, stacklevel=2
+            )
+            world = client
         self._world = world
         self._forward = forward
 
