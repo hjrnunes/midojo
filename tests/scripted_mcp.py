@@ -16,6 +16,7 @@ import anyio
 from fastmcp.client.transports import ClientTransport
 from mcp import ClientSession
 from mcp.server.lowlevel import Server
+from mcp.server.session import ServerSession
 from mcp.shared.exceptions import McpError
 from mcp.shared.memory import create_client_server_memory_streams
 from mcp.shared.message import SessionMessage
@@ -138,12 +139,16 @@ TOOLS: list[dict[str, Any]] = [
 ]
 """The tools as the server lists them, in this order."""
 
-PROTOCOL_ERROR = ErrorData(code=-32602, message="Unknown account: acc-404", data={"account": "acc-404"})
-"""The JSON-RPC error ``close_account`` answers with."""
+SESSION_CALL = "example.com/session_call"
+"""The ``_meta`` key of every result, and the ``data`` key of the JSON-RPC error, that numbers the call in its session."""
+
+PROTOCOL_ERROR_DATA = {"account": "acc-404"}
+PROTOCOL_ERROR = ErrorData(code=-32602, message="Unknown account: acc-404", data=PROTOCOL_ERROR_DATA)
+"""The JSON-RPC error ``close_account`` answers with, before its ``data`` gets the call's ``SESSION_CALL``."""
 
 
 def _result(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    """The result the server sends for a call, as literal JSON. Arguments are echoed as received."""
+    """The result the server sends for a call, before its session's call number. Arguments are echoed as received."""
     if name == "ping":
         return {"content": [{"type": "text", "text": "pong"}], "isError": False}
     if name == "get_time":
@@ -190,15 +195,25 @@ def _result(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
 class ScriptedMCP:
     """An MCP server that lists ``TOOLS`` and answers each call with its scripted result.
 
-    ``close_account`` answers with the JSON-RPC error ``PROTOCOL_ERROR``.
-    Every call it receives is kept in ``calls`` as ``(name, arguments)``.
+    ``close_account`` answers with the JSON-RPC error ``PROTOCOL_ERROR``. The
+    server keeps state per session: each result's ``_meta`` (and the error's
+    ``data``) numbers the call within its session under ``SESSION_CALL``, so
+    the same calls spread over several sessions get other results than over
+    one. Every call it receives is kept in ``calls`` as ``(name, arguments)``,
+    and in ``sessions`` grouped by session. A call to a tool in ``hang`` sets
+    ``hanging`` and never returns. ``transport`` connects a fastmcp client to it.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, hang: tuple[str, ...] = ()) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.sessions: list[list[tuple[str, dict[str, Any]]]] = []
+        self.hanging = anyio.Event()
+        self._hang = hang
+        self._session_calls: dict[ServerSession, list[tuple[str, dict[str, Any]]]] = {}
         self.server: Server = Server("scripted")
         self.server.request_handlers[ListToolsRequest] = self._list_tools
         self.server.request_handlers[CallToolRequest] = self._call_tool
+        self.transport = InProcessTransport(self.server)
 
     async def _list_tools(self, request: ListToolsRequest) -> ServerResult:
         return ServerResult(ListToolsResult(tools=[Tool.model_validate(tool) for tool in TOOLS]))
@@ -206,27 +221,49 @@ class ScriptedMCP:
     async def _call_tool(self, request: CallToolRequest) -> ServerResult:
         name, arguments = request.params.name, request.params.arguments or {}
         self.calls.append((name, arguments))
+        session = self.server.request_context.session
+        if session not in self._session_calls:
+            self._session_calls[session] = []
+            self.sessions.append(self._session_calls[session])
+        self._session_calls[session].append((name, arguments))
+        call = len(self._session_calls[session])
+        if name in self._hang:
+            self.hanging.set()
+            await anyio.Event().wait()
         if name == "close_account":
-            raise McpError(PROTOCOL_ERROR)
-        return ServerResult(CallToolResult.model_validate(_result(name, arguments)))
+            raise McpError(PROTOCOL_ERROR.model_copy(update={"data": {**PROTOCOL_ERROR_DATA, SESSION_CALL: call}}))
+        result = _result(name, arguments)
+        result["_meta"] = {**result.get("_meta", {}), SESSION_CALL: call}
+        return ServerResult(CallToolResult.model_validate(result))
 
 
 class InProcessTransport(ClientTransport):
-    """A fastmcp client transport to a low-level MCP ``Server`` in the same process."""
+    """A fastmcp client transport to a low-level MCP ``Server`` in the same process.
+
+    Each connection is a new server session. ``opened`` counts the
+    connections made, and ``open`` the ones not closed yet.
+    """
 
     def __init__(self, server: Server) -> None:
         self.server = server
+        self.opened = 0
+        self.open = 0
 
     @contextlib.asynccontextmanager
     async def connect_session(self, **session_kwargs: Any) -> AsyncIterator[ClientSession]:
-        async with create_client_server_memory_streams() as (client_streams, server_streams):
-            async with anyio.create_task_group() as tasks:
-                tasks.start_soon(self.server.run, *server_streams, self.server.create_initialization_options())
-                try:
-                    async with ClientSession(*client_streams, **session_kwargs) as session:
-                        yield session
-                finally:
-                    tasks.cancel_scope.cancel()
+        self.opened += 1
+        self.open += 1
+        try:
+            async with create_client_server_memory_streams() as (client_streams, server_streams):
+                async with anyio.create_task_group() as tasks:
+                    tasks.start_soon(self.server.run, *server_streams, self.server.create_initialization_options())
+                    try:
+                        async with ClientSession(*client_streams, **session_kwargs) as session:
+                            yield session
+                    finally:
+                        tasks.cancel_scope.cancel()
+        finally:
+            self.open -= 1
 
 
 INITIALIZE = {

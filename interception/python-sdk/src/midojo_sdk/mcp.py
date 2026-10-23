@@ -7,14 +7,18 @@ mirror a real MCP server's tools through a forwarding layer.
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import inspect
+import logging
 import uuid
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextvars import ContextVar
 from typing import Any
 
+import anyio
 import httpx
+from anyio.abc import TaskGroup, TaskStatus
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.dependencies import get_http_headers
@@ -30,6 +34,8 @@ from midojo_sdk.recorder import CallRecorder, ControlPlaneRecorder, Disposition
 from midojo_sdk.session import SESSION_HEADER, session_token
 
 __all__ = ["BLOCKED_REASON", "MidojoMCP", "ToolContext", "UpstreamClient"]
+
+logger = logging.getLogger(__name__)
 
 BLOCKED_REASON = "Tool execution was blocked"
 """What the agent is told when it calls a blocked tool, the same as with the PI and LangChain SDKs."""
@@ -47,24 +53,44 @@ _protocol_errors: ContextVar[list[McpError] | None] = ContextVar("midojo_protoco
 class UpstreamClient:
     """Forwards tool calls to an upstream MCP server.
 
-    ``upstream`` is anything a fastmcp ``Client`` connects to: a URL, a
-    ``FastMCP`` server in the same process, or a client transport.
+    The upstream is ``upstream_url``, or ``transport``: anything else a
+    fastmcp ``Client`` connects to, such as a ``FastMCP`` server in the same
+    process or a client transport. Within a downstream session that
+    ``MidojoMCP`` serves, every call goes over that session's one upstream
+    connection; elsewhere each call opens its own.
     """
 
-    def __init__(self, upstream: Any) -> None:
-        self.upstream = upstream
+    def __init__(self, upstream_url: str | None = None, *, transport: Any = None) -> None:
+        if (upstream_url is None) == (transport is None):
+            raise ValueError("UpstreamClient needs exactly one of upstream_url and transport.")
+        self.upstream_url = upstream_url
+        self.transport = transport
+
+    @property
+    def target(self) -> Any:
+        """What a fastmcp ``Client`` connects to."""
+        return self.upstream_url if self.upstream_url is not None else self.transport
+
+    @contextlib.asynccontextmanager
+    async def _client(self) -> AsyncIterator[Client]:
+        connection = _upstream_connection.get()
+        if connection is not None and connection.upstream is self:
+            yield await connection.client()
+            return
+        async with Client(self.target) as client:
+            yield client
 
     async def list_tools(self) -> list[MCPTool]:
-        async with Client(self.upstream) as client:
+        async with self._client() as client:
             return await client.list_tools()
 
     async def call_tool_mcp(self, name: str, args: dict[str, Any]) -> CallToolResult:
         """The upstream's result as it sent it, error flag included. Raises ``McpError`` on a JSON-RPC error."""
-        async with Client(self.upstream) as client:
+        async with self._client() as client:
             return await client.call_tool_mcp(name, args)
 
     async def call_tool(self, name: str, args: dict) -> str:
-        async with Client(self.upstream) as client:
+        async with self._client() as client:
             result = await client.call_tool(name, args)
 
         parts = []
@@ -74,6 +100,50 @@ class UpstreamClient:
             else:
                 parts.append(str(content))
         return "\n".join(parts)
+
+
+class _UpstreamConnection:
+    """One downstream session's connection to the upstream: opened on first use, closed when the session ends.
+
+    The connection lives in its own task in the session's task group, so the
+    task that opens the fastmcp ``Client`` is the one that closes it.
+    """
+
+    def __init__(self, upstream: UpstreamClient, tasks: TaskGroup) -> None:
+        self.upstream = upstream
+        self._tasks = tasks
+        self._lock = anyio.Lock()
+        self._closed = anyio.Event()
+        self._client: Client | None = None
+
+    async def client(self) -> Client:
+        async with self._lock:
+            client = self._client
+            if client is None:
+                client = self._client = await self._tasks.start(self._hold)
+            return client
+
+    def close(self) -> None:
+        self._closed.set()
+
+    async def _hold(self, *, task_status: TaskStatus[Client] = anyio.TASK_STATUS_IGNORED) -> None:
+        client = Client(self.upstream.target)
+        await client.__aenter__()
+        try:
+            task_status.started(client)
+            await self._closed.wait()
+        finally:
+            # Close the connection even when the session's task group is
+            # cancelled, and never fail the downstream session over it.
+            with anyio.CancelScope(shield=True):
+                try:
+                    await client.__aexit__(None, None, None)
+                except Exception:
+                    logger.exception("Closing the upstream connection failed")
+
+
+# The upstream connection of the downstream session a request belongs to.
+_upstream_connection: ContextVar[_UpstreamConnection | None] = ContextVar("midojo_upstream_connection", default=None)
 
 
 class _ForwardingTool(Tool):
@@ -138,18 +208,22 @@ class MidojoMCP:
         control_plane_url: str,
         upstream_url: str | None = None,
         http: httpx.AsyncClient | None = None,
-        upstream: Any = None,
+        upstream_transport: Any = None,
         recorder: CallRecorder | None = None,
     ) -> None:
         self._fastmcp = FastMCP(name)
         self._control_plane_url = control_plane_url
         self._http = http or httpx.AsyncClient(timeout=300.0)
-        upstream = upstream if upstream is not None else upstream_url
-        self._upstream = UpstreamClient(upstream) if upstream is not None else None
+        self._upstream = (
+            UpstreamClient(upstream_url, transport=upstream_transport)
+            if upstream_url is not None or upstream_transport is not None
+            else None
+        )
         self._recorder = recorder
         self._blocked: set[str] = set()
         self._denials: dict[str, Denial] = {}
         self._pass_protocol_errors()
+        self._connect_upstream_per_session()
 
     def _pass_protocol_errors(self) -> None:
         """Answer a tools/call with the JSON-RPC error a forwarded call got from the upstream."""
@@ -168,6 +242,31 @@ class MidojoMCP:
             return response
 
         handlers[CallToolRequest] = call_tool
+
+    def _connect_upstream_per_session(self) -> None:
+        """Give each downstream session its own upstream connection, as long as the session lasts.
+
+        The low-level server runs once per downstream session (an stdio or
+        in-memory connection, a stateful streamable HTTP session), so the
+        connection is bound there and every request of the session reuses it.
+        """
+        server = self._fastmcp._mcp_server
+        run = server.run
+
+        async def run_with_upstream(*args: Any, **kwargs: Any) -> None:
+            if self._upstream is None:
+                await run(*args, **kwargs)
+                return
+            async with anyio.create_task_group() as tasks:
+                connection = _UpstreamConnection(self._upstream, tasks)
+                token = _upstream_connection.set(connection)
+                try:
+                    await run(*args, **kwargs)
+                finally:
+                    _upstream_connection.reset(token)
+                    connection.close()
+
+        setattr(server, "run", run_with_upstream)
 
     def _agent(self) -> AgentControlPlaneClient:
         incoming = get_http_headers().get(SESSION_HEADER.lower())
@@ -189,7 +288,7 @@ class MidojoMCP:
                 await self._refuse(recorder, fn.__name__, kwargs)
                 ctx = ToolContext(agent, self._upstream.call_tool if self._upstream else None)
                 call_id = str(uuid.uuid4())
-                await recorder.start_call(call_id=call_id, function=fn.__name__, args=kwargs)
+                await recorder.start_call(call_id=call_id, function=fn.__name__, args=kwargs, disposition="simulated")
                 # Finish the call when the tool returns or raises. A cancelled
                 # tool (or any other BaseException) gave the agent no result,
                 # so the call stays unfinished.
@@ -293,7 +392,7 @@ class MidojoMCP:
         recorder = self._recorder or ControlPlaneRecorder(self._agent())
         await self._refuse(recorder, name, arguments)
         call_id = str(uuid.uuid4())
-        await recorder.start_call(call_id=call_id, function=name, args=arguments)
+        await recorder.start_call(call_id=call_id, function=name, args=arguments, disposition="forwarded")
         try:
             result = await self._upstream.call_tool_mcp(name, arguments)
         except McpError as e:

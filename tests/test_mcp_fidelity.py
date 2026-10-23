@@ -5,6 +5,7 @@ against the scripted server directly and through a ``MidojoMCP`` that mirrors
 it, and compares what the agent receives.
 """
 
+import asyncio
 import json
 import typing
 from typing import Any
@@ -12,11 +13,11 @@ from typing import Any
 import httpx
 import pytest
 from midojo_sdk.client import AgentControlPlaneClient
-from midojo_sdk.mcp import BLOCKED_REASON, MidojoMCP, ToolContext
+from midojo_sdk.mcp import BLOCKED_REASON, MidojoMCP, ToolContext, UpstreamClient
 from midojo_sdk.recorder import ControlPlaneRecorder, Disposition
 
 from midojo.types import CallDisposition, FunctionCallRecord
-from tests.scripted_mcp import PROTOCOL_ERROR, TOOLS, InProcessTransport, ScriptedMCP, wire_session
+from tests.scripted_mcp import PROTOCOL_ERROR, SESSION_CALL, TOOLS, ScriptedMCP, wire_session
 
 SEARCH = {
     "route": {"from": "LIS", "to": "FRA"},
@@ -46,8 +47,8 @@ class CapturingRecorder:
         self.starts: list[dict[str, Any]] = []
         self.finishes: list[dict[str, Any]] = []
 
-    async def start_call(self, *, call_id: str, function: str, args: dict[str, Any]) -> None:
-        self.starts.append({"call_id": call_id, "function": function, "args": args})
+    async def start_call(self, *, call_id: str, function: str, args: dict[str, Any], disposition: Disposition) -> None:
+        self.starts.append({"call_id": call_id, "function": function, "args": args, "disposition": disposition})
 
     async def finish_call(
         self,
@@ -71,16 +72,12 @@ class CapturingRecorder:
         )
 
 
-async def _mirror(**kwargs: Any) -> tuple[MidojoMCP, ScriptedMCP, CapturingRecorder]:
-    """A MidojoMCP mirroring a fresh scripted server, with no injection, recording into a capturing recorder."""
-    upstream = ScriptedMCP()
+async def _mirror(*, hang: tuple[str, ...] = ()) -> tuple[MidojoMCP, ScriptedMCP, CapturingRecorder]:
+    """A MidojoMCP for a fresh scripted server, with no injection, recording into a capturing recorder."""
+    upstream = ScriptedMCP(hang=hang)
     recorder = CapturingRecorder()
     mcp = MidojoMCP(
-        "proxy",
-        control_plane_url="http://control.invalid",
-        upstream=InProcessTransport(upstream.server),
-        recorder=recorder,
-        **kwargs,
+        "proxy", control_plane_url="http://control.invalid", upstream_transport=upstream.transport, recorder=recorder
     )
     return mcp, upstream, recorder
 
@@ -123,9 +120,30 @@ async def test_a_mirrored_session_matches_the_direct_session_byte_for_byte():
         zip(direct_responses, proxied_responses, strict=True), start=1
     ):
         assert _without_request_id(proxied_response, request_id) == _without_request_id(direct_response, request_id)
-    # The upstream got every call, with its arguments as the agent sent them.
-    assert upstream.calls == direct.calls
+    # The upstream got every call, with its arguments as the agent sent them,
+    # in one upstream session, as the direct session made them. Each result
+    # numbers its call in its session, so the responses would differ too if
+    # the mirror reconnected between calls.
+    assert upstream.sessions == direct.sessions == [direct.calls]
     assert [name for name, _ in upstream.calls] == [tool["name"] for tool in TOOLS]
+    # One connection listed the tools to mirror and one served the session; both are closed.
+    assert (upstream.transport.opened, upstream.transport.open) == (2, 0)
+
+
+@pytest.mark.asyncio
+async def test_each_downstream_session_gets_its_own_upstream_session():
+    mcp, upstream, _ = await _mirror()
+    await mcp.mirror_upstream()
+    connected = upstream.transport.opened
+
+    first = await _session(mcp, [_call("ping", {}), _call("get_time", {})])
+    second = await _session(mcp, [_call("ping", {})])
+    # A session that makes no call never connects to the upstream.
+    await _session(mcp, [{"method": "tools/list", "params": {}}])
+
+    assert [response["result"]["_meta"][SESSION_CALL] for response in first + second] == [1, 2, 1]
+    assert upstream.sessions == [[("ping", {}), ("get_time", {})], [("ping", {})]]
+    assert (upstream.transport.opened - connected, upstream.transport.open) == (2, 0)
 
 
 @pytest.mark.asyncio
@@ -138,12 +156,13 @@ async def test_the_session_covers_every_kind_of_tool_and_result():
         {"type": "object", "properties": {}, "additionalProperties": False},
     ]
     ping, get_time, search, forecast, transfer, close = results
+    assert [result["result"]["_meta"][SESSION_CALL] for result in results[:-1]] == [1, 2, 3, 4, 5]
     assert ping["result"]["content"] == [{"type": "text", "text": "pong"}]
     assert get_time["result"]["content"] == [{"type": "text", "text": "2026-01-02T03:04:05Z"}]
     assert search["result"]["structuredContent"]["query"] == SEARCH
     assert [block["type"] for block in forecast["result"]["content"]] == ["text", "image", "resource"]
     assert transfer["result"]["isError"] is True
-    assert close["error"] == PROTOCOL_ERROR.model_dump(exclude_none=True)
+    assert close["error"] == PROTOCOL_ERROR.model_dump() | {"data": {"account": "acc-404", SESSION_CALL: 6}}
 
 
 # --- dispositions ---
@@ -157,6 +176,7 @@ async def test_every_forwarded_call_is_recorded_as_forwarded_with_what_the_agent
 
     calls = SESSION[1:]
     assert [start["function"] for start in recorder.starts] == [call["params"]["name"] for call in calls]
+    assert {start["disposition"] for start in recorder.starts} == {"forwarded"}
     assert [finish["call_id"] for finish in recorder.finishes] == [start["call_id"] for start in recorder.starts]
     assert {finish["disposition"] for finish in recorder.finishes} == {"forwarded"}
     by_tool = {finish["function"]: finish for finish in recorder.finishes}
@@ -238,8 +258,51 @@ async def test_a_tool_the_layer_defines_is_recorded_as_simulated_and_not_mirrore
     assert "transfer_funds" not in mirrored
     assert result["result"]["content"] == [{"type": "text", "text": "Moved 3.0"}]
     assert upstream.calls == []
+    [start] = recorder.starts
+    assert start["disposition"] == "simulated"
     [finish] = recorder.finishes
     assert (finish["function"], finish["result"], finish["disposition"]) == ("transfer_funds", "Moved 3.0", "simulated")
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_simulated_call_stays_started_with_its_disposition(monkeypatch):
+    monkeypatch.setenv("MIDOJO_SESSION_TOKEN", "session")
+    mcp, _, recorder = await _mirror()
+    running = asyncio.Event()
+
+    @mcp.tool()
+    async def send_alert(ctx: ToolContext, text: str) -> str:
+        """Send an alert, and never return."""
+        running.set()
+        await asyncio.Event().wait()
+        return "sent"
+
+    call = asyncio.create_task(mcp._fastmcp.call_tool("send_alert", {"text": "hi"}))
+    await running.wait()
+    call.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await call
+
+    [start] = recorder.starts
+    assert (start["function"], start["args"], start["disposition"]) == ("send_alert", {"text": "hi"}, "simulated")
+    assert recorder.finishes == []
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_forwarded_call_stays_started_with_its_disposition():
+    mcp, upstream, recorder = await _mirror(hang=("get_forecast",))
+    await mcp.mirror_upstream()
+
+    call = asyncio.create_task(mcp._fastmcp.call_tool("get_forecast", {"city": "Lisbon"}))
+    await upstream.hanging.wait()
+    call.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await call
+
+    [start] = recorder.starts
+    assert (start["function"], start["args"], start["disposition"]) == ("get_forecast", {"city": "Lisbon"}, "forwarded")
+    assert recorder.finishes == []
+    assert upstream.transport.open == 0
 
 
 @pytest.mark.asyncio
@@ -275,10 +338,13 @@ async def test_the_control_plane_recorder_sends_blocked_for_a_refused_call(dispo
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
         recorder = ControlPlaneRecorder(AgentControlPlaneClient("http://control", "session", http=http))
+        if not blocked:
+            await recorder.start_call(call_id="c1", function="f", args={}, disposition=disposition)
         await recorder.finish_call(call_id="c1", function="f", args={}, result="r", disposition=disposition)
 
     # The /agent API has no disposition field: the record carries the blocked flag it implies.
-    assert sent == [{"call_id": "c1", "function": "f", "args": {}, "result": "r", "error": None, "blocked": blocked}]
+    finish = {"call_id": "c1", "function": "f", "args": {}, "result": "r", "error": None, "blocked": blocked}
+    assert sent == ([] if blocked else [{"call_id": "c1", "function": "f", "args": {}}]) + [finish]
 
 
 @pytest.mark.asyncio
@@ -289,7 +355,7 @@ async def test_a_refused_call_recorded_over_http_is_blocked_on_the_control_plane
 
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app)) as http:
         mcp = MidojoMCP(
-            "proxy", control_plane_url="http://control", http=http, upstream=InProcessTransport(ScriptedMCP().server)
+            "proxy", control_plane_url="http://control", http=http, upstream_transport=ScriptedMCP().transport
         )
         mcp.block("transfer_funds")
         await mcp.mirror_upstream()
@@ -302,12 +368,12 @@ async def test_a_refused_call_recorded_over_http_is_blocked_on_the_control_plane
     ]
 
 
-# --- the old branch proxy's gaps ---
+# --- what an annotation-based proxy gets wrong ---
 
 
 @pytest.mark.asyncio
 async def test_mirrored_schemas_are_the_upstreams_not_rebuilt_from_python_annotations():
-    """The old proxy rebuilt each input schema from Python types: str, list, dict, ``X | None``."""
+    """An annotation-based proxy rebuilds each input schema from Python types: str, list, dict, ``X | None``."""
     mcp, _, _ = await _mirror()
     await mcp.mirror_upstream()
     [tools] = await _session(mcp, [{"method": "tools/list", "params": {}}])
@@ -333,7 +399,7 @@ async def test_mirrored_schemas_are_the_upstreams_not_rebuilt_from_python_annota
 
 @pytest.mark.asyncio
 async def test_a_tool_without_parameters_gets_no_dummy_parameter():
-    """The old proxy gave a tool without parameters a ``_dummy`` one, because FastMCP needed a signature."""
+    """An annotation-based proxy gives a tool without parameters a ``_dummy`` one, to have a signature."""
     mcp, upstream, _ = await _mirror()
     await mcp.mirror_upstream()
     tools, *_ = await _session(mcp, [{"method": "tools/list", "params": {}}, _call("ping", {}), _call("get_time", {})])
@@ -346,7 +412,7 @@ async def test_a_tool_without_parameters_gets_no_dummy_parameter():
 
 @pytest.mark.asyncio
 async def test_results_are_not_flattened_to_text():
-    """The old proxy joined a result's text blocks into one string and dropped everything else."""
+    """A text-only proxy joins a result's text blocks into one string and drops everything else."""
     mcp, _, _ = await _mirror()
     await mcp.mirror_upstream()
     search, forecast, transfer = await _session(
@@ -363,7 +429,7 @@ async def test_results_are_not_flattened_to_text():
         "price": 211.0,
         "seats_left": None,
     }
-    assert search["result"]["_meta"] == {"example.com/cache": "miss"}
+    assert search["result"]["_meta"] == {"example.com/cache": "miss", SESSION_CALL: 1}
     assert search["result"]["content"][1] == {
         "type": "text",
         "text": "2 flights found",
@@ -377,7 +443,7 @@ async def test_results_are_not_flattened_to_text():
 
 @pytest.mark.asyncio
 async def test_a_call_that_is_not_forwarded_gets_no_success_shaped_result():
-    """The old proxy answered a ``no_forward`` tool with ``{"status": "ok"}`` and recorded that as its result."""
+    """A stubbing proxy answers a tool it doesn't forward with ``{"status": "ok"}``, and records that as its result."""
     mcp, upstream, recorder = await _mirror()
     mcp.block("close_account")
     await mcp.mirror_upstream()
@@ -392,7 +458,29 @@ async def test_a_call_that_is_not_forwarded_gets_no_success_shaped_result():
     assert '"status"' not in record["result"]
 
 
-# --- the mirror and the record type ---
+# --- the upstream client, the mirror and the record type ---
+
+
+def test_upstream_client_still_takes_an_upstream_url():
+    client = UpstreamClient(upstream_url="http://localhost:8081/mcp")
+    assert (client.upstream_url, client.transport, client.target) == (
+        "http://localhost:8081/mcp",
+        None,
+        client.upstream_url,
+    )
+    assert UpstreamClient("http://localhost:8081/mcp").upstream_url == "http://localhost:8081/mcp"
+
+
+def test_midojo_mcp_still_takes_an_upstream_url():
+    mcp = MidojoMCP("proxy", control_plane_url="http://control.invalid", upstream_url="http://localhost:8081/mcp")
+    assert mcp._upstream is not None
+    assert mcp._upstream.upstream_url == "http://localhost:8081/mcp"
+
+
+@pytest.mark.parametrize("kwargs", [{}, {"upstream_url": "http://localhost:8081/mcp", "transport": object()}])
+def test_upstream_client_needs_exactly_one_upstream(kwargs):
+    with pytest.raises(ValueError, match="exactly one of upstream_url and transport"):
+        UpstreamClient(**kwargs)
 
 
 @pytest.mark.asyncio
@@ -412,6 +500,20 @@ def test_a_record_without_a_disposition_still_loads():
         {"function": "f", "args": {}, "result": "r", "timestamp": "2026-01-01T00:00:00+00:00", "pre_environment": {}}
     )
     assert record.disposition is None
+
+
+def test_a_blocked_record_without_a_disposition_still_loads():
+    record = FunctionCallRecord.model_validate(
+        {
+            "function": "f",
+            "args": {},
+            "result": BLOCKED_REASON,
+            "blocked": True,
+            "timestamp": "2026-01-01T00:00:00+00:00",
+            "pre_environment": {},
+        }
+    )
+    assert (record.blocked, record.disposition) == (True, None)
 
 
 @pytest.mark.parametrize(

@@ -24,8 +24,12 @@ REFUSED: frozenset[Disposition] = frozenset({"denied", "blocked"})
 class CallRecorder(Protocol):
     """Records one evaluation's tool calls: each call's start, then its finish with the same ``call_id``."""
 
-    async def start_call(self, *, call_id: str, function: str, args: dict[str, Any]) -> None:
-        """Record that a call started: an unfinished record, before the tool runs."""
+    async def start_call(self, *, call_id: str, function: str, args: dict[str, Any], disposition: Disposition) -> None:
+        """Record that a call started: an unfinished record, before the tool runs.
+
+        A started call already has its disposition (``forwarded`` or
+        ``simulated``), so a call that never finishes still has one.
+        """
         ...
 
     async def finish_call(
@@ -46,13 +50,14 @@ class ControlPlaneRecorder:
     """Records calls on the control plane's ``/agent`` API.
 
     The API has no field for the disposition, so the record carries only what
-    the disposition implies: ``blocked`` for a denied or blocked call.
+    the disposition implies: ``blocked`` for a denied or blocked call. A
+    start sends none: a started call is forwarded or simulated, never blocked.
     """
 
     def __init__(self, client: AgentControlPlaneClient) -> None:
         self._client = client
 
-    async def start_call(self, *, call_id: str, function: str, args: dict[str, Any]) -> None:
+    async def start_call(self, *, call_id: str, function: str, args: dict[str, Any], disposition: Disposition) -> None:
         await self._client.start_function_call(function=function, args=args, call_id=call_id)
 
     async def finish_call(
