@@ -29,13 +29,29 @@ logger = logging.getLogger(__name__)
     help="Evaluation session lifetime in seconds.",
 )
 @click.option(
+    "--closure-wait",
+    default=AppConfig().closure_wait_seconds,
+    show_default=True,
+    type=click.FloatRange(min=0),
+    help="Seconds an evaluation's already admitted tool calls may still finish once it starts closing.",
+)
+@click.option(
     "--control-token",
     envvar=CONTROL_TOKEN_ENV,
     default=None,
     help=f"Bearer token required on every route except /agent and /health; env: {CONTROL_TOKEN_ENV}.",
 )
-def main(host: str, port: int, load_suite: tuple[str, ...], session_ttl: int, control_token: str | None) -> None:
-    config = AppConfig(session_ttl_seconds=session_ttl, control_token=control_token or None)
+def main(
+    host: str,
+    port: int,
+    load_suite: tuple[str, ...],
+    session_ttl: int,
+    closure_wait: float,
+    control_token: str | None,
+) -> None:
+    config = AppConfig(
+        session_ttl_seconds=session_ttl, closure_wait_seconds=closure_wait, control_token=control_token or None
+    )
     if config.control_token is None:
         logger.warning(
             "The suite, task and run routes are unauthenticated; set %s to require a control token.",

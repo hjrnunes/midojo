@@ -256,7 +256,9 @@ async def run_task(
     """Run a single evaluation, with the runtime set up around the agent's execution.
 
     Each turn is started in the control plane, sent to the agent and its reply
-    recorded, all in one conversation on the evaluation's session.
+    recorded, all in one conversation on the evaluation's session. Then the
+    evaluation is closed (calls already admitted may finish), the runtime's
+    final observations recorded, and the evaluation sealed and graded.
     """
     evaluation = await control.create_evaluation(run_id, user_task_id, injection_task_id, injections)
     eval_id, messages, session_token = evaluation.id, evaluation.turns, evaluation.session_token
@@ -285,6 +287,10 @@ async def run_task(
                     turns.append(Exchange(message, reply))
             finally:
                 await conversation.aclose()
+            # Staged closure: no new call is admitted, calls already admitted may still finish, and the
+            # final observations are collected after that, before the seal.
+            with console.status(f"[dim]{pair} · waiting for unfinished tool calls…[/dim]", spinner="dots"):
+                await control.close_evaluation(run_id, eval_id)
             with console.status(f"[dim]{pair} · collecting runtime observations…[/dim]", spinner="dots"):
                 observations = await asyncio.to_thread(runtime.observe)
             for source, observed in observations.items():

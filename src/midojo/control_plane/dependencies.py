@@ -6,6 +6,7 @@ from typing import Annotated
 
 from fastapi import Depends, HTTPException, Request, Response, status
 from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ValidationError
 
@@ -14,13 +15,44 @@ from midojo.types import Environment, FunctionCallRecord, SuiteName
 from midojo.yaml_task_suite import YAMLTaskSuite
 
 from .config import AppConfig
-from .models import CreateFunctionCallRecord, CreateFunctionCallStart
+from .lifecycle import RejectedError, Rejection
+from .service import ById, ControlPlane
 from .state import Evaluation, Run
-from .store import FunctionCallConflictError, Store
+
+# --- the edge: domain rejections as HTTP responses ---
+
+# The one place a rejection kind becomes a status code.
+REJECTION_STATUS: dict[Rejection, int] = {
+    Rejection.UNKNOWN_RUN: status.HTTP_404_NOT_FOUND,
+    Rejection.UNKNOWN_EVALUATION: status.HTTP_404_NOT_FOUND,
+    Rejection.UNKNOWN_TASK: status.HTTP_400_BAD_REQUEST,
+    Rejection.INVALID_SESSION: status.HTTP_401_UNAUTHORIZED,
+    Rejection.SESSION_CLOSED: status.HTTP_401_UNAUTHORIZED,
+    Rejection.FORBIDDEN: status.HTTP_403_FORBIDDEN,
+    Rejection.CLOSING: status.HTTP_409_CONFLICT,
+    Rejection.SEALED: status.HTTP_409_CONFLICT,
+    Rejection.CLOSURE_PENDING: status.HTTP_409_CONFLICT,
+    Rejection.NOT_SEALED: status.HTTP_400_BAD_REQUEST,
+    Rejection.CALL_CONFLICT: status.HTTP_409_CONFLICT,
+    Rejection.TURN_PENDING: status.HTTP_409_CONFLICT,
+    Rejection.TURN_NOT_STARTED: status.HTTP_404_NOT_FOUND,
+    Rejection.TURN_ANSWERED: status.HTTP_409_CONFLICT,
+}
 
 
-async def get_store(request: Request) -> Store:
-    return request.app.state.store
+def rejection_response(exc: RejectedError) -> JSONResponse:
+    """A refused event as a response: ``detail``, the domain ``kind``, and whether it was kept as a late fact."""
+    code = REJECTION_STATUS[exc.kind]
+    headers = {"WWW-Authenticate": "Bearer"} if code == status.HTTP_401_UNAUTHORIZED else None
+    content = {"detail": exc.rejected.detail, "kind": exc.kind.value, "late_fact": exc.late}
+    return JSONResponse(status_code=code, content=content, headers=headers)
+
+
+# --- dependencies ---
+
+
+async def get_control(request: Request) -> ControlPlane:
+    return request.app.state.control
 
 
 async def get_config(request: Request) -> AppConfig:
@@ -44,11 +76,8 @@ async def get_suite(
     return resolve_suite(suites, suite_name)
 
 
-async def get_run(run_id: str, store: Annotated[Store, Depends(get_store)]) -> Run:
-    run = store.get_run(run_id)
-    if run is None:
-        raise HTTPException(404, f"Unknown run: {run_id}")
-    return run
+async def get_run(run_id: str, control: Annotated[ControlPlane, Depends(get_control)]) -> Run:
+    return control.run(run_id)
 
 
 async def get_run_suite(
@@ -60,12 +89,10 @@ async def get_run_suite(
 async def get_evaluation_by_id(
     eval_id: str,
     run: Annotated[Run, Depends(get_run)],
-    store: Annotated[Store, Depends(get_store)],
+    control: Annotated[ControlPlane, Depends(get_control)],
 ) -> Evaluation:
-    evaluation = store.get_evaluation(run.id, eval_id)
-    if evaluation is None:
-        raise HTTPException(404, f"Unknown evaluation: {eval_id}")
-    return evaluation
+    """A copy of the evaluation, taken through the writer: a response never reads a value being committed."""
+    return control.evaluation(ById(run.id, eval_id))
 
 
 async def get_session_token(
@@ -108,17 +135,33 @@ def validate_observations(source: str, data: dict) -> BaseModel:
         raise RequestValidationError(errors) from exc
 
 
+_CLOSED_RESPONSES: dict[int | str, dict] = {
+    status.HTTP_401_UNAUTHORIZED: {
+        "description": (
+            "/agent routes: the session is invalid, expired or closed. After the evaluation is sealed, a call "
+            "sent with its session that isn't an exact replay (a new call, a finish, or another body under a "
+            "recorded call_id) is still recorded as a late fact (`late_fact` true)."
+        )
+    },
+}
+
 RECORD_FUNCTION_CALL_RESPONSES: dict[int | str, dict] = {
     status.HTTP_200_OK: {
-        "description": "Replay: the call_id is already finished with this body. Nothing is appended or changed."
+        "description": (
+            "Replay: the call_id is already finished with this body, at any stage. Nothing is appended or changed."
+        )
     },
     status.HTTP_201_CREATED: {
         "description": "The call is recorded: appended, or, when the call_id was started, its record finished."
     },
+    **_CLOSED_RESPONSES,
     status.HTTP_409_CONFLICT: {
         "description": (
-            "The call_id is already finished with a different body, or was started with another function or "
-            "args. Nothing is appended or changed."
+            "`kind` call_conflict: before the seal, the call_id is already finished with a different body, or was "
+            "started with another function or args; nothing is appended or changed. `kind` closing or sealed: "
+            "the evaluation no longer admits this call (a new call once closure has begun, a finish once the "
+            "closure wait is over, any body but an exact replay after the seal); it is recorded as a late fact, "
+            "and the evaluation's records don't change."
         )
     },
 }
@@ -126,57 +169,25 @@ RECORD_FUNCTION_CALL_RESPONSES: dict[int | str, dict] = {
 START_FUNCTION_CALL_RESPONSES: dict[int | str, dict] = {
     status.HTTP_200_OK: {
         "description": (
-            "Replay: the call_id is already recorded, finished or not, with this function and args. "
-            "Nothing is appended."
+            "Replay: the call_id is already recorded, finished or not, with this function and args, at any "
+            "stage. Nothing is appended."
         )
     },
     status.HTTP_201_CREATED: {"description": "The call is started: an unfinished record is appended."},
+    **_CLOSED_RESPONSES,
     status.HTTP_409_CONFLICT: {
-        "description": "The call_id is already recorded with another function or args. Nothing is appended."
+        "description": (
+            "`kind` call_conflict: before the seal, the call_id is already recorded with another function or "
+            "args; nothing is appended. `kind` closing or sealed: closure has begun and no new call is admitted, "
+            "or the evaluation is sealed and the start isn't an exact replay; the start is recorded as a late "
+            "fact."
+        )
     },
 }
 
 
-def record_function_call(
-    store: Store, run_id: str, eval_id: str, req: CreateFunctionCallRecord, response: Response
-) -> FunctionCallRecord | None:
-    """Record a function call idempotently by ``call_id``, for both record routes.
-
-    Returns the new record (201), or the stored one when ``req`` replays its
-    ``call_id`` with the same body (200); raises a 409 when the body differs.
-    When ``call_id`` was started and not finished, finishes that record in
-    place (201), or raises a 409 when the function or args differ from the
-    start. Returns None if the evaluation is unknown.
-    """
-    try:
-        appended = store.append_function_call(run_id, eval_id, req)
-    except FunctionCallConflictError as exc:
-        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
-    return _created_or_replayed(appended, response)
-
-
-def start_function_call(
-    store: Store, run_id: str, eval_id: str, req: CreateFunctionCallStart, response: Response
-) -> FunctionCallRecord | None:
-    """Start a function call idempotently by ``call_id``, for both start routes.
-
-    Returns the new, unfinished record (201), or the stored one, finished or
-    not, when ``req`` replays its ``call_id`` with the same function and args
-    (200); raises a 409 when they differ. Returns None if the evaluation is
-    unknown.
-    """
-    try:
-        started = store.start_function_call(run_id, eval_id, req)
-    except FunctionCallConflictError as exc:
-        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
-    return _created_or_replayed(started, response)
-
-
-def _created_or_replayed(
-    stored: tuple[FunctionCallRecord, bool] | None, response: Response
-) -> FunctionCallRecord | None:
-    if stored is None:
-        return None
+def created_or_replayed(stored: tuple[FunctionCallRecord, bool], response: Response) -> FunctionCallRecord:
+    """The record of a start or finish, with the response's status set to 200 for a replay."""
     record, created = stored
     if not created:
         response.status_code = status.HTTP_200_OK

@@ -1,15 +1,19 @@
-"""Unit tests for the in-memory Store implementation (PR1 store seam)."""
+"""Unit tests for the in-memory Store: a map of evaluation values that only the writer replaces.
+
+The rules for calls, turns and closure are the lifecycle's (tests/test_lifecycle.py);
+the store only keeps values and hands out copies.
+"""
 
 from __future__ import annotations
 
+import dataclasses
 import re
-import uuid
 
 import pytest
 
-from midojo.control_plane.models import CreateFunctionCallRecord, CreateFunctionCallStart
-from midojo.control_plane.store import FunctionCallConflictError, InMemoryStore
-from midojo.types import CheckValidity, Environment, GradeValidity, ValidityReason
+from midojo.control_plane.state import Evaluation, Stage
+from midojo.control_plane.store import InMemoryStore
+from midojo.types import Environment, FunctionCallRecord
 
 
 @pytest.fixture
@@ -21,28 +25,18 @@ class _Env(Environment):
     counter: int = 0
 
 
-def _fc(function: str, result: str) -> CreateFunctionCallRecord:
-    return CreateFunctionCallRecord(function=function, args={}, result=result)
-
-
-def _make_eval(
-    store: InMemoryStore,
-    run_id: str,
-    *,
-    environment: Environment | None = None,
-    pre_environment: Environment | None = None,
-    agent_input: str | None = None,
-    injection_task_id: str | None = None,
-):
-    return store.create_evaluation(
-        run_id,
+def _make_eval(store: InMemoryStore, run_id: str, **changes) -> Evaluation:
+    evaluation = Evaluation(
+        id=store.new_evaluation_id(),
+        run_id=run_id,
         user_task_id="ut",
-        injection_task_id=injection_task_id,
-        pre_environment=pre_environment if pre_environment is not None else _Env(),
-        environment=environment if environment is not None else _Env(),
-        active_injections={},
-        agent_input=agent_input,
+        injection_task_id=None,
+        pre_environment=_Env(),
+        environment=_Env(),
     )
+    evaluation = dataclasses.replace(evaluation, **changes)
+    store.insert_evaluation(evaluation)
+    return evaluation
 
 
 # --- runs ---
@@ -51,14 +45,14 @@ def _make_eval(
 def test_create_run_round_trip(store):
     r1 = store.create_run("test")
     r2 = store.create_run("test")
-    # Each run is retrievable by its own id: two creates coexist without clobbering
-    # (if create_run reused an id, get_run(r1.id) would return r2).
-    assert store.get_run(r1.id) is r1
-    assert store.get_run(r2.id) is r2
+    # Each run is retrievable by its own id: two creates coexist without clobbering.
+    assert store.get_run(r1.id) == r1
+    assert store.get_run(r2.id) == r2
+    assert r1.id != r2.id
 
 
 def test_get_run_unknown_returns_none(store):
-    # None (not a raise) is the contract the dependency layer turns into a 404.
+    # None (not a raise) is the contract the writer turns into an unknown_run rejection.
     assert store.get_run("nope") is None
 
 
@@ -75,27 +69,26 @@ def test_list_runs(store):
 def test_create_evaluation_stored_under_run(store):
     run = store.create_run("test")
     ev = _make_eval(store, run.id, agent_input="prompt")
-    assert ev.run_id == run.id
-    assert store.get_evaluation(run.id, ev.id) is ev
+    assert store.get_evaluation(run.id, ev.id) == ev
     assert re.fullmatch(r"[0-9a-f]{10}", ev.id)
-    assert ev.agent_input == "prompt"  # kwarg is plumbed through to the Evaluation
+    assert [e.id for e in store.list_evaluations(run.id)] == [ev.id]
+    assert store.list_evaluations(store.create_run("other").id) == []
 
 
-def test_evaluation_id_collision_preserves_existing_records_and_sessions(store, monkeypatch):
+def test_evaluation_id_collision_draws_another_id(store, monkeypatch):
     run = store.create_run("test")
-    first = _make_eval(store, run.id, agent_input="first")
-    token, _ = store.create_session(run.id, first.id, ttl_seconds=60)
-    next_run = store.create_run("other_suite")
+    first = _make_eval(store, run.id)
     new_id = "0000000000" if first.id != "0000000000" else "1111111111"
     candidates = iter([first.id, first.id, new_id])
     monkeypatch.setattr("midojo.control_plane.store.secrets.token_hex", lambda n: next(candidates))
+    assert store.new_evaluation_id() == new_id
 
-    second = _make_eval(store, next_run.id, agent_input="second")
 
-    assert second.id == new_id
-    assert store.get_evaluation(run.id, first.id) is first
-    assert store.get_evaluation(next_run.id, second.id) is second
-    assert store.session_evaluation(token) is first
+def test_inserting_an_existing_evaluation_raises(store):
+    run = store.create_run("test")
+    ev = _make_eval(store, run.id)
+    with pytest.raises(ValueError, match=ev.id):
+        store.insert_evaluation(ev)
 
 
 def test_get_evaluation_unknown_returns_none(store):
@@ -105,275 +98,95 @@ def test_get_evaluation_unknown_returns_none(store):
     assert store.get_evaluation("nope", "nope") is None
 
 
-# --- function calls ---
-
-
-def test_append_function_call_first_call_chains_from_pre_environment(store):
-    run = store.create_run("test")
-    # pre_environment and the live environment differ so the assertion can tell
-    # which one the first call's pre-env is taken from.
-    ev = _make_eval(store, run.id, pre_environment=_Env(counter=7), environment=_Env(counter=9))
-    appended = store.append_function_call(run.id, ev.id, _fc("a", "r0"))
-    rec = ev.function_calls[-1]
-    assert appended == (rec, True)  # returns the new record, and that it was created
-    assert isinstance(rec.pre_environment, _Env)
-    assert rec.pre_environment.counter == 7  # first call chains from pre_environment, not the live env
-    assert isinstance(rec.post_environment, _Env)
-    assert rec.post_environment.counter == 9
-    assert ev.function_calls == [rec]
-
-
-def test_append_function_call_chains_pre_env_across_environment_change(store):
-    run = store.create_run("test")
-    ev = _make_eval(store, run.id, environment=_Env(counter=0))
-    store.append_function_call(run.id, ev.id, _fc("a", "r0"))
-    store.set_environment(run.id, ev.id, _Env(counter=1))
-    store.append_function_call(run.id, ev.id, _fc("b", "r1"))
-    r0, r1 = ev.function_calls
-    # Second call's pre-env is the first call's post-env...
-    assert r1.pre_environment == r0.post_environment
-    # ...and its post-env reflects the set_environment that happened in between.
-    assert isinstance(r1.post_environment, _Env)
-    assert r1.post_environment.counter == 1
-
-
-def test_append_function_call_post_env_is_deep_copy(store):
-    run = store.create_run("test")
-    env = _Env(counter=0)
-    ev = _make_eval(store, run.id, environment=env)
-    store.append_function_call(run.id, ev.id, _fc("a", "r"))
-    rec = ev.function_calls[-1]
-    env.counter = 99  # mutate the live env in place after recording
-    # The recorded snapshot is a deep copy, so it doesn't track later mutations.
-    assert isinstance(rec.post_environment, _Env)
-    assert rec.post_environment.counter == 0
-
-
-def test_append_function_call_without_call_id_assigns_a_uuid(store):
-    run = store.create_run("test")
-    ev = _make_eval(store, run.id)
-    store.append_function_call(run.id, ev.id, _fc("a", "r"))
-    store.append_function_call(run.id, ev.id, _fc("a", "r"))
-    first, second = ev.function_calls  # no call_id, no dedupe: identical bodies both append
-    assert str(uuid.UUID(first.call_id)) == first.call_id
-    assert first.call_id != second.call_id
-
-
-def test_append_function_call_replay_returns_stored_record(store):
-    run = store.create_run("test")
-    ev = _make_eval(store, run.id)
-    req = CreateFunctionCallRecord(call_id="c1", function="a", args={"x": 1}, result="r")
-    appended = store.append_function_call(run.id, ev.id, req)
-    assert appended is not None
-    record, created = appended
-    assert created is True
-    assert record.call_id == "c1"
-    assert store.append_function_call(run.id, ev.id, req.model_copy()) == (record, False)
-    assert ev.function_calls == [record]
-
-
-@pytest.mark.parametrize(
-    "change", [{"function": "b"}, {"args": {"x": 2}}, {"result": "other"}, {"error": "boom"}, {"blocked": True}]
-)
-def test_append_function_call_conflicting_body_raises(store, change):
-    run = store.create_run("test")
-    ev = _make_eval(store, run.id)
-    req = CreateFunctionCallRecord(call_id="c1", function="a", args={"x": 1}, result="r")
-    store.append_function_call(run.id, ev.id, req)
-    with pytest.raises(FunctionCallConflictError, match="c1"):
-        store.append_function_call(run.id, ev.id, req.model_copy(update=change))
-    assert len(ev.function_calls) == 1
-
-
-def test_append_function_call_call_ids_are_per_evaluation(store):
-    run = store.create_run("test")
-    first, second = _make_eval(store, run.id), _make_eval(store, run.id)
-    req = CreateFunctionCallRecord(call_id="c1", function="a", args={}, result="r")
-    store.append_function_call(run.id, first.id, req)
-    appended = store.append_function_call(run.id, second.id, req)
-    assert appended is not None
-    assert appended[1] is True
-    assert len(second.function_calls) == 1
-
-
-def test_start_function_call_snapshots_the_live_environment(store):
-    run = store.create_run("test")
-    env = _Env(counter=3)
-    ev = _make_eval(store, run.id, pre_environment=_Env(counter=0), environment=env)
-    started = store.start_function_call(run.id, ev.id, CreateFunctionCallStart(call_id="c1", function="a", args={}))
-    assert started is not None
-    record, created = started
-    env.counter = 4  # the start's snapshot is a deep copy
-    assert created is True
-    assert (record.complete, record.result, record.post_environment) == (False, None, None)
-    assert isinstance(record.pre_environment, _Env)
-    assert record.pre_environment.counter == 3
-    assert ev.function_calls == [record]
-
-
-def test_finish_completes_the_started_record_in_place(store):
-    run = store.create_run("test")
-    ev = _make_eval(store, run.id)
-    store.start_function_call(run.id, ev.id, CreateFunctionCallStart(call_id="c1", function="a", args={"x": 1}))
-    store.set_environment(run.id, ev.id, _Env(counter=5))
-    finish = CreateFunctionCallRecord(call_id="c1", function="a", args={"x": 1}, result="r", error="e", blocked=True)
-    finished = store.append_function_call(run.id, ev.id, finish)
-    assert finished is not None
-    record, created = finished
-    assert created is True
-    assert ev.function_calls == [record]
-    assert (record.complete, record.result, record.error, record.blocked) == (True, "r", "e", True)
-    assert isinstance(record.post_environment, _Env)
-    assert record.post_environment.counter == 5
-    assert store.append_function_call(run.id, ev.id, finish.model_copy()) == (record, False)
-
-
-@pytest.mark.parametrize("change", [{"function": "b"}, {"args": {"x": 2}}])
-def test_start_and_finish_conflicts_raise(store, change):
-    run = store.create_run("test")
-    ev = _make_eval(store, run.id)
-    start = CreateFunctionCallStart(call_id="c1", function="a", args={"x": 1})
-    store.start_function_call(run.id, ev.id, start)
-    with pytest.raises(FunctionCallConflictError, match="c1"):
-        store.start_function_call(run.id, ev.id, start.model_copy(update=change))
-    finish = CreateFunctionCallRecord(call_id="c1", function="a", args={"x": 1}, result="r")
-    with pytest.raises(FunctionCallConflictError, match="c1"):
-        store.append_function_call(run.id, ev.id, finish.model_copy(update=change))
-    [record] = ev.function_calls
-    assert record.complete is False
-
-
-def test_start_function_call_unknown_returns_none(store):
-    assert (
-        store.start_function_call("nope", "nope", CreateFunctionCallStart(call_id="c", function="a", args={})) is None
-    )
-
-
-# --- environment / observations / grade / complete ---
-
-
-def test_set_environment_replaces(store):
+def test_reads_are_copies_that_share_nothing_with_the_stored_value(store):
     run = store.create_run("test")
     ev = _make_eval(store, run.id, environment=_Env(counter=1))
-    new_env = _Env(counter=2)
-    # Returns the mutated evaluation; the new env is installed on it.
-    assert store.set_environment(run.id, ev.id, new_env) is ev
-    assert ev.environment is new_env
+    read = store.get_evaluation(run.id, ev.id)
+    assert read is not None
+    read.environment.counter = 99  # type: ignore[attr-defined]
+    [listed] = store.list_evaluations(run.id)
+    listed.pre_environment.counter = 98  # type: ignore[attr-defined]
+    assert store.get_evaluation(run.id, ev.id) == ev
 
 
-def test_record_observations_keyed_by_source(store):
+def test_an_inserted_value_is_copied_in(store):
+    run = store.create_run("test")
+    environment = _Env(counter=1)
+    ev = _make_eval(store, run.id, environment=environment)
+    environment.counter = 2
+    stored = store.get_evaluation(run.id, ev.id)
+    assert stored is not None
+    assert stored.environment == _Env(counter=1)
+
+
+def test_no_public_store_method_hands_out_or_keeps_a_resident_value(store):
+    """Only the writer capability reaches stored values; every public method returns or takes copies."""
+    public = {name for name in dir(store) if not name.startswith("_") and callable(getattr(store, name))}
+    assert public == {
+        "create_run",
+        "get_run",
+        "list_runs",
+        "new_evaluation_id",
+        "insert_evaluation",
+        "get_evaluation",
+        "list_evaluations",
+        "writer",
+        "bind_session",
+        "unbind_session",
+        "session_target",
+    }
+
+
+def test_the_writer_capability_has_one_holder(store):
+    store.writer()
+    with pytest.raises(RuntimeError, match="writer"):
+        store.writer()
+
+
+def test_the_writer_hands_out_and_keeps_copies(store):
     run = store.create_run("test")
     ev = _make_eval(store, run.id)
-    e1, e2, acs = _Env(counter=1), _Env(counter=2), _Env(counter=3)
-    assert store.record_observations(run.id, ev.id, "openshell", e1) is ev
-    assert ev.observations == {"openshell": e1}
-    store.record_observations(run.id, ev.id, "acs", acs)
-    assert ev.observations == {"openshell": e1, "acs": acs}
-    # A second write to the same source replaces that source's value only.
-    store.record_observations(run.id, ev.id, "openshell", e2)
-    assert ev.observations == {"openshell": e2, "acs": acs}
+    writer = store.writer()
+    seen: dict[str, Evaluation] = {}
+
+    def step(value: Evaluation | None) -> Evaluation:
+        assert value is not None and value == ev
+        record = FunctionCallRecord(function="a", args={}, result="r", timestamp="t", pre_environment=_Env())
+        seen["given"], seen["kept"] = value, dataclasses.replace(value, function_calls=(record,), stage=Stage.CLOSING)
+        return seen["kept"]
+
+    writer.apply(run.id, ev.id, step)
+    committed = store.get_evaluation(run.id, ev.id)
+    assert committed == seen["kept"]
+    # Neither the value the step was given nor the one it returned is the stored value.
+    seen["given"].environment.counter = 99  # type: ignore[attr-defined]
+    seen["kept"].function_calls[0].args["x"] = 1
+    seen["kept"].environment.counter = 98  # type: ignore[attr-defined]
+    assert store.get_evaluation(run.id, ev.id) == committed
+    # A step that returns None keeps the value as it is; an unknown evaluation is None.
+    writer.apply(run.id, ev.id, lambda value: None)
+    assert store.get_evaluation(run.id, ev.id) == committed
+    unknown: list[Evaluation | None] = []
+    writer.apply(run.id, "nope", lambda value: unknown.append(value))
+    assert unknown == [None]
 
 
-def test_set_grade(store):
-    run = store.create_run("test")
-    ev = _make_eval(store, run.id, injection_task_id="it")
-    assert not ev.graded
-    # Distinct values guard against the two flags being swapped.
-    assert store.set_grade(run.id, ev.id, utility=True, security=True, security_reason="output contains X") is ev
-    assert ev.utility is True
-    assert ev.security is True
-    assert ev.security_reason == "output contains X"
-    # Without a validity, a decided grade is stored as valid, and the evaluation is graded.
-    assert ev.graded
-    assert ev.grade_validity == GradeValidity(
-        utility=CheckValidity(status="valid"), security=CheckValidity(status="valid")
-    )
-
-
-def test_set_grade_security_reason_defaults_to_none(store):
-    run = store.create_run("test")
-    ev = _make_eval(store, run.id)
-    # Reason is optional at the store: a utility-only grade leaves it None.
-    assert store.set_grade(run.id, ev.id, utility=True, security=False) is ev
-    assert ev.security_reason is None
-    assert ev.utility_reason is None  # stored as given; the grade route always passes reasons
-    assert ev.graded
-    # No injection task: security is not applicable, whatever value was passed.
-    assert ev.grade_validity == GradeValidity(
-        utility=CheckValidity(status="valid"), security=CheckValidity(status="not_applicable")
-    )
-
-
-def test_set_grade_without_validity_marks_an_unknown_grade_invalid(store):
-    run = store.create_run("test")
-    ev = _make_eval(store, run.id, injection_task_id="it")
-    store.set_grade(run.id, ev.id, utility=None, security=None, security_reason="blocked network call")
-    assert ev.graded
-    assert (ev.utility, ev.security) == (None, None)
-    assert ev.grade_validity == GradeValidity(
-        utility=CheckValidity(
-            status="invalid", reasons=[ValidityReason(check="utility", reason="the grade is unknown")]
-        ),
-        security=CheckValidity(
-            status="invalid", reasons=[ValidityReason(check="blocked network call", reason="the grade is unknown")]
-        ),
-    )
-
-
-def test_complete_evaluation(store):
+def test_the_writer_cannot_create_an_evaluation(store):
     run = store.create_run("test")
     ev = _make_eval(store, run.id)
-    assert store.complete_evaluation(run.id, ev.id, "final answer") is ev
-    # Completing records both the flag and the agent's final output.
-    assert ev.completed is True
-    assert ev.agent_output == "final answer"
+    with pytest.raises(KeyError):
+        store.writer().apply(run.id, "nope", lambda value: dataclasses.replace(ev, id="nope"))
 
 
-# --- mutations return None for an unknown (run, eval) ---
-#
-# Every per-eval mutation honors the uniform `Evaluation | None` contract (the
-# HTTP layer turns that None into a 404 / 400). Per-method coverage so the
-# contract stays pinned at each entry point for future Store implementations.
+# --- the session token index ---
 
 
-def test_append_function_call_unknown_returns_none(store):
-    assert store.append_function_call("nope", "nope", _fc("a", "r")) is None
-
-
-def test_set_environment_unknown_returns_none(store):
-    assert store.set_environment("nope", "nope", _Env()) is None
-
-
-def test_record_observations_unknown_returns_none(store):
-    assert store.record_observations("nope", "nope", "src", _Env()) is None
-
-
-def test_set_grade_unknown_returns_none(store):
-    assert store.set_grade("nope", "nope", utility=True, security=True) is None
-
-
-def test_complete_evaluation_unknown_returns_none(store):
-    assert store.complete_evaluation("nope", "nope", "out") is None
-
-
-def test_set_grade_persists_validity_and_evidence(store):
+def test_session_index_binds_and_unbinds(store):
     run = store.create_run("test")
     ev = _make_eval(store, run.id)
-    assert ev.grade_validity is None  # not graded yet
-    validity = GradeValidity(
-        utility=CheckValidity(status="valid"),
-        security=CheckValidity(status="invalid", reasons=[ValidityReason(check="c", reason="r")]),
-    )
-    store.set_grade(
-        run.id,
-        ev.id,
-        utility=True,
-        security=None,
-        utility_reason="u",
-        security_reason="s",
-        grade_validity=validity,
-        evidence_status={"openshell.ocsf": "failed"},
-    )
-    assert (ev.utility, ev.security, ev.utility_reason, ev.security_reason) == (True, None, "u", "s")
-    assert ev.grade_validity == validity
-    assert ev.evidence_status == {"openshell.ocsf": "failed"}
+    assert store.session_target("h") is None
+    store.bind_session("h", run.id, ev.id)
+    assert store.session_target("h") == (run.id, ev.id)
+    store.unbind_session("h")
+    store.unbind_session("h")
+    assert store.session_target("h") is None

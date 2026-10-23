@@ -133,6 +133,39 @@ class CompleteRequest(BaseModel):
     agent_output: str
 
 
+_STAGE_DESCRIPTION = (
+    "Where the evaluation is in its lifecycle: open (everything is admitted), closing (no new call is admitted; "
+    "calls already admitted may finish during the closure wait), collecting (the final observations are "
+    "recorded; no call finishes any more) or sealed (completed: the snapshot grading reads is fixed)."
+)
+
+
+class CloseResponse(BaseModel):
+    stage: str = Field(description=_STAGE_DESCRIPTION)
+    unfinished_calls: list[str] = Field(
+        description="The call_ids still unfinished when the closure wait ended: they stay unfinished in the snapshot."
+    )
+
+
+class LateFactResponse(BaseModel):
+    """A write that closure refused. It never changes the evaluation's records; it marks their evidence incomplete."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    event: str = Field(
+        description=(
+            "What was refused: start_call, finish_call, replace_environment, record_observations, start_turn, "
+            "reply_turn or seal."
+        )
+    )
+    stage: str = Field(description="The evaluation's stage when it arrived.")
+    by: str = Field(description="agent (an /agent route) or host (a run-scoped route).")
+    at: str
+    evidence: list[str] = Field(description="The evidence_status keys it marks incomplete.")
+    payload: dict[str, Any] = Field(description="The write as sent.")
+    call_id: str | None = None
+
+
 class RecordObservationsRequest(BaseModel):
     """Record an evaluation's runtime observations from one source.
 
@@ -179,6 +212,7 @@ class EvaluationSummary(BaseModel):
     user_task_id: str
     injection_task_id: str | None
     completed: bool
+    stage: str = Field(default="open", description=_STAGE_DESCRIPTION)
     graded: bool = Field(description="Whether the evaluation was graded. A graded None is unknown, not ungraded.")
     utility: bool | None
     security: bool | None
@@ -197,6 +231,7 @@ class EvaluationResponse(BaseModel):
     user_task_id: str
     injection_task_id: str | None
     completed: bool
+    stage: str = Field(default="open", description=_STAGE_DESCRIPTION)
     graded: bool = Field(description="Whether the evaluation was graded. A graded None is unknown, not ungraded.")
     utility: bool | None
     utility_reason: str | None = None
@@ -214,6 +249,13 @@ class EvaluationResponse(BaseModel):
     )
     pre_environment: dict
     environment: dict
+    late_facts: list[LateFactResponse] = Field(
+        default_factory=list,
+        description=(
+            "Writes that closure refused, in arrival order. They never change the records above; each marks the "
+            "evidence it carries incomplete in evidence_status."
+        ),
+    )
 
 
 # --- Suite / task response models ---

@@ -1,55 +1,47 @@
 """Callbacks used by the interception layer (MCP and framework SDKs).
 
-Each callback's session token authorizes access to one evaluation.
+Each callback's session token authorizes access to one evaluation. Every
+callback goes through the control plane's writer, with the same lifecycle
+rules as the run-scoped routes; only the status codes are chosen here, at the
+edge (``dependencies.REJECTION_STATUS``).
 """
 
-from collections.abc import Mapping
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 
-from midojo.types import SuiteName
-from midojo.yaml_task_suite import YAMLTaskSuite
-
 from ..dependencies import (
     RECORD_FUNCTION_CALL_RESPONSES,
     START_FUNCTION_CALL_RESPONSES,
+    created_or_replayed,
+    get_control,
     get_session_token,
-    get_store,
-    get_suites,
-    record_function_call,
-    resolve_suite,
-    start_function_call,
     validate_environment,
 )
 from ..models import CreateFunctionCallRecord, CreateFunctionCallStart, FunctionCallResponse
-from ..store import Store
+from ..service import BySession, ControlPlane
 
 router = APIRouter(prefix="/agent")
 
 
 @router.get("/environment")
 async def get_environment(
-    session_token: Annotated[str, Depends(get_session_token)], store: Annotated[Store, Depends(get_store)]
+    session_token: Annotated[str, Depends(get_session_token)],
+    control: Annotated[ControlPlane, Depends(get_control)],
 ) -> dict:
-    evaluation = store.session_evaluation(session_token)
-    return evaluation.environment.model_dump()
+    return control.evaluation(BySession(session_token)).environment.model_dump()
 
 
 @router.put("/environment")
 async def put_environment(
     body: dict,
     session_token: Annotated[str, Depends(get_session_token)],
-    store: Annotated[Store, Depends(get_store)],
-    suites: Annotated[Mapping[SuiteName, YAMLTaskSuite], Depends(get_suites)],
+    control: Annotated[ControlPlane, Depends(get_control)],
 ) -> dict:
-    evaluation = store.session_evaluation(session_token)
-    run = store.get_run(evaluation.run_id)
-    assert run is not None
-    suite = resolve_suite(suites, run.suite_name)
-    env = validate_environment(suite, body)
-    store.set_environment(run.id, evaluation.id, env)
-    return env.model_dump()
+    target = BySession(session_token)
+    evaluation = control.evaluation(target)
+    env = validate_environment(control.suite(evaluation.run_id), body)
+    return control.replace_environment(target, env).model_dump()
 
 
 @router.post(
@@ -64,18 +56,17 @@ async def record_agent_function_call(
     req: CreateFunctionCallRecord,
     response: Response,
     session_token: Annotated[str, Depends(get_session_token)],
-    store: Annotated[Store, Depends(get_store)],
+    control: Annotated[ControlPlane, Depends(get_control)],
 ) -> FunctionCallResponse:
     """Record a call in the session's evaluation, at most once per ``call_id``.
 
     201 when recorded, or when it finishes a started ``call_id`` in place; 200
     with the stored record when ``call_id`` is already finished with the same
     body; 409 when it's finished with another body, or was started with
-    another function or args.
+    another function or args, or when closure no longer admits it (recorded as
+    a late fact); 401 after the seal (also recorded as a late fact).
     """
-    evaluation = store.session_evaluation(session_token)
-    record = record_function_call(store, evaluation.run_id, evaluation.id, req, response)
-    assert record is not None
+    record = created_or_replayed(control.finish_call(BySession(session_token), req), response)
     return FunctionCallResponse.model_validate(record)
 
 
@@ -89,33 +80,35 @@ async def start_agent_function_call(
     req: CreateFunctionCallStart,
     response: Response,
     session_token: Annotated[str, Depends(get_session_token)],
-    store: Annotated[Store, Depends(get_store)],
+    control: Annotated[ControlPlane, Depends(get_control)],
 ) -> FunctionCallResponse:
     """Start a call in the session's evaluation: an unfinished record that ``POST /function-calls`` finishes.
 
     201 when started; 200 with the stored record when ``call_id`` is already
     recorded, finished or not, with the same function and args; 409 when it's
-    recorded with another function or args.
+    recorded with another function or args, or once closure has begun (recorded
+    as a late fact); 401 after the seal (also recorded as a late fact).
     """
-    evaluation = store.session_evaluation(session_token)
-    record = start_function_call(store, evaluation.run_id, evaluation.id, req, response)
-    assert record is not None
+    record = created_or_replayed(control.start_call(BySession(session_token), req), response)
     return FunctionCallResponse.model_validate(record)
 
 
 @router.get("/function-calls", response_model=list[FunctionCallResponse])
 async def list_function_calls(
-    session_token: Annotated[str, Depends(get_session_token)], store: Annotated[Store, Depends(get_store)]
+    session_token: Annotated[str, Depends(get_session_token)],
+    control: Annotated[ControlPlane, Depends(get_control)],
 ) -> list[FunctionCallResponse]:
-    evaluation = store.session_evaluation(session_token)
+    evaluation = control.evaluation(BySession(session_token))
     return [FunctionCallResponse.model_validate(call) for call in evaluation.function_calls]
 
 
 @router.get("/function-calls/{idx}", response_model=FunctionCallResponse)
 async def get_function_call(
-    idx: int, session_token: Annotated[str, Depends(get_session_token)], store: Annotated[Store, Depends(get_store)]
+    idx: int,
+    session_token: Annotated[str, Depends(get_session_token)],
+    control: Annotated[ControlPlane, Depends(get_control)],
 ) -> FunctionCallResponse:
-    evaluation = store.session_evaluation(session_token)
+    evaluation = control.evaluation(BySession(session_token))
     if idx < 0 or idx >= len(evaluation.function_calls):
         raise HTTPException(404, f"Function call index out of range: {idx}")
     return FunctionCallResponse.model_validate(evaluation.function_calls[idx])

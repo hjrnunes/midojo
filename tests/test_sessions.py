@@ -97,7 +97,7 @@ def test_parallel_callbacks_stay_with_their_session(app):
 
 def test_sessions_are_private_expire_and_cannot_fall_back(suite, monkeypatch):
     now = [1_700_000_000]
-    monkeypatch.setattr("midojo.control_plane.store.time.time", lambda: now[0])
+    monkeypatch.setattr("midojo.control_plane.service.time.time", lambda: now[0])
     client = TestClient(create_app({"weather": suite}, config=AppConfig(session_ttl_seconds=5)))
     run, ev = new_evaluation(client)
     url = f"/runs/{run['id']}/evaluations/{ev['id']}"
@@ -281,8 +281,9 @@ async def test_a2a_transport_keeps_executor_callbacks_scoped(app, client, monkey
 
 
 def test_handlers_and_dependencies_run_on_the_event_loop(app):
-    # FastAPI runs sync callables on a thread pool, where store check-then-write
-    # sequences can interleave. See the midojo.control_plane.store module docstring.
+    # FastAPI runs sync callables on a thread pool. The writer keeps each
+    # evaluation's check-then-write atomic there too, but async handlers keep
+    # its lock waits off the pool (see midojo.control_plane.service).
     def dependants(dependant: Dependant) -> Iterator[Dependant]:
         yield dependant
         for sub in dependant.dependencies:
@@ -295,4 +296,4 @@ def test_handlers_and_dependencies_run_on_the_event_loop(app):
         for dep in dependants(route.dependant)
         if not (dep.is_coroutine_callable or dep.is_async_gen_callable)
     )
-    assert sync == [], "declare these async def (see midojo.control_plane.store)"
+    assert sync == [], "declare these async def (see midojo.control_plane.service)"

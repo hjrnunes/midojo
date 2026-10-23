@@ -40,6 +40,8 @@ The control plane issues a session token for each evaluation. An interception la
 - The `openshell` runtime sets `MIDOJO_SESSION_TOKEN` and `MIDOJO_URL` (the control plane URL) in the sandbox's environment. The SDKs read them.
 - For an `unmanaged` agent, `midojo-run` sends the token in the `X-Midojo-Session` request header. `midojo_sdk.mcp` reads the header from the incoming MCP request, and `midojo_sdk.session` has helpers for agents that pass it on to their own tool servers.
 
+The session ends when the evaluation is sealed (see [Closure and late facts](#closure-and-late-facts)), when the orchestrator revokes it after a failure, or when it expires (`midojo-serve --session-ttl`, default 3600 s). Every call then gets a 401, with one exception: after the seal, a start or record that exactly replays a recorded call (same `call_id` and body) is still a 200 with the stored record, so a retry whose first response was lost stays safe.
+
 ## Control plane API
 
 All paths are relative to the control plane URL and take the session's bearer token.
@@ -48,9 +50,11 @@ All paths are relative to the control plane URL and take the session's bearer to
 |---|---|---|
 | `GET /agent/environment` | | the evaluation's environment, as JSON |
 | `PUT /agent/environment` | the whole environment | the stored environment. The control plane validates it against the suite's environment schema |
-| `POST /agent/function-calls/start` | `{"call_id", "function", "args"}`; `call_id` is required | the started call, unfinished: 201 when it's new, 200 when `call_id` is already recorded with the same `function` and `args`, 409 when it's recorded with others |
-| `POST /agent/function-calls` | `{"call_id", "function", "args", "result", "error", "blocked"}` | the recorded call: 201 when it's new or finishes a started call, 200 when `call_id` is already finished with the same body, 409 when it's finished with a different body or was started with another `function` or `args` |
+| `POST /agent/function-calls/start` | `{"call_id", "function", "args"}`; `call_id` is required | the started call, unfinished: 201 when it's new, 200 when `call_id` is already recorded with the same `function` and `args`, 409 when it's recorded with others, or when the evaluation is closing |
+| `POST /agent/function-calls` | `{"call_id", "function", "args", "result", "error", "blocked"}` | the recorded call: 201 when it's new or finishes a started call, 200 when `call_id` is already finished with the same body, 409 when it's finished with a different body or was started with another `function` or `args`, or when the evaluation is closing and no longer admits it |
 | `GET /agent/function-calls` | | the calls recorded so far, finished or not, in the order they started |
+
+An error response has `detail`, `kind` (the reason, such as `call_conflict`, `closing`, `session_closed` or `invalid_session`) and `late_fact` (whether the control plane kept the refused write as a late fact).
 
 In a function-call record, `result` is what the agent saw. `error` (optional) is the error the tool raised. `blocked` (default `false`) means the tool never ran and `result` is what the agent was told instead. `complete` (in responses) is `false` while a started call is unfinished; its `result` is then `null`.
 
@@ -97,5 +101,18 @@ Each call keeps one record, in the order the calls started, so counting records 
 The SDKs start every call that runs a tool: the MCP SDK's tools, the LangChain middleware's hooked and reported tools, and the PI SDK's registered, hooked and reported tools. PI's `tool_call` starts a hooked or reported call, and `tool_result` finishes it with the start's `call_id` and arguments, found by PI's tool call ID. A tool that's also in `blockTools` never runs, so it isn't started: its call is recorded once, as blocked.
 
 If the start fails after its resends, the tool doesn't run: the SDK raises, and PI blocks the call. If the finish fails, the SDK raises after the tool has run, and the call stays unfinished. A tool that's cancelled (or ends with any other Python `BaseException` that isn't an `Exception`) gave the agent no result, so the SDK doesn't finish its call, and it stays unfinished too.
+
+## Closure and late facts
+
+When the agent has replied, the orchestrator closes the evaluation in stages:
+
+1. **Closing** (`POST /runs/{run_id}/evaluations/{eval_id}/close`). No new call is admitted: a start, or a record whose `call_id` isn't recorded yet, is a 409 with `kind` `closing`. A call that's already started may still finish, and the environment may still change, until every started call has finished or the closure wait runs out. The wait is a control plane setting, `midojo-serve --closure-wait` (default 5 seconds). The deadline is checked against the time each write arrives, so it holds even if nothing ends the wait (for example, the orchestrator's close request was cancelled): a write that arrives after it is handled as in the collecting stage.
+2. **Collecting.** The orchestrator records the runtime's final observations. A finish or an environment write that arrives now is a 409 with `kind` `closing`, and a call that hasn't finished stays unfinished.
+3. **Sealed** (`POST .../complete`, which closes first if needed). The control plane takes a snapshot of the calls, turns, environment, observations and evidence status, and grading reads only that snapshot. The grade is recorded once; grading again returns it. Every write after this point is refused, and the session is closed: a call through `/agent` gets a 401 with `kind` `session_closed`, and a run-scoped write gets a 409 with `kind` `sealed`. That includes a start or record under a recorded `call_id` with another body: before the seal it's a 409 `call_conflict` and isn't recorded, after the seal it's refused like any other late write. Only an exact replay is answered from the record.
+
+A write that closure refuses isn't lost: the control plane records it as a **late fact**, in the evaluation's `late_facts` (what was sent, when, and by whom), and the response says so with `late_fact: true`. A late fact never changes the snapshot or the grade. Instead it marks the evidence it carries `incomplete` in the evaluation's `evidence_status`: `function_calls` for a call, `environment`, `turns`, `agent_output`, or the observation source's `<source>.<part>` keys. Resending the same late write records it once.
+
+Retries stay safe at every stage: a start or record that replays a stored `call_id` with the same body (for a start, the same `function` and `args`) is a 200 with the stored record, even after the seal. A session the orchestrator revoked (after a failure) records nothing: its calls get a 401 with `kind` `invalid_session`.
+
 
 A PI `tool_call` for a hooked or reported tool without a tool call ID isn't started: its `tool_result` couldn't find the start, and PI's events carry nothing else that pairs a `tool_result` with its `tool_call` for certain (the same tool can run in parallel with the same arguments). The call runs, and its `tool_result` records it once with a fresh `call_id`, as before starts existed, so such a call that never finishes leaves no record. The SDK doesn't assume PI always gives an ID.
