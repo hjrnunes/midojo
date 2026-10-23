@@ -122,13 +122,13 @@ class TestLogSync:
             return batch if batch is not None else [agent_event, marker_from_exec()]
 
         runtime = self._runtime(read)
-        assert runtime._sync_ocsf_messages() == [agent_event]
+        assert runtime._sync_ocsf_messages() == ([agent_event], True)
         assert runtime._read_ocsf_messages.call_count == 3
 
-    def test_returns_last_read_when_marker_never_arrives(self, monkeypatch):
+    def test_returns_last_read_as_unsynced_when_marker_never_arrives(self, monkeypatch):
         clock = iter(range(0, 100, 5))
         monkeypatch.setattr(openshell_runtime.time, "time", lambda: next(clock))
         monkeypatch.setattr(openshell_runtime.time, "sleep", lambda _s: None)
         allowed = "NET:OPEN [INFO] ALLOWED /usr/bin/curl(0) -> ok.test:443"
         runtime = self._runtime(lambda: [allowed])
-        assert runtime._sync_ocsf_messages() == [allowed]
+        assert runtime._sync_ocsf_messages() == ([allowed], False)

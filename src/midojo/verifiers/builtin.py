@@ -59,7 +59,7 @@ class OutputContains:
         passed = self.value.lower() in ctx.agent_output.lower()
         return VerificationResult(passed, f'output contains "{self.value}"')
 
-    def evaluate(self, ctx: VerificationContext) -> bool:
+    def evaluate(self, ctx: VerificationContext) -> bool | None:
         return self.assess(ctx).passed
 
 
@@ -72,7 +72,7 @@ class OutputContainsAll:
         passed = all(v.lower() in lower for v in self.values)
         return VerificationResult(passed, f"output contains all of {self.values}")
 
-    def evaluate(self, ctx: VerificationContext) -> bool:
+    def evaluate(self, ctx: VerificationContext) -> bool | None:
         return self.assess(ctx).passed
 
 
@@ -85,7 +85,7 @@ class OutputContainsAny:
         passed = any(v.lower() in lower for v in self.values)
         return VerificationResult(passed, f"output contains any of {self.values}")
 
-    def evaluate(self, ctx: VerificationContext) -> bool:
+    def evaluate(self, ctx: VerificationContext) -> bool | None:
         return self.assess(ctx).passed
 
 
@@ -98,7 +98,7 @@ class EnvFieldEquals:
         passed = resolve_field(ctx.post_environment, self.field) == self.value
         return VerificationResult(passed, f"{self.field} == {self.value!r}")
 
-    def evaluate(self, ctx: VerificationContext) -> bool:
+    def evaluate(self, ctx: VerificationContext) -> bool | None:
         return self.assess(ctx).passed
 
 
@@ -112,7 +112,7 @@ class EnvFieldContains:
         passed = self.value.lower() in str(field_val).lower()
         return VerificationResult(passed, f'{self.field} contains "{self.value}"')
 
-    def evaluate(self, ctx: VerificationContext) -> bool:
+    def evaluate(self, ctx: VerificationContext) -> bool | None:
         return self.assess(ctx).passed
 
 
@@ -138,7 +138,7 @@ class EnvListAnyMatch:
         match_str = ", ".join(f"{k}={v}" for k, v in self.match.items())
         return VerificationResult(passed, f"{self.field} matches {match_str}")
 
-    def evaluate(self, ctx: VerificationContext) -> bool:
+    def evaluate(self, ctx: VerificationContext) -> bool | None:
         return self.assess(ctx).passed
 
 
@@ -152,7 +152,7 @@ class EnvListCount:
         passed = isinstance(items, list) and len(items) == self.count
         return VerificationResult(passed, f"{self.field} has {self.count} items")
 
-    def evaluate(self, ctx: VerificationContext) -> bool:
+    def evaluate(self, ctx: VerificationContext) -> bool | None:
         return self.assess(ctx).passed
 
 
@@ -164,7 +164,7 @@ class EnvFieldUnchanged:
         passed = resolve_field(ctx.pre_environment, self.field) == resolve_field(ctx.post_environment, self.field)
         return VerificationResult(passed, f"{self.field} unchanged")
 
-    def evaluate(self, ctx: VerificationContext) -> bool:
+    def evaluate(self, ctx: VerificationContext) -> bool | None:
         return self.assess(ctx).passed
 
 
@@ -190,7 +190,7 @@ class ToolCalled:
             reason += " with " + ", ".join(f"{k}={v}" for k, v in self.args.items())
         return VerificationResult(passed, reason)
 
-    def evaluate(self, ctx: VerificationContext) -> bool:
+    def evaluate(self, ctx: VerificationContext) -> bool | None:
         return self.assess(ctx).passed
 
 
@@ -306,7 +306,7 @@ class BuiltinVerifier:
     def assess(self, check: Predicate, ctx: VerificationContext) -> VerificationResult:
         return check.assess(ctx)
 
-    def evaluate(self, check: Predicate, ctx: VerificationContext) -> bool:
+    def evaluate(self, check: Predicate, ctx: VerificationContext) -> bool | None:
         return check.evaluate(ctx)
 
 

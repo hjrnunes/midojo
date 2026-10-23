@@ -36,7 +36,8 @@ from typing import Protocol
 
 from pydantic import BaseModel
 
-from midojo.types import Environment, FunctionCallRecord, SuiteName
+from midojo.observations import EvidenceStatus
+from midojo.types import CheckValidity, Environment, FunctionCallRecord, GradeValidity, SuiteName, ValidityReason
 
 from .models import CreateFunctionCallRecord
 from .state import Evaluation, Run
@@ -77,13 +78,52 @@ class Store(Protocol):
     def set_environment(self, run_id: str, eval_id: str, environment: Environment) -> Evaluation | None: ...
     def record_observations(self, run_id: str, eval_id: str, source: str, observed: BaseModel) -> Evaluation | None: ...
     def set_grade(
-        self, run_id: str, eval_id: str, *, utility: bool, security: bool, security_reason: str | None = None
-    ) -> Evaluation | None: ...
+        self,
+        run_id: str,
+        eval_id: str,
+        *,
+        utility: bool | None,
+        security: bool | None,
+        security_reason: str | None = None,
+        utility_reason: str | None = None,
+        grade_validity: GradeValidity | None = None,
+        evidence_status: dict[str, EvidenceStatus] | None = None,
+    ) -> Evaluation | None:
+        """Record the evaluation's grades and mark it graded.
+
+        Without ``grade_validity``, the validity is derived from the values: a
+        decided grade is valid and an unknown (None) one invalid, and security is
+        not applicable without an injection task. Reasons are stored as given; the
+        control plane's grade route always passes them, but a caller that omits
+        them stores None.
+        """
+        ...
+
     def complete_evaluation(self, run_id: str, eval_id: str, agent_output: str) -> Evaluation | None: ...
 
 
 class InvalidSessionError(ValueError):
     """A callback has no live evaluation binding."""
+
+
+def _derived_validity(evaluation: Evaluation, utility: bool | None, security: bool | None) -> GradeValidity:
+    """The validity of grades recorded without one (see :meth:`Store.set_grade`)."""
+
+    def check_validity(check: str, value: bool | None, reason: str | None) -> CheckValidity:
+        if value is not None:
+            return CheckValidity(status="valid")
+        return CheckValidity(
+            status="invalid", reasons=[ValidityReason(check=reason or check, reason="the grade is unknown")]
+        )
+
+    return GradeValidity(
+        utility=check_validity("utility", utility, evaluation.utility_reason),
+        security=(
+            check_validity("security", security, evaluation.security_reason)
+            if evaluation.injection_task_id is not None
+            else CheckValidity(status="not_applicable")
+        ),
+    )
 
 
 def _token_hash(token: str) -> str:
@@ -225,14 +265,27 @@ class InMemoryStore:
         return evaluation
 
     def set_grade(
-        self, run_id: str, eval_id: str, *, utility: bool, security: bool, security_reason: str | None = None
+        self,
+        run_id: str,
+        eval_id: str,
+        *,
+        utility: bool | None,
+        security: bool | None,
+        security_reason: str | None = None,
+        utility_reason: str | None = None,
+        grade_validity: GradeValidity | None = None,
+        evidence_status: dict[str, EvidenceStatus] | None = None,
     ) -> Evaluation | None:
         evaluation = self.get_evaluation(run_id, eval_id)
         if evaluation is None:
             return None
         evaluation.utility = utility
+        evaluation.utility_reason = utility_reason
         evaluation.security = security
         evaluation.security_reason = security_reason
+        evaluation.grade_validity = grade_validity or _derived_validity(evaluation, utility, security)
+        evaluation.evidence_status = dict(evidence_status or {})
+        evaluation.graded = True
         return evaluation
 
     def complete_evaluation(self, run_id: str, eval_id: str, agent_output: str) -> Evaluation | None:

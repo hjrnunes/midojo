@@ -11,11 +11,13 @@ from pydantic import BaseModel, ValidationError
 
 from midojo.attacks import resolve_source, wrap_payload
 from midojo.env_inference import infer_environment_type
+from midojo.observations import evidence_status
 from midojo.probes import substitute_probes, substitute_probes_deep
 from midojo.runtimes import AgentRuntime, build_runtime
+from midojo.runtimes.openshell import OBSERVATIONS_SOURCE, OpenShellObservations
 from midojo.suite_definition import OpenShellRuntimeDefinition, ProbeDefinition, SuiteDefinition
-from midojo.types import Environment, FunctionCallRecord, SuiteName
-from midojo.verifier import Check, VerificationContext, parse_check
+from midojo.types import CheckValidity, Environment, FunctionCallRecord, GradeValidity, SuiteName, ValidityReason
+from midojo.verifier import Check, VerificationContext, VerificationResult, parse_check
 from midojo.verifiers.openshell import reads_openshell_observations
 
 # ``${env.VAR}`` references (OGX-style), expanded from the process environment in
@@ -65,6 +67,14 @@ def _replace_env_match(match: re.Match[str]) -> str:
         f"environment variable '{name}' referenced in suite agent_runtime is unset "
         f"or empty (use '${{env.{name}:=default}}' to provide a default)"
     )
+
+
+def _validity(result: VerificationResult) -> CheckValidity:
+    """A grade is invalid exactly when its top-level check resolved to unknown."""
+    if result.passed is not None:
+        return CheckValidity(status="valid")
+    reasons = list(result.unknowns) or [ValidityReason(check=result.reason, reason="the check returned no verdict")]
+    return CheckValidity(status="invalid", reasons=reasons)
 
 
 @dataclass
@@ -126,27 +136,46 @@ class YAMLTaskSuite:
         post_environment: Environment,
         function_calls: list[FunctionCallRecord],
         observations: dict[str, BaseModel] | None = None,
-    ) -> dict[str, bool | str | None]:
+    ) -> dict[str, Any]:
+        """Grade one evaluation.
+
+        ``utility`` and ``security`` are True, False, or None when the check
+        couldn't be decided from the evidence collected; ``grade_validity`` marks
+        such a grade ``invalid`` and lists the unknown checks. Each grade has a
+        reason, whatever its outcome. Without an injection task, ``security`` is
+        False, its reason None, and its validity ``not_applicable``.
+        ``evidence_status`` is how completely each evidence source was collected.
+        """
+        observations = dict(observations or {})
+        if self.runtime.name == "openshell" and OBSERVATIONS_SOURCE not in observations:
+            observations[OBSERVATIONS_SOURCE] = OpenShellObservations.not_collected()
         ctx = VerificationContext(
             agent_output=agent_output,
             pre_environment=pre_environment,
             post_environment=post_environment,
             function_calls=function_calls,
-            observations=observations or {},
+            observations=observations,
         )
 
-        utility = self.user_tasks[user_task_id].check.evaluate(ctx)
+        # One traversal per check grades it and names the criterion that decided it.
+        utility = self.user_tasks[user_task_id].check.assess(ctx)
 
-        # One traversal grades the injection and names the criterion that fired.
         injection_check = self.injection_tasks[injection_task_id].check if injection_task_id is not None else None
-        security = False
+        security: bool | None = False
         security_reason: str | None = None
+        security_validity = CheckValidity(status="not_applicable")
         if injection_check is not None:
             result = injection_check.assess(ctx)
-            security = result.passed
-            security_reason = result.reason if result.passed else None
+            security, security_reason, security_validity = result.passed, result.reason, _validity(result)
 
-        return {"utility": utility, "security": security, "security_reason": security_reason}
+        return {
+            "utility": utility.passed,
+            "utility_reason": utility.reason,
+            "security": security,
+            "security_reason": security_reason,
+            "grade_validity": GradeValidity(utility=_validity(utility), security=security_validity).model_dump(),
+            "evidence_status": evidence_status(observations),
+        }
 
     def _register_tasks(self) -> None:
         for task in self.definition.user_tasks:

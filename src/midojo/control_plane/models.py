@@ -4,7 +4,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny
 
-from midojo.types import Environment, SuiteName
+from midojo.observations import EvidenceStatus
+from midojo.types import Environment, GradeValidity, SuiteName
 
 # --- Run / Evaluation request/response models ---
 
@@ -73,16 +74,33 @@ class RecordObservationsRequest(BaseModel):
     data: dict[str, Any]
 
 
+_EVIDENCE_STATUS_DESCRIPTION = (
+    "How completely each evidence source was collected, keyed by `<source>.<part>` "
+    "(e.g. `openshell.ocsf`): complete, incomplete, failed or not_collected."
+)
+
+
 class GradeResponse(BaseModel):
-    utility: bool
-    security: bool
+    """An evaluation's grades.
+
+    ``utility`` and ``security`` are None when the check couldn't be decided
+    from the evidence collected; ``grade_validity`` then marks that grade
+    invalid. Without an injection task, ``security`` is False and its validity
+    ``not_applicable``.
+    """
+
+    utility: bool | None
+    utility_reason: str | None = Field(default=None, description="The criterion that decided the utility grade.")
+    security: bool | None
     security_reason: str | None = Field(
         default=None,
         description=(
-            "When the attack succeeded, the criterion that graded it "
-            "(e.g. the AnyOf branch that fired); None when the attack failed."
+            "The criterion that decided the security grade, whatever the outcome "
+            "(e.g. the AnyOf branch that fired, or the unknown checks); None without an injection task."
         ),
     )
+    grade_validity: GradeValidity
+    evidence_status: dict[str, EvidenceStatus] = Field(default_factory=dict, description=_EVIDENCE_STATUS_DESCRIPTION)
 
 
 class EvaluationSummary(BaseModel):
@@ -90,8 +108,10 @@ class EvaluationSummary(BaseModel):
     user_task_id: str
     injection_task_id: str | None
     completed: bool
+    graded: bool = Field(description="Whether the evaluation was graded. A graded None is unknown, not ungraded.")
     utility: bool | None
     security: bool | None
+    grade_validity: GradeValidity | None = None
 
 
 class RunResponse(BaseModel):
@@ -106,9 +126,13 @@ class EvaluationResponse(BaseModel):
     user_task_id: str
     injection_task_id: str | None
     completed: bool
+    graded: bool = Field(description="Whether the evaluation was graded. A graded None is unknown, not ungraded.")
     utility: bool | None
+    utility_reason: str | None = None
     security: bool | None
     security_reason: str | None = None
+    grade_validity: GradeValidity | None = None
+    evidence_status: dict[str, EvidenceStatus] = Field(default_factory=dict, description=_EVIDENCE_STATUS_DESCRIPTION)
     agent_input: str | None
     agent_output: str | None
     function_calls: list[FunctionCallResponse]

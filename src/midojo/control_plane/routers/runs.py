@@ -70,8 +70,10 @@ async def retrieve_run(run: Annotated[Run, Depends(get_run)]):
                 user_task_id=e.user_task_id,
                 injection_task_id=e.injection_task_id,
                 completed=e.completed,
+                graded=e.graded,
                 utility=e.utility,
                 security=e.security,
+                grade_validity=e.grade_validity,
             )
             for e in list(run.evaluations.values())
         ],
@@ -121,9 +123,13 @@ async def retrieve_evaluation(evaluation: Annotated[Evaluation, Depends(get_eval
         user_task_id=evaluation.user_task_id,
         injection_task_id=evaluation.injection_task_id,
         completed=evaluation.completed,
+        graded=evaluation.graded,
         utility=evaluation.utility,
+        utility_reason=evaluation.utility_reason,
         security=evaluation.security,
         security_reason=evaluation.security_reason,
+        grade_validity=evaluation.grade_validity,
+        evidence_status=evaluation.evidence_status,
         agent_input=evaluation.agent_input,
         agent_output=evaluation.agent_output,
         function_calls=[FunctionCallResponse.model_validate(fc) for fc in evaluation.function_calls],
@@ -168,6 +174,9 @@ async def grade_evaluation(
         utility=graded.utility,
         security=graded.security,
         security_reason=graded.security_reason,
+        utility_reason=graded.utility_reason,
+        grade_validity=graded.grade_validity,
+        evidence_status=graded.evidence_status,
     )
     return graded
 
