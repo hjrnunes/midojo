@@ -39,8 +39,7 @@ async def put_environment(
     control: Annotated[ControlPlane, Depends(get_control)],
 ) -> dict:
     target = BySession(session_token)
-    evaluation = control.evaluation(target)
-    env = validate_environment(control.suite(evaluation.run_id), body)
+    env = validate_environment(control.evaluation(target), body)
     return control.replace_environment(target, env).model_dump()
 
 

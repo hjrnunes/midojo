@@ -1,4 +1,4 @@
-"""Agent runtimes: where a suite's agent runs and how MiDojo observes it.
+"""Agent runtimes: where an episode's agent runs and how MiDojo observes it.
 
 A suite declares its runtime under ``agent_runtime`` in ``suite.yaml``:
 
@@ -8,7 +8,9 @@ A suite declares its runtime under ``agent_runtime`` in ``suite.yaml``:
   * ``unmanaged`` (experimental) — :class:`UnmanagedRuntime`. The agent runs
     somewhere MiDojo doesn't control and nothing is observed outside it.
 
-The orchestrator drives every runtime through the :class:`AgentRuntime`
+A suite or an episode holds only the runtime's definition: :func:`build_runtime`
+is the factory that builds a fresh runtime from it, so concurrent runs never
+share one. The orchestrator drives every runtime through the :class:`AgentRuntime`
 lifecycle. The world state the agent's tools read and write is the suite's
 ``environment``, which the control plane keeps whatever the runtime.
 """
@@ -92,7 +94,12 @@ class UnmanagedRuntime:
 
 
 def build_runtime(suite_name: str, definition: AgentRuntimeDefinition) -> AgentRuntime:
-    """Construct the runtime a suite declares."""
+    """A fresh runtime for ``definition``: each call builds a new one that shares no state with another.
+
+    The runtime gets its own copy of the definition's settings, so nothing it
+    keeps is reachable from the definition or from another runtime.
+    """
+    definition = definition.model_copy(deep=True)
     if isinstance(definition, OpenShellRuntimeDefinition):
         return OpenShellRuntime(
             suite_name,

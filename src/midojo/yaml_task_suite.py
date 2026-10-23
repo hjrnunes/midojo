@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import yaml
 from pydantic import BaseModel, ValidationError
@@ -12,13 +13,12 @@ from pydantic import BaseModel, ValidationError
 from midojo.attacks import resolve_source, wrap_payload
 from midojo.control_plane.config import CONTROL_TOKEN_ENV
 from midojo.env_inference import infer_environment_type
-from midojo.observations import evidence_status
+from midojo.episode import Episode, UnknownTaskError, freeze
 from midojo.probes import substitute_probes, substitute_probes_deep
 from midojo.runtimes import AgentRuntime, build_runtime
-from midojo.runtimes.openshell import OBSERVATIONS_SOURCE, OpenShellObservations
 from midojo.suite_definition import OpenShellRuntimeDefinition, ProbeDefinition, SuiteDefinition
-from midojo.types import CheckValidity, Environment, FunctionCallRecord, GradeValidity, SuiteName, ValidityReason
-from midojo.verifier import Check, VerificationContext, VerificationResult, parse_check
+from midojo.types import Environment, FunctionCallRecord, SuiteName
+from midojo.verifier import Check, parse_check
 from midojo.verifiers import ConversationTurn
 from midojo.verifiers.openshell import reads_openshell_observations
 
@@ -76,20 +76,14 @@ def _replace_env_match(match: re.Match[str]) -> str:
     )
 
 
-def _validity(result: VerificationResult) -> CheckValidity:
-    """A grade is invalid exactly when its top-level check resolved to unknown."""
-    if result.passed is not None:
-        return CheckValidity(status="valid")
-    reasons = list(result.unknowns) or [ValidityReason(check=result.reason, reason="the check returned no verdict")]
-    return CheckValidity(status="invalid", reasons=reasons)
-
-
 @dataclass
 class UserTask:
     id: str
     # The user's messages, one per turn; a prompt task has one.
     turns: list[str]
     check: Check
+    # The utility check as authored, frozen: what an episode of the task is graded with.
+    spec: Mapping[str, Any] | None = None
 
     @property
     def prompt(self) -> str:
@@ -102,10 +96,17 @@ class InjectionTask:
     description: str
     probes: dict[str, str] = field(default_factory=dict)
     check: Check | None = None
+    # The security check as authored, frozen: what an episode of the task is graded with.
+    spec: Mapping[str, Any] | None = None
 
 
 class YAMLTaskSuite:
-    """Reads a suite definition from a single suite.yaml file."""
+    """Reads a suite definition from a single suite.yaml file.
+
+    A suite is a catalogue: :meth:`episode` compiles one of its user task x
+    injection task pairs into an :class:`~midojo.episode.Episode`. Parsing it
+    builds no runtime; :meth:`new_runtime` builds a fresh one each time.
+    """
 
     def __init__(self, name: SuiteName, suite_yaml_path: Path) -> None:
         self._suite_yaml_path = suite_yaml_path
@@ -122,11 +123,45 @@ class YAMLTaskSuite:
         except ValidationError as exc:
             raise ValueError(f"Invalid suite definition in {suite_yaml_path}:\n{exc}") from exc
         self.name = self.definition.name
-        self.runtime: AgentRuntime = build_runtime(self.name, self.definition.agent_runtime)
         self.environment_type: type[Environment] = infer_environment_type(self.name, self.definition.environment)
         self.user_tasks: dict[str, UserTask] = {}
         self.injection_tasks: dict[str, InjectionTask] = {}
         self._register_tasks()
+
+    def new_runtime(self) -> AgentRuntime:
+        """A fresh runtime for the suite's ``agent_runtime``: it shares no state with any other."""
+        return build_runtime(self.name, self.definition.agent_runtime)
+
+    def episode(
+        self,
+        user_task_id: str,
+        injection_task_id: str | None = None,
+        injections: Mapping[str, str] | None = None,
+    ) -> Episode:
+        """Compile a user task x injection task pair into an episode, with ``injections`` substituted.
+
+        Raises :class:`~midojo.episode.UnknownTaskError` for a task ID the suite
+        doesn't have. ``injections`` maps ``"<task>:<probe>"`` to a payload (see
+        :meth:`get_probes_for_task`); without it, no probe is active.
+        """
+        if user_task_id not in self.user_tasks:
+            raise UnknownTaskError(f"Unknown user task: {user_task_id}")
+        if injection_task_id is not None and injection_task_id not in self.injection_tasks:
+            raise UnknownTaskError(f"Unknown injection task: {injection_task_id}")
+        active = dict(injections or {})
+        injection_task = self.injection_tasks[injection_task_id] if injection_task_id is not None else None
+        return Episode(
+            runtime=self.definition.agent_runtime,
+            turns=self.inject_user_task_turns(user_task_id, active),
+            injections=active,
+            security=injection_task.spec if injection_task is not None else None,
+            utility=self.user_tasks[user_task_id].spec,
+            environment=cast(dict[str, Any], substitute_probes_deep(self.definition.environment, active)),
+            environment_type=self.environment_type,
+            suite_name=self.name,
+            user_task_id=user_task_id,
+            injection_task_id=injection_task_id,
+        )
 
     def provision_environment(self, injections: dict[str, str]) -> Environment:
         """A fresh environment from the declared state, with the active probe payloads substituted."""
@@ -153,7 +188,7 @@ class YAMLTaskSuite:
         observations: dict[str, BaseModel] | None = None,
         turns: list[ConversationTurn] | None = None,
     ) -> dict[str, Any]:
-        """Grade one evaluation.
+        """Grade one evaluation with the pair's checks (see :meth:`Episode.grade <midojo.episode.Episode.grade>`).
 
         ``utility`` and ``security`` are True, False, or None when the check
         couldn't be decided from the evidence collected; ``grade_validity`` marks
@@ -162,42 +197,13 @@ class YAMLTaskSuite:
         False, its reason None, and its validity ``not_applicable``.
         ``evidence_status`` is how completely each evidence source was collected.
         """
-        observations = dict(observations or {})
-        if self.runtime.name == "openshell" and OBSERVATIONS_SOURCE not in observations:
-            observations[OBSERVATIONS_SOURCE] = OpenShellObservations.not_collected()
-        ctx = VerificationContext(
-            agent_output=agent_output,
-            pre_environment=pre_environment,
-            post_environment=post_environment,
-            function_calls=function_calls,
-            observations=observations,
-            turns=turns or [],
-        )
-
-        # One traversal per check grades it and names the criterion that decided it.
-        utility = self.user_tasks[user_task_id].check.assess(ctx)
-
-        injection_check = self.injection_tasks[injection_task_id].check if injection_task_id is not None else None
-        security: bool | None = False
-        security_reason: str | None = None
-        security_validity = CheckValidity(status="not_applicable")
-        if injection_check is not None:
-            result = injection_check.assess(ctx)
-            security, security_reason, security_validity = result.passed, result.reason, _validity(result)
-
-        return {
-            "utility": utility.passed,
-            "utility_reason": utility.reason,
-            "security": security,
-            "security_reason": security_reason,
-            "grade_validity": GradeValidity(utility=_validity(utility), security=security_validity).model_dump(),
-            "evidence_status": evidence_status(observations),
-        }
+        episode = self.episode(user_task_id, injection_task_id)
+        return episode.grade(agent_output, pre_environment, post_environment, function_calls, observations, turns)
 
     def _register_tasks(self) -> None:
         for task in self.definition.user_tasks:
             check = self._parse_check(task.id, task.utility)
-            self.user_tasks[task.id] = UserTask(id=task.id, turns=task.messages, check=check)
+            self.user_tasks[task.id] = UserTask(id=task.id, turns=task.messages, check=check, spec=freeze(task.utility))
 
         for task in self.definition.injection_tasks:
             check = self._parse_check(task.id, task.security)
@@ -207,6 +213,7 @@ class YAMLTaskSuite:
                 description=task.description,
                 check=check,
                 probes=probes,
+                spec=freeze(task.security),
             )
 
     def _parse_check(self, task_id: str, raw: dict[str, Any]) -> Check:

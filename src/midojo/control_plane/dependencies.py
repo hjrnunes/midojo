@@ -80,12 +80,6 @@ async def get_run(run_id: str, control: Annotated[ControlPlane, Depends(get_cont
     return control.run(run_id)
 
 
-async def get_run_suite(
-    run: Annotated[Run, Depends(get_run)], suites: Annotated[Mapping[SuiteName, YAMLTaskSuite], Depends(get_suites)]
-) -> YAMLTaskSuite:
-    return resolve_suite(suites, run.suite_name)
-
-
 async def get_evaluation_by_id(
     eval_id: str,
     run: Annotated[Run, Depends(get_run)],
@@ -115,9 +109,10 @@ async def require_control_token(
         raise HTTPException(401, "Control token required", headers={"WWW-Authenticate": "Bearer"})
 
 
-def validate_environment(suite: YAMLTaskSuite, body: dict) -> Environment:
+def validate_environment(evaluation: Evaluation, body: dict) -> Environment:
+    """``body`` as the evaluation's environment type (its episode's), or a 422."""
     try:
-        return suite.environment_type.model_validate(body)
+        return evaluation.environment_type.model_validate(body)
     except ValidationError as exc:
         errors = [{**error, "loc": ("body", *error["loc"])} for error in exc.errors()]
         raise RequestValidationError(errors) from exc

@@ -45,7 +45,7 @@ def detached(value: T) -> T:
 class EvaluationWriter(Protocol):
     """The capability to replace stored evaluations, held by the control plane's writer alone."""
 
-    def apply(self, run_id: str, eval_id: str, step: Step) -> None:
+    def apply(self, run_id: str | None, eval_id: str, step: Step) -> None:
         """Run ``step`` on a copy of the evaluation's value, under its lock, and keep a copy of what it returns."""
         ...
 
@@ -64,23 +64,23 @@ class Store(Protocol):
         ...
 
     def insert_evaluation(self, evaluation: Evaluation) -> None:
-        """Store a copy of a new evaluation under its run."""
+        """Store a copy of a new evaluation under its run, or outside any run when its ``run_id`` is None."""
         ...
 
-    def get_evaluation(self, run_id: str, eval_id: str) -> Evaluation | None:
+    def get_evaluation(self, run_id: str | None, eval_id: str) -> Evaluation | None:
         """A copy of the evaluation's current value, or None if (run_id, eval_id) is unknown."""
         ...
 
-    def list_evaluations(self, run_id: str) -> list[Evaluation]: ...
+    def list_evaluations(self, run_id: str | None) -> list[Evaluation]: ...
 
     def writer(self) -> EvaluationWriter:
         """The writer capability. Given out once: a second call raises RuntimeError."""
         ...
 
     # --- the session token index ---
-    def bind_session(self, token_hash: str, run_id: str, eval_id: str) -> None: ...
+    def bind_session(self, token_hash: str, run_id: str | None, eval_id: str) -> None: ...
     def unbind_session(self, token_hash: str) -> None: ...
-    def session_target(self, token_hash: str) -> tuple[str, str] | None: ...
+    def session_target(self, token_hash: str) -> tuple[str | None, str] | None: ...
 
 
 class InMemoryStore:
@@ -93,10 +93,10 @@ class InMemoryStore:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._runs: dict[str, Run] = {}
-        # run_id -> eval_id -> value, in creation order.
-        self._evaluations: dict[str, dict[str, Evaluation]] = {}
+        # run_id -> eval_id -> value, in creation order; None holds the evaluations outside any run.
+        self._evaluations: dict[str | None, dict[str, Evaluation]] = {None: {}}
         self._evaluation_ids: set[str] = set()
-        self._sessions: dict[str, tuple[str, str]] = {}
+        self._sessions: dict[str, tuple[str | None, str]] = {}
         self._writer: _InMemoryWriter | None = None
 
     # --- runs ---
@@ -135,12 +135,12 @@ class InMemoryStore:
             self._evaluation_ids.add(evaluation.id)
             evaluations[evaluation.id] = detached(evaluation)
 
-    def get_evaluation(self, run_id: str, eval_id: str) -> Evaluation | None:
+    def get_evaluation(self, run_id: str | None, eval_id: str) -> Evaluation | None:
         with self._lock:
             evaluation = self._evaluations.get(run_id, {}).get(eval_id)
             return detached(evaluation)
 
-    def list_evaluations(self, run_id: str) -> list[Evaluation]:
+    def list_evaluations(self, run_id: str | None) -> list[Evaluation]:
         with self._lock:
             return detached(list(self._evaluations.get(run_id, {}).values()))
 
@@ -153,7 +153,7 @@ class InMemoryStore:
 
     # --- the session token index ---
 
-    def bind_session(self, token_hash: str, run_id: str, eval_id: str) -> None:
+    def bind_session(self, token_hash: str, run_id: str | None, eval_id: str) -> None:
         with self._lock:
             self._sessions[token_hash] = (run_id, eval_id)
 
@@ -161,7 +161,7 @@ class InMemoryStore:
         with self._lock:
             self._sessions.pop(token_hash, None)
 
-    def session_target(self, token_hash: str) -> tuple[str, str] | None:
+    def session_target(self, token_hash: str) -> tuple[str | None, str] | None:
         with self._lock:
             return self._sessions.get(token_hash)
 
@@ -171,14 +171,14 @@ class _InMemoryWriter:
 
     def __init__(self, store: InMemoryStore) -> None:
         self._store = store
-        self._locks: dict[tuple[str, str], threading.Lock] = {}
+        self._locks: dict[tuple[str | None, str], threading.Lock] = {}
         self._locks_guard = threading.Lock()
 
-    def _lock_for(self, run_id: str, eval_id: str) -> AbstractContextManager[object]:
+    def _lock_for(self, run_id: str | None, eval_id: str) -> AbstractContextManager[object]:
         with self._locks_guard:
             return self._locks.setdefault((run_id, eval_id), threading.Lock())
 
-    def apply(self, run_id: str, eval_id: str, step: Step) -> None:
+    def apply(self, run_id: str | None, eval_id: str, step: Step) -> None:
         store = self._store
         with self._lock_for(run_id, eval_id):
             with store._lock:

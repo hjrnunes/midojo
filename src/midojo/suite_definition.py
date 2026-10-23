@@ -17,7 +17,12 @@ class _DefinitionModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
 
-class OpenShellRuntimeDefinition(_DefinitionModel):
+class _RuntimeDefinitionModel(_DefinitionModel):
+    # What an episode needs to run, not a live runtime: read-only once validated.
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+
+class OpenShellRuntimeDefinition(_RuntimeDefinitionModel):
     """Runs the agent in an OpenShell sandbox created for each evaluation."""
 
     type: Literal["openshell"] = "openshell"
@@ -32,7 +37,7 @@ class OpenShellRuntimeDefinition(_DefinitionModel):
     timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
 
 
-class UnmanagedRuntimeDefinition(_DefinitionModel):
+class UnmanagedRuntimeDefinition(_RuntimeDefinitionModel):
     """The agent runs somewhere MiDojo doesn't control."""
 
     type: Literal["unmanaged"]

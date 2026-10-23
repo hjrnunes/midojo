@@ -28,6 +28,7 @@ from midojo.agent_client import (
 from midojo.control_plane.client import ControlPlaneClient
 from midojo.control_plane.config import CONTROL_TOKEN_ENV
 from midojo.control_plane.models import GradeResponse
+from midojo.episode import Episode
 from midojo.reachability import UNKNOWN as UNKNOWN_REACHABILITY
 from midojo.reachability import Reachability, count, reachability
 from midojo.runtimes import AgentRuntime
@@ -247,19 +248,23 @@ async def run_task(
     control: ControlPlaneClient,
     agent_client: AgentClient,
     run_id: str,
-    user_task_id: str,
-    injection_task_id: str | None,
-    injections: dict[str, str],
+    episode: Episode,
     *,
     runtime: AgentRuntime,
 ) -> TaskResult:
-    """Run a single evaluation, with the runtime set up around the agent's execution.
+    """Run one evaluation of a suite's ``episode``, with the runtime set up around the agent's execution.
 
-    Each turn is started in the control plane, sent to the agent and its reply
-    recorded, all in one conversation on the evaluation's session. Then the
-    evaluation is closed (calls already admitted may finish), the runtime's
-    final observations recorded, and the evaluation sealed and graded.
+    The control plane compiles the same episode from the run's suite, and its
+    turns are the ones sent. Each turn is started in the control plane, sent to
+    the agent and its reply recorded, all in one conversation on the
+    evaluation's session. Then the evaluation is closed (calls already admitted
+    may finish), the runtime's final observations recorded, and the evaluation
+    sealed and graded.
     """
+    user_task_id, injection_task_id = episode.user_task_id, episode.injection_task_id
+    if user_task_id is None:
+        raise ValueError("run_task runs a suite's episode: compile one with suite.episode()")
+    injections = dict(episode.injections)
     evaluation = await control.create_evaluation(run_id, user_task_id, injection_task_id, injections)
     eval_id, messages, session_token = evaluation.id, evaluation.turns, evaluation.session_token
     pair = f"{user_task_id} x {injection_task_id}" if injection_task_id else user_task_id
@@ -320,8 +325,8 @@ async def _run_benchmark(
     user_task_ids: list[str] | None,
     injection_task_ids: list[str] | None,
     logdir: Path,
+    runtime: AgentRuntime,
 ) -> None:
-    runtime = suite.runtime
     user_tasks_to_run = user_task_ids or list(suite.user_tasks.keys())
     injection_tasks_to_run: list[str]
     if injection_task_ids is not None:
@@ -355,16 +360,8 @@ async def _run_benchmark(
 
         for ut_id in user_tasks_to_run:
             for it_id in it_ids_to_run:
-                injections = suite.get_probes_for_task(it_id) if it_id else {}
-                result = await run_task(
-                    control,
-                    agent_client,
-                    run_id,
-                    ut_id,
-                    it_id,
-                    injections,
-                    runtime=runtime,
-                )
+                episode = suite.episode(ut_id, it_id, suite.get_probes_for_task(it_id) if it_id else {})
+                result = await run_task(control, agent_client, run_id, episode, runtime=runtime)
                 grade = result.grade
                 pair = TaskPair(ut_id, it_id or "")
                 utility_results[pair] = grade.utility
@@ -384,7 +381,9 @@ async def _run_benchmark(
                     # payload text was found is reported alongside and never filters it out.
                     security_results[pair] = grade.security
                     security_reasons[pair] = grade.security_reason
-                    reachability_results[pair] = await _injection_reachability(control, run_id, eval_id, injections)
+                    reachability_results[pair] = await _injection_reachability(
+                        control, run_id, eval_id, dict(episode.injections)
+                    )
                     detail = _reachability_detail(reachability_results[pair])
                     if grade.security is not False and grade.security_reason:
                         # attack succeeded, or couldn't be graded — name the criterion that decided it
@@ -446,12 +445,16 @@ async def run_benchmark(
     logdir: Path,
     control_token: str | None = None,
     http: httpx.AsyncClient | None = None,
+    runtime: AgentRuntime | None = None,
 ) -> None:
     """Run the benchmark against the control plane at ``control_url``.
 
     ``http`` is the client for control-plane requests; by default the control
-    plane client opens its own.
+    plane client opens its own. ``runtime`` runs the run's evaluations, one at
+    a time; by default it's a fresh one from the suite (``suite.new_runtime()``).
     """
+    if runtime is None:
+        runtime = suite.new_runtime()
     async with ControlPlaneClient(control_url, token=control_token, http=http) as control:
         await _run_benchmark(
             control,
@@ -464,6 +467,7 @@ async def run_benchmark(
             user_task_ids,
             injection_task_ids,
             logdir,
+            runtime,
         )
 
 
@@ -558,23 +562,25 @@ def main(
         importlib.import_module(module)
 
     suite = get_suite(suite_name)
+    # A fresh runtime for this run, from the suite's agent_runtime: the suite keeps none.
+    runtime = suite.new_runtime()
     agent_client: AgentClient
     # Unmanaged clients keep their own default timeout unless --agent-timeout is given.
     timeout_kwargs = {} if agent_timeout is None else {"timeout": agent_timeout}
 
-    if isinstance(suite.runtime, OpenShellRuntime):
+    if isinstance(runtime, OpenShellRuntime):
         if agent_uri or protocol:
             raise click.UsageError(
                 f"Suite {suite_name!r} runs its agent in OpenShell; pass --gateway instead of --agent-uri/--protocol."
             )
         if not gateway:
             raise click.UsageError(f"Suite {suite_name!r} runs its agent in OpenShell and requires --gateway.")
-        suite.runtime.configure(cluster=gateway, control_url=control_url)
-        agent_client = OpenShellAgentClient(suite.runtime, timeout=agent_timeout)
+        runtime.configure(cluster=gateway, control_url=control_url)
+        agent_client = OpenShellAgentClient(runtime, timeout=agent_timeout)
         agent_uri, protocol = gateway, "openshell"
     elif gateway:
         raise click.UsageError(
-            f"--gateway applies only to suites with the openshell agent_runtime; {suite_name!r} is {suite.runtime.name}."
+            f"--gateway applies only to suites with the openshell agent_runtime; {suite_name!r} is {runtime.name}."
         )
     elif not agent_uri or not protocol:
         raise click.UsageError(f"Suite {suite_name!r} has an unmanaged agent and requires --agent-uri and --protocol.")
@@ -626,6 +632,7 @@ def main(
             injection_task_ids=list(injection_tasks) if injection_tasks else None,
             logdir=logdir,
             control_token=control_token or None,
+            runtime=runtime,
         )
     )
 

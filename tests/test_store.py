@@ -25,7 +25,7 @@ class _Env(Environment):
     counter: int = 0
 
 
-def _make_eval(store: InMemoryStore, run_id: str, **changes) -> Evaluation:
+def _make_eval(store: InMemoryStore, run_id: str | None, **changes) -> Evaluation:
     evaluation = Evaluation(
         id=store.new_evaluation_id(),
         run_id=run_id,
@@ -73,6 +73,29 @@ def test_create_evaluation_stored_under_run(store):
     assert re.fullmatch(r"[0-9a-f]{10}", ev.id)
     assert [e.id for e in store.list_evaluations(run.id)] == [ev.id]
     assert store.list_evaluations(store.create_run("other").id) == []
+
+
+def test_evaluations_outside_any_run_are_kept_apart_from_the_runs(store):
+    assert store.list_evaluations(None) == []
+    run = store.create_run("test")
+    inside = _make_eval(store, run.id)
+    outside = _make_eval(store, None)
+    assert [e.id for e in store.list_evaluations(None)] == [outside.id]
+    assert [e.id for e in store.list_evaluations(run.id)] == [inside.id]
+    assert store.get_evaluation(None, outside.id) == outside
+    assert store.get_evaluation(None, inside.id) is None
+    assert store.get_evaluation(run.id, outside.id) is None
+    # Outside a run is not a run: it isn't listed among them.
+    assert [r.id for r in store.list_runs()] == [run.id]
+    # The writer reaches an evaluation outside a run by the same (None, eval_id) key.
+    writer = store.writer()
+    writer.apply(None, outside.id, lambda value: dataclasses.replace(value, agent_input="changed") if value else None)
+    assert store.get_evaluation(None, outside.id).agent_input == "changed"  # type: ignore[union-attr]
+    assert store.get_evaluation(run.id, inside.id) == inside
+    with pytest.raises(KeyError):
+        writer.apply(run.id, outside.id, lambda value: outside)
+    store.bind_session("h", None, outside.id)
+    assert store.session_target("h") == (None, outside.id)
 
 
 def test_evaluation_id_collision_draws_another_id(store, monkeypatch):
