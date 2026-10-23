@@ -103,7 +103,6 @@ def test_reads_are_copies_that_share_nothing_with_the_stored_value(store):
     ev = _make_eval(store, run.id, environment=_Env(counter=1))
     read = store.get_evaluation(run.id, ev.id)
     assert read is not None
-    assert read is not store.evaluation_value(run.id, ev.id)
     read.environment.counter = 99  # type: ignore[attr-defined]
     [listed] = store.list_evaluations(run.id)
     listed.pre_environment.counter = 98  # type: ignore[attr-defined]
@@ -120,25 +119,63 @@ def test_an_inserted_value_is_copied_in(store):
     assert stored.environment == _Env(counter=1)
 
 
-def test_commit_replaces_the_value(store):
+def test_no_public_store_method_hands_out_or_keeps_a_resident_value(store):
+    """Only the writer capability reaches stored values; every public method returns or takes copies."""
+    public = {name for name in dir(store) if not name.startswith("_") and callable(getattr(store, name))}
+    assert public == {
+        "create_run",
+        "get_run",
+        "list_runs",
+        "new_evaluation_id",
+        "insert_evaluation",
+        "get_evaluation",
+        "list_evaluations",
+        "writer",
+        "bind_session",
+        "unbind_session",
+        "session_target",
+    }
+
+
+def test_the_writer_capability_has_one_holder(store):
+    store.writer()
+    with pytest.raises(RuntimeError, match="writer"):
+        store.writer()
+
+
+def test_the_writer_hands_out_and_keeps_copies(store):
     run = store.create_run("test")
     ev = _make_eval(store, run.id)
-    record = FunctionCallRecord(function="a", args={}, result="r", timestamp="t", pre_environment=_Env())
-    committed = dataclasses.replace(ev, function_calls=(record,), stage=Stage.CLOSING)
-    store.commit_evaluation(committed)
+    writer = store.writer()
+    seen: dict[str, Evaluation] = {}
+
+    def step(value: Evaluation | None) -> Evaluation:
+        assert value is not None and value == ev
+        record = FunctionCallRecord(function="a", args={}, result="r", timestamp="t", pre_environment=_Env())
+        seen["given"], seen["kept"] = value, dataclasses.replace(value, function_calls=(record,), stage=Stage.CLOSING)
+        return seen["kept"]
+
+    writer.apply(run.id, ev.id, step)
+    committed = store.get_evaluation(run.id, ev.id)
+    assert committed == seen["kept"]
+    # Neither the value the step was given nor the one it returned is the stored value.
+    seen["given"].environment.counter = 99  # type: ignore[attr-defined]
+    seen["kept"].function_calls[0].args["x"] = 1
+    seen["kept"].environment.counter = 98  # type: ignore[attr-defined]
     assert store.get_evaluation(run.id, ev.id) == committed
-    assert store.evaluation_value(run.id, ev.id) is committed
-    # The value read before the commit is unchanged: values are never changed in place.
-    assert ev.function_calls == () and ev.stage is Stage.OPEN
+    # A step that returns None keeps the value as it is; an unknown evaluation is None.
+    writer.apply(run.id, ev.id, lambda value: None)
+    assert store.get_evaluation(run.id, ev.id) == committed
+    unknown: list[Evaluation | None] = []
+    writer.apply(run.id, "nope", lambda value: unknown.append(value))
+    assert unknown == [None]
 
 
-def test_commit_of_an_unknown_evaluation_raises(store):
+def test_the_writer_cannot_create_an_evaluation(store):
     run = store.create_run("test")
-    ev = Evaluation(
-        id="nope", run_id=run.id, user_task_id="ut", injection_task_id=None, pre_environment=_Env(), environment=_Env()
-    )
+    ev = _make_eval(store, run.id)
     with pytest.raises(KeyError):
-        store.commit_evaluation(ev)
+        store.writer().apply(run.id, "nope", lambda value: dataclasses.replace(ev, id="nope"))
 
 
 # --- the session token index ---

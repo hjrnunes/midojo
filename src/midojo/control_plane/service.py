@@ -2,9 +2,10 @@
 
 :class:`ControlPlane` is what the HTTP routes call, and what an in-process
 caller (a host-side recorder, an orchestrator in the same process) calls in
-their place. Every write to an evaluation goes through :meth:`ControlPlane.apply`,
-which holds that evaluation's ``threading.Lock`` across the store's look-up,
-the pure transition (:mod:`midojo.control_plane.lifecycle`) and the commit. So
+their place. Every event on an evaluation goes through :meth:`ControlPlane.apply`,
+which runs the pure transition (:mod:`midojo.control_plane.lifecycle`) as one
+step of the store's writer capability (:meth:`Store.writer`, which only the
+control plane holds): under that evaluation's lock, from look-up to commit. So
 no two events on one evaluation interleave, whatever thread or event loop sends
 them, and events on different evaluations don't wait for each other.
 
@@ -14,8 +15,8 @@ sleeps between short ``apply`` calls, and grading reads the sealed snapshot,
 grades it with no lock held, then records the grade in one more ``apply``.
 
 The stored evaluation never aliases a caller's objects, in either direction:
-``apply`` copies each event in before the transition, and copies its result out
-before it returns; every read returns a copy.
+the transition decides on copies of the event and the evaluation, the writer
+keeps a copy of the next value, and every read returns a copy.
 
 Outcomes are domain values: a refusal raises :class:`RejectedError` with its
 :class:`Rejection` kind, and only the HTTP edge (``dependencies.py``) turns a
@@ -27,7 +28,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import secrets
-import threading
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -92,14 +92,9 @@ class ControlPlane:
         self.suites = dict(suites)
         self.store: Store = store if store is not None else InMemoryStore()
         self.config = config if config is not None else AppConfig()
-        self._locks: dict[tuple[str, str], threading.Lock] = {}
-        self._locks_guard = threading.Lock()
+        self._writer = self.store.writer()
 
     # --- the single writer ---
-
-    def _lock(self, run_id: str, eval_id: str) -> threading.Lock:
-        with self._locks_guard:
-            return self._locks.setdefault((run_id, eval_id), threading.Lock())
 
     def _resolve(self, target: Target) -> tuple[str, str, lifecycle.Authority]:
         if isinstance(target, BySession):
@@ -119,20 +114,27 @@ class ControlPlane:
         True when it was recorded as a late fact.
         """
         run_id, eval_id, authority = self._resolve(target)
-        event = detached(event)
-        with self._lock(run_id, eval_id):
-            evaluation = self.store.evaluation_value(run_id, eval_id)
+        decided: list[lifecycle.Outcome] = []
+
+        def step(evaluation: Evaluation | None) -> Evaluation | None:
             if evaluation is None:
                 raise _reject(Rejection.UNKNOWN_EVALUATION, f"Unknown evaluation: {eval_id}")
             outcome = lifecycle.transition(evaluation, authority, event)
+            decided.append(outcome)
             if isinstance(outcome, Rejected):
-                raise RejectedError(outcome)
-            if outcome.evaluation is not evaluation:
-                self.store.commit_evaluation(outcome.evaluation)
-            if isinstance(outcome, Late):
-                raise RejectedError(outcome.rejected, late=True)
-            self._apply_effects(outcome, run_id, eval_id)
-            return detached(outcome.result)
+                return None
+            if isinstance(outcome, Accepted):
+                self._apply_effects(outcome, run_id, eval_id)
+            return outcome.evaluation
+
+        self._writer.apply(run_id, eval_id, step)
+        [outcome] = decided
+        if isinstance(outcome, Rejected):
+            raise RejectedError(outcome)
+        if isinstance(outcome, Late):
+            raise RejectedError(outcome.rejected, late=True)
+        # The writer kept its own copy of the evaluation, so the result shares nothing with what's stored.
+        return outcome.result
 
     def _apply_effects(self, outcome: Accepted, run_id: str, eval_id: str) -> None:
         for effect in outcome.effects:

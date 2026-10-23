@@ -1,13 +1,19 @@
 """In-memory persistence seam: runs, evaluation values and the session token index.
 
 The store decides nothing and changes no evaluation in place. It keeps one
-:class:`~midojo.control_plane.state.Evaluation` value per evaluation, and only
-the writer (:class:`midojo.control_plane.service.ControlPlane`) replaces it,
-with :meth:`Store.commit_evaluation`, while it holds that evaluation's lock.
-Every value it hands out is a deep copy, so a caller can't reach what it keeps.
+:class:`~midojo.control_plane.state.Evaluation` value per evaluation. No public
+method hands out or keeps a stored value: reads return deep copies, and
+:meth:`Store.insert_evaluation` keeps a copy of what it's given.
 
-A persistent store can implement the same contract: a commit replaces one
-evaluation's value, and the writer serializes commits per evaluation.
+The only way to replace a stored value is the writer capability,
+:meth:`Store.writer`, which a store gives out once: the control plane's writer
+(:class:`midojo.control_plane.service.ControlPlane`) takes it. Its
+:meth:`EvaluationWriter.apply` runs one step per evaluation at a time, under
+that evaluation's lock, on a copy of the stored value, and keeps a copy of
+what the step returns.
+
+A persistent store can implement the same contract with a transaction per
+``apply``.
 """
 
 from __future__ import annotations
@@ -16,6 +22,8 @@ import copy
 import secrets
 import threading
 import uuid
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from typing import Protocol, TypeVar
 
 from midojo.types import SuiteName
@@ -24,10 +32,22 @@ from .state import Evaluation, Run
 
 T = TypeVar("T")
 
+# A writer step: given a copy of the stored value (None when the evaluation is
+# unknown), return the next value to keep, or None to keep the stored one.
+Step = Callable[[Evaluation | None], Evaluation | None]
+
 
 def detached(value: T) -> T:
     """A deep copy of ``value``: nothing in it is shared with the original."""
     return copy.deepcopy(value)
+
+
+class EvaluationWriter(Protocol):
+    """The capability to replace stored evaluations, held by the control plane's writer alone."""
+
+    def apply(self, run_id: str, eval_id: str, step: Step) -> None:
+        """Run ``step`` on a copy of the evaluation's value, under its lock, and keep a copy of what it returns."""
+        ...
 
 
 class Store(Protocol):
@@ -44,20 +64,17 @@ class Store(Protocol):
         ...
 
     def insert_evaluation(self, evaluation: Evaluation) -> None:
-        """Store a new evaluation under its run. Only the writer calls this."""
+        """Store a copy of a new evaluation under its run."""
         ...
 
     def get_evaluation(self, run_id: str, eval_id: str) -> Evaluation | None:
         """A copy of the evaluation's current value, or None if (run_id, eval_id) is unknown."""
         ...
 
-    def evaluation_value(self, run_id: str, eval_id: str) -> Evaluation | None:
-        """The stored value itself, for the writer only: it never changes it and never hands it out."""
-        ...
-
     def list_evaluations(self, run_id: str) -> list[Evaluation]: ...
-    def commit_evaluation(self, evaluation: Evaluation) -> None:
-        """Replace the stored value of ``evaluation``. Only the writer calls this, holding the evaluation's lock."""
+
+    def writer(self) -> EvaluationWriter:
+        """The writer capability. Given out once: a second call raises RuntimeError."""
         ...
 
     # --- the session token index ---
@@ -69,8 +86,8 @@ class Store(Protocol):
 class InMemoryStore:
     """Process-local, in-memory :class:`Store`. State is lost on restart.
 
-    Its own maps are guarded by one lock, so threads can call it; ordering the
-    writes to one evaluation is the writer's job.
+    Its own maps are guarded by one lock, so threads can call it; its writer
+    orders the steps on each evaluation with a lock per evaluation.
     """
 
     def __init__(self) -> None:
@@ -80,6 +97,7 @@ class InMemoryStore:
         self._evaluations: dict[str, dict[str, Evaluation]] = {}
         self._evaluation_ids: set[str] = set()
         self._sessions: dict[str, tuple[str, str]] = {}
+        self._writer: _InMemoryWriter | None = None
 
     # --- runs ---
 
@@ -120,23 +138,18 @@ class InMemoryStore:
     def get_evaluation(self, run_id: str, eval_id: str) -> Evaluation | None:
         with self._lock:
             evaluation = self._evaluations.get(run_id, {}).get(eval_id)
-        return detached(evaluation)
+            return detached(evaluation)
 
     def list_evaluations(self, run_id: str) -> list[Evaluation]:
         with self._lock:
-            evaluations = list(self._evaluations.get(run_id, {}).values())
-        return detached(evaluations)
+            return detached(list(self._evaluations.get(run_id, {}).values()))
 
-    def evaluation_value(self, run_id: str, eval_id: str) -> Evaluation | None:
+    def writer(self) -> EvaluationWriter:
         with self._lock:
-            return self._evaluations.get(run_id, {}).get(eval_id)
-
-    def commit_evaluation(self, evaluation: Evaluation) -> None:
-        with self._lock:
-            evaluations = self._evaluations[evaluation.run_id]
-            if evaluation.id not in evaluations:
-                raise KeyError(f"Unknown evaluation: {evaluation.id}")
-            evaluations[evaluation.id] = evaluation
+            if self._writer is not None:
+                raise RuntimeError("This store's writer has already been given out")
+            self._writer = _InMemoryWriter(self)
+            return self._writer
 
     # --- the session token index ---
 
@@ -151,3 +164,30 @@ class InMemoryStore:
     def session_target(self, token_hash: str) -> tuple[str, str] | None:
         with self._lock:
             return self._sessions.get(token_hash)
+
+
+class _InMemoryWriter:
+    """:class:`EvaluationWriter` for an :class:`InMemoryStore`: one lock per evaluation."""
+
+    def __init__(self, store: InMemoryStore) -> None:
+        self._store = store
+        self._locks: dict[tuple[str, str], threading.Lock] = {}
+        self._locks_guard = threading.Lock()
+
+    def _lock_for(self, run_id: str, eval_id: str) -> AbstractContextManager[object]:
+        with self._locks_guard:
+            return self._locks.setdefault((run_id, eval_id), threading.Lock())
+
+    def apply(self, run_id: str, eval_id: str, step: Step) -> None:
+        store = self._store
+        with self._lock_for(run_id, eval_id):
+            with store._lock:
+                current = detached(store._evaluations.get(run_id, {}).get(eval_id))
+            following = step(current)
+            if following is None:
+                return
+            if current is None or (following.run_id, following.id) != (run_id, eval_id):
+                raise KeyError(f"Unknown evaluation: {eval_id}")
+            following = detached(following)
+            with store._lock:
+                store._evaluations[run_id][eval_id] = following

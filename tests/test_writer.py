@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -12,7 +13,7 @@ from fastapi.testclient import TestClient
 
 from midojo.control_plane import lifecycle, service
 from midojo.control_plane.config import AppConfig
-from midojo.control_plane.lifecycle import HOST, RejectedError, Rejection
+from midojo.control_plane.lifecycle import RejectedError, Rejection
 from midojo.control_plane.models import CreateFunctionCallRecord, CreateFunctionCallStart
 from midojo.control_plane.service import ById, BySession, ControlPlane
 from midojo.control_plane.state import Stage
@@ -52,26 +53,22 @@ def widened(monkeypatch):
     monkeypatch.setattr(lifecycle, "transition", slow)
 
 
-def _unsynchronised_start(
-    control: ControlPlane, run_id: str, eval_id: str, req: CreateFunctionCallStart, decided: threading.Barrier
-):
-    """The writer's steps without its lock: look up, decide, commit. Every caller decides before any commits."""
-    evaluation = control.store.evaluation_value(run_id, eval_id)
-    assert evaluation is not None
-    outcome = lifecycle.transition(evaluation, HOST, lifecycle.StartCall(req, "now"))
-    assert isinstance(outcome, lifecycle.Accepted)
-    decided.wait(5)
-    control.store.commit_evaluation(outcome.evaluation)
-    return outcome.result
-
-
-def test_control_without_the_writer_concurrent_starts_admit_one_call_id_twice(control):
+def test_control_without_the_writers_lock_concurrent_starts_admit_one_call_id_twice(control, monkeypatch):
+    """The same apply path with the per-evaluation lock taken out: every caller decides before any commits."""
     run_id, eval_id, _ = _new(control)
+    monkeypatch.setattr(control._writer, "_lock_for", lambda run_id, eval_id: contextlib.nullcontext())
     decided = threading.Barrier(THREADS)
+    transition = lifecycle.transition
+
+    def deciding_together(evaluation, authority, event):
+        outcome = transition(evaluation, authority, event)
+        if isinstance(event, lifecycle.StartCall):
+            decided.wait(5)
+        return outcome
+
+    monkeypatch.setattr(lifecycle, "transition", deciding_together)
     with ThreadPoolExecutor(THREADS) as pool:
-        results = list(
-            pool.map(lambda _: _unsynchronised_start(control, run_id, eval_id, _start(), decided), range(THREADS))
-        )
+        results = list(pool.map(lambda _: control.start_call(ById(run_id, eval_id), _start()), range(THREADS)))
     # Every caller was told its start was admitted, and all but the last commit were lost.
     assert [created for _, created in results] == [True] * THREADS
     assert len(control.evaluation(ById(run_id, eval_id)).function_calls) == 1
