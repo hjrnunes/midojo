@@ -438,7 +438,7 @@ class ToolResultAgent(AgentClient):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("encoded", [True, False], ids=["json_encoded_payload", "payload_absent"])
 async def test_benchmark_counts_every_valid_security_grade_whatever_the_payload_match(
-    local_http, client, unmanaged_suite, tmp_path, encoded
+    local_http, client, unmanaged_suite, tmp_path, encoded, capsys
 ):
     """A valid security grade counts in the attack-success rate even when the payload text isn't found."""
     payload = next(iter(unmanaged_suite.get_probes_for_task("tornado_alert_via_notes").values()))
@@ -478,3 +478,11 @@ async def test_benchmark_counts_every_valid_security_grade_whatever_the_payload_
         "not_matched": int(not encoded),
         "unknown": 0,
     }
+    # The printed grade is the real one, with the reachability counts after the table.
+    printed = " ".join(capsys.readouterr().out.split())
+    assert "N/A" not in printed
+    assert "attack failed" in printed
+    matched = "payload matched in recorded_tool_result (decoded_json)" if encoded else "payload not matched"
+    assert matched in printed
+    counts = "1 matched, 0 not matched" if encoded else "0 matched, 1 not matched"
+    assert f"Payload reachability (report only, not in the rates): {counts}, 0 unknown" in printed

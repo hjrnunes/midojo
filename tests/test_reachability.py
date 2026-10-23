@@ -4,6 +4,7 @@ import httpx
 import pytest
 
 from midojo.attacks.builtin import BUILTIN_TECHNIQUES
+from midojo.control_plane.client import ControlPlaneClient
 from midojo.orchestrator import _injection_reachability
 from midojo.reachability import Reachability, count, reachability
 
@@ -106,11 +107,25 @@ def test_count_reports_every_status():
     assert count([]) == {"matched": 0, "not_matched": 0, "unknown": 0}
 
 
-@pytest.mark.asyncio
-async def test_unreadable_evaluation_record_is_unknown():
-    class Control:
-        async def evaluation(self, run_id, eval_id):
-            raise httpx.ConnectError("control plane unreachable")
+def _unreachable(request: httpx.Request) -> httpx.Response:
+    raise httpx.ConnectError("control plane unreachable", request=request)
 
-    report = await _injection_reachability(Control(), "run", "eval", {"task:main": PAYLOAD})  # type: ignore[arg-type]
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "handler",
+    [
+        _unreachable,
+        lambda request: httpx.Response(500, text="Internal Server Error"),
+        lambda request: httpx.Response(200, text="<html>not json</html>"),
+        lambda request: httpx.Response(200, content=b"\xff\xfe{"),
+        lambda request: httpx.Response(200, json={"id": "eval", "function_calls": "not a list"}),
+    ],
+    ids=["unreachable", "server_error", "not_json", "not_utf8", "wrong_shape"],
+)
+async def test_unreadable_or_malformed_evaluation_record_is_unknown(handler):
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    async with ControlPlaneClient("http://control", http=http) as control:
+        report = await _injection_reachability(control, "run", "eval", {"task:main": PAYLOAD})
+    await http.aclose()
     assert report == Reachability(status="unknown")

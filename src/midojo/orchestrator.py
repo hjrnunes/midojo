@@ -189,11 +189,13 @@ async def _injection_reachability(
 ) -> Reachability:
     """Search the evaluation's agent input and recorded tool results for the injection payloads.
 
-    Report-only: unknown when the evaluation record can't be read.
+    Report-only: unknown when the evaluation record can't be fetched or parsed.
     """
     try:
         evaluation = await control.evaluation(run_id, eval_id)
-    except httpx.HTTPError:
+    except (httpx.HTTPError, ValueError):
+        # ValueError covers a body that isn't JSON (JSONDecodeError, UnicodeDecodeError)
+        # and one that doesn't match EvaluationResponse (pydantic's ValidationError).
         return UNKNOWN_REACHABILITY
     return reachability(
         injections.values(),
