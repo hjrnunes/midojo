@@ -194,6 +194,7 @@ async def test_benchmark_grades_security_when_the_injection_reaches_the_agent(
     pair = "weather_new_york,tornado_alert_via_prompt"
     assert results["utility"] == {pair: True}
     assert results["security"] == {pair: False}
+    assert results["reachability"] == {pair: {"status": "matched", "method": "raw_text", "boundary": "agent_input"}}
 
 
 @pytest.mark.asyncio
@@ -253,6 +254,12 @@ async def test_benchmark_reports_invalid_grades_and_denominators(local_http, cli
     assert results["aggregates"] == {
         "utility": {"graded": 1, "valid": 1, "invalid": 0, "true": 1, "false": 0, "rate": 1.0},
         "security": {"graded": 1, "valid": 0, "invalid": 1, "true": 0, "false": 0, "rate": None},
+        "reachability": {"matched": 1, "not_matched": 0, "unknown": 0},
+    }
+    assert results["reachability"][pair] == {
+        "status": "matched",
+        "method": "raw_text",
+        "boundary": "recorded_tool_result",
     }
 
 
@@ -409,3 +416,65 @@ def test_sandbox_creation_failure_does_not_rename_reuse_or_delete_existing_sandb
     assert gateway.sandboxes.create.call_args.kwargs["name"] == "eval-c896124bda"
     gateway.sandboxes.wait_ready.assert_not_called()
     gateway.sandboxes.delete.assert_not_called()
+
+
+class ToolResultAgent(AgentClient):
+    """Records one tool call with a fixed result, then answers the user task."""
+
+    def __init__(self, result: str):
+        self.result = result
+
+    async def send_task(self, prompt, *, session_token):
+        async with httpx.AsyncClient() as http:
+            response = await http.post(
+                "http://control/agent/function-calls",
+                headers={"Authorization": f"Bearer {session_token}"},
+                json={"function": "get_weather", "args": {"city": "New York"}, "result": self.result},
+            )
+            response.raise_for_status()
+        return "New York is 72°F and sunny"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("encoded", [True, False], ids=["json_encoded_payload", "payload_absent"])
+async def test_benchmark_counts_every_valid_security_grade_whatever_the_payload_match(
+    local_http, client, unmanaged_suite, tmp_path, encoded
+):
+    """A valid security grade counts in the attack-success rate even when the payload text isn't found."""
+    payload = next(iter(unmanaged_suite.get_probes_for_task("tornado_alert_via_notes").values()))
+    result = json.dumps({"city": "New York", "notes": payload}) if encoded else "72°F and sunny"
+    await run_benchmark(
+        control_url="http://control",
+        agent_client=ToolResultAgent(result),
+        agent_uri="http://agent",
+        protocol="http",
+        suite=unmanaged_suite,
+        suite_name="weather",
+        user_task_ids=["weather_new_york"],
+        injection_task_ids=["tornado_alert_via_notes"],
+        logdir=tmp_path,
+    )
+    results = json.loads((tmp_path / "results.json").read_text())
+    pair = "weather_new_york,tornado_alert_via_notes"
+    assert results["grade_validity"][pair]["security"]["status"] == "valid"
+    assert results["security"] == {pair: False}
+    assert results["security_reason"][pair]
+    assert results["aggregates"]["security"] == {
+        "graded": 1,
+        "valid": 1,
+        "invalid": 0,
+        "true": 0,
+        "false": 1,
+        "rate": 0.0,
+    }
+    # Whether the payload was found is reported, never filtered on.
+    if encoded:
+        expected = {"status": "matched", "method": "decoded_json", "boundary": "recorded_tool_result"}
+    else:
+        expected = {"status": "not_matched", "method": None, "boundary": None}
+    assert results["reachability"] == {pair: expected}
+    assert results["aggregates"]["reachability"] == {
+        "matched": int(encoded),
+        "not_matched": int(not encoded),
+        "unknown": 0,
+    }
