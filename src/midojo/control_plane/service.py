@@ -195,6 +195,7 @@ class ControlPlane:
             environment=environment,
             active_injections=injections,
             agent_input=turns[0],
+            environment_history=self.config.environment_history,
         )
         self.store.insert_evaluation(evaluation)
         token = secrets.token_urlsafe(32)
@@ -230,6 +231,18 @@ class ControlPlane:
     def replace_environment(self, target: Target, environment: Environment) -> Environment:
         """Install ``environment``, already validated against the evaluation's suite."""
         return self.apply(target, lifecycle.ReplaceEnvironment(environment, _now()))
+
+    def change_environment(
+        self, target: Target, values: Mapping[str, Any], expected_revision: int | None = None
+    ) -> tuple[int, Environment]:
+        """Set top-level fields of the environment in one step: ``(revision, environment)`` after the change.
+
+        With ``expected_revision``, the change applies only at that revision,
+        and is refused as a ``revision_conflict`` at any other. The changed
+        environment is validated against the suite's environment type, and
+        refused as ``invalid_environment`` when it doesn't fit.
+        """
+        return self.apply(target, lifecycle.ChangeEnvironment(dict(values), _now(), expected_revision))
 
     def record_observations(self, run_id: str, eval_id: str, source: str, observed: BaseModel) -> dict[str, BaseModel]:
         """Record ``source``'s observations, already validated against the model registered for it."""

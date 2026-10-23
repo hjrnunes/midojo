@@ -23,10 +23,19 @@ REFUSED_DISPOSITIONS: frozenset[CallDisposition] = frozenset({"denied", "blocked
 
 
 class FunctionCallRecord(BaseModel):
-    """A recorded function call execution (function + args + result + env snapshots).
+    """A recorded function call: what the agent asked for and what it saw.
 
-    An unfinished call (``complete`` False) was started and hasn't finished: it
-    has no ``result`` and no ``post_environment`` yet.
+    A record is an intercepted request: it isn't proof of what the call did,
+    to the simulated environment or to a real system. An unfinished call
+    (``complete`` False) was started and hasn't finished: it has no ``result``
+    yet.
+
+    ``pre_environment`` and ``post_environment`` are environment history, kept
+    only when the control plane runs with it on: the environment observed when
+    the call started and when it finished. They are observations over the
+    call's interval, not its effect: another call running at the same time, or
+    the host, may have made a change between them, and an unfinished call has
+    no ``post_environment``.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -52,14 +61,26 @@ class FunctionCallRecord(BaseModel):
     )
     complete: bool = Field(
         default=True,
-        description="False while the call is started but not finished: it has no result or post_environment yet.",
+        description="False while the call is started but not finished: it has no result yet.",
     )
     timestamp: str
     turn: int | None = Field(
         default=None, description="Index of the turn most recently started when the call was recorded, if any."
     )
-    pre_environment: SerializeAsAny[Environment]
-    post_environment: SerializeAsAny[Environment] | None = None
+    pre_environment: SerializeAsAny[Environment] | None = Field(
+        default=None,
+        description=(
+            "Environment history, when kept: the environment observed when the call started (for a call recorded "
+            "whole, when the previous call finished). An observation, not a cause."
+        ),
+    )
+    post_environment: SerializeAsAny[Environment] | None = Field(
+        default=None,
+        description=(
+            "Environment history, when kept: the environment observed when the call finished. Changes since "
+            "pre_environment happened during the call's interval; the call didn't necessarily make them."
+        ),
+    )
 
     @model_validator(mode="after")
     def _disposition_matches_blocked(self) -> "FunctionCallRecord":

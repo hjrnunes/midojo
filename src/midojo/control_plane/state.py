@@ -129,6 +129,11 @@ class Evaluation:
     late_facts: tuple[LateFact, ...] = ()
     # Set once, from the snapshot, and never replaced.
     grade: GradeResponse | None = None
+    # How many times the environment has changed since the evaluation was created.
+    environment_revision: int = 0
+    # Whether call records carry environment snapshots: the environment observed when each call started and
+    # finished, which shows what changed during the call, not what the call caused.
+    environment_history: bool = False
 
     @property
     def completed(self) -> bool:

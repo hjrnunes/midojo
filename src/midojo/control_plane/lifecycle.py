@@ -26,6 +26,11 @@ The rules kept here:
   conflict until the seal, and a late fact after it;
 * unfinished calls: a start appends an unfinished record that the finish
   completes in place, keeping its start order and its start's turn;
+* environment history: a record carries environment snapshots only when the
+  evaluation was created to keep them, as what was observed when the call
+  started and finished, never as what the call caused;
+* the environment's revision: every change counts one, and a change that
+  names the revision it was computed from applies only at that revision;
 * turns: a call carries the index of the latest started turn, a turn starts
   only once the previous one has its reply, and a turn gets one reply;
 * staged closure: ``open`` admits everything; ``closing`` admits no new call
@@ -53,7 +58,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from midojo.observations import evidence_status
 from midojo.types import Environment, FunctionCallRecord
@@ -89,6 +94,9 @@ class Rejection(enum.StrEnum):
     TURN_PENDING = "turn_pending"
     TURN_NOT_STARTED = "turn_not_started"
     TURN_ANSWERED = "turn_answered"
+    # The environment.
+    REVISION_CONFLICT = "revision_conflict"
+    INVALID_ENVIRONMENT = "invalid_environment"
 
 
 @dataclass(frozen=True)
@@ -222,6 +230,19 @@ class ReplaceEnvironment:
 
 
 @dataclass(frozen=True)
+class ChangeEnvironment:
+    """Set top-level fields of the environment in one step, at ``expected_revision`` when it's given.
+
+    The changed environment is validated against the environment's own model,
+    the suite's environment type.
+    """
+
+    values: Mapping[str, Any]
+    at: str
+    expected_revision: int | None = None
+
+
+@dataclass(frozen=True)
 class RecordObservations:
     """Record a source's observations, already validated against the model registered for it."""
 
@@ -269,6 +290,7 @@ Event = (
     | StartTurn
     | ReplyTurn
     | ReplaceEnvironment
+    | ChangeEnvironment
     | RecordObservations
     | BeginClosure
     | EndClosureWait
@@ -277,7 +299,7 @@ Event = (
 )
 
 # What an agent's session may do. Everything else is the host's.
-AGENT_EVENTS = (Read, StartCall, FinishCall, ReplaceEnvironment)
+AGENT_EVENTS = (Read, StartCall, FinishCall, ReplaceEnvironment, ChangeEnvironment)
 
 INVALID_SESSION_DETAIL = "Invalid, expired, or closed evaluation session"
 SEALED_DETAIL = "Evaluation already completed"
@@ -312,6 +334,8 @@ def transition(evaluation: Evaluation, authority: Authority, event: Event) -> Ou
             return _reply_turn(evaluation, authority, event)
         case ReplaceEnvironment():
             return _replace_environment(evaluation, authority, event)
+        case ChangeEnvironment():
+            return _change_environment(evaluation, authority, event)
         case RecordObservations():
             return _record_observations(evaluation, authority, event)
         case BeginClosure():
@@ -439,6 +463,11 @@ def _current_turn(evaluation: Evaluation) -> int | None:
     return evaluation.turns[-1].index if evaluation.turns else None
 
 
+def _observed(evaluation: Evaluation) -> Environment | None:
+    """A copy of the live environment for a record, when the evaluation keeps environment history."""
+    return evaluation.environment.model_copy(deep=True) if evaluation.environment_history else None
+
+
 def _start_call(evaluation: Evaluation, authority: Authority, event: StartCall) -> Outcome:
     req = event.req
     # A start replays any record with its call_id, finished or not, when the function and args match.
@@ -454,14 +483,15 @@ def _start_call(evaluation: Evaluation, authority: Authority, event: StartCall) 
         return _late(
             evaluation, authority, "start_call", event.at, _CALL_EVIDENCE, req.model_dump(mode="json"), req.call_id
         )
-    # The pre-env is the live environment when the call starts; the finish adds the post-env.
+    # With environment history, the pre-env is the live environment when the call starts; the finish adds the
+    # post-env.
     record = FunctionCallRecord(
         **req.model_dump(),
         complete=False,
         timestamp=event.at,
         # A started call belongs to the turn it started in, even if it finishes later.
         turn=_current_turn(evaluation),
-        pre_environment=evaluation.environment.model_copy(deep=True),
+        pre_environment=_observed(evaluation),
     )
     return Accepted(_replace(evaluation, function_calls=(*evaluation.function_calls, record)), (record, True))
 
@@ -497,18 +527,21 @@ def _finish_call(evaluation: Evaluation, authority: Authority, event: FinishCall
                 "error": req.error,
                 "blocked": req.blocked,
                 "complete": True,
-                "post_environment": evaluation.environment.model_copy(deep=True),
+                "post_environment": _observed(evaluation),
             }
         )
         calls = list(evaluation.function_calls)
         calls[index] = finished
         return Accepted(_replace(evaluation, function_calls=tuple(calls)), (finished, True))
-    # Each call's pre-env is the previous call's post-env, chaining from the
-    # eval's initial environment. An unfinished previous call has no post-env,
-    # and changes made since its start may be its own, so the pre-env is the
-    # live environment: this call's record then shows only what changed while
-    # it was being recorded. Each snapshot is its own copy.
-    if not evaluation.function_calls:
+    # With environment history, each call's pre-env is the previous call's
+    # post-env, chaining from the eval's initial environment. An unfinished
+    # previous call has no post-env, and changes made since its start may be
+    # its own, so the pre-env is the live environment: this call's record then
+    # shows only what changed while it was being recorded. Each snapshot is its
+    # own copy.
+    if not evaluation.environment_history:
+        pre_env = None
+    elif not evaluation.function_calls:
         pre_env = evaluation.pre_environment
     elif (previous_post := evaluation.function_calls[-1].post_environment) is not None:
         pre_env = previous_post
@@ -520,7 +553,7 @@ def _finish_call(evaluation: Evaluation, authority: Authority, event: FinishCall
         timestamp=event.at,
         turn=_current_turn(evaluation),
         pre_environment=pre_env,
-        post_environment=evaluation.environment.model_copy(deep=True),
+        post_environment=_observed(evaluation),
     )
     return Accepted(_replace(evaluation, function_calls=(*evaluation.function_calls, record)), (record, True))
 
@@ -561,8 +594,34 @@ def _replace_environment(evaluation: Evaluation, authority: Authority, event: Re
     if evaluation.stage not in (Stage.OPEN, Stage.CLOSING):
         payload = event.environment.model_dump(mode="json")
         return _late(evaluation, authority, "replace_environment", event.at, ("environment",), payload)
-    next_value = _replace(evaluation, environment=event.environment)
+    next_value = _replace(
+        evaluation, environment=event.environment, environment_revision=evaluation.environment_revision + 1
+    )
     return Accepted(next_value, event.environment)
+
+
+def _change_environment(evaluation: Evaluation, authority: Authority, event: ChangeEnvironment) -> Outcome:
+    if evaluation.stage not in (Stage.OPEN, Stage.CLOSING):
+        # The payload as JSON-compatible data, whatever an in-process caller sent.
+        payload = json.loads(
+            json.dumps({"set": event.values, "expected_revision": event.expected_revision}, default=str)
+        )
+        return _late(evaluation, authority, "change_environment", event.at, ("environment",), payload)
+    if event.expected_revision is not None and event.expected_revision != evaluation.environment_revision:
+        return Rejected(
+            Rejection.REVISION_CONFLICT,
+            f"The environment is at revision {evaluation.environment_revision}, not {event.expected_revision}",
+        )
+    model = type(evaluation.environment)
+    if model.model_config.get("extra") != "allow" and (unknown := sorted(set(event.values) - set(model.model_fields))):
+        return Rejected(Rejection.INVALID_ENVIRONMENT, f"Unknown environment fields: {unknown}")
+    try:
+        environment = model.model_validate({**evaluation.environment.model_dump(), **event.values})
+    except ValidationError as exc:
+        return Rejected(Rejection.INVALID_ENVIRONMENT, str(exc))
+    revision = evaluation.environment_revision + 1
+    next_value = _replace(evaluation, environment=environment, environment_revision=revision)
+    return Accepted(next_value, (revision, environment))
 
 
 def _record_observations(evaluation: Evaluation, authority: Authority, event: RecordObservations) -> Outcome:

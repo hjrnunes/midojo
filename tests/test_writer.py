@@ -174,7 +174,8 @@ def test_each_evaluation_has_its_own_writer(control, monkeypatch):
         holder.join(5)
 
 
-def test_values_the_writer_returns_share_nothing_with_the_stored_evaluation(control):
+def test_values_the_writer_returns_share_nothing_with_the_stored_evaluation(suite):
+    control = ControlPlane({"weather": suite}, config=AppConfig(environment_history=True))
     run_id, eval_id, token = _new(control)
     target = ById(run_id, eval_id)
     record, _ = control.finish_call(target, _finish("c1"))
@@ -192,6 +193,44 @@ def test_values_the_writer_returns_share_nothing_with_the_stored_evaluation(cont
     assert stored.environment == control.evaluation(BySession(token)).environment
     assert stored.environment.weather_alerts == []  # type: ignore[attr-defined]
     assert dict(stored.observations) == {}
+
+
+def test_concurrent_environment_changes_lose_nothing(control, widened):
+    """Changes to different fields, sent at once: each applies to the latest environment, so none undoes another."""
+    run_id, eval_id, _ = _new(control)
+    target = ById(run_id, eval_id)
+    cities = control.evaluation(target).environment.model_dump()["cities"]
+    alerts = [{"city": "Boston", "message": "m"}]
+    sunny = {name: {**city, "condition": "sunny"} for name, city in cities.items()}
+
+    def change(i: int) -> None:
+        control.change_environment(target, {"weather_alerts": alerts} if i % 2 else {"cities": sunny})
+
+    with ThreadPoolExecutor(max_workers=THREADS) as pool:
+        list(pool.map(change, range(THREADS)))
+
+    environment = control.evaluation(target).environment.model_dump()
+    assert control.evaluation(target).environment_revision == THREADS
+    assert (environment["weather_alerts"], environment["cities"]) == (alerts, sunny)
+
+
+def test_a_change_at_a_stale_revision_is_refused_whichever_thread_commits_first(control, widened):
+    run_id, eval_id, _ = _new(control)
+    target = ById(run_id, eval_id)
+
+    def change(i: int) -> bool:
+        try:
+            control.change_environment(target, {"weather_alerts": [{"city": str(i), "message": "m"}]}, 0)
+        except RejectedError as e:
+            assert e.kind is Rejection.REVISION_CONFLICT
+            return False
+        return True
+
+    with ThreadPoolExecutor(max_workers=THREADS) as pool:
+        applied = list(pool.map(change, range(THREADS)))
+
+    assert applied.count(True) == 1
+    assert control.evaluation(target).environment_revision == 1
 
 
 def test_an_event_payload_changed_after_submission_changes_nothing_stored(control):

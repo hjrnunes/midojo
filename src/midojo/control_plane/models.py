@@ -86,6 +86,19 @@ class FunctionCallResponse(FunctionCallBody):
     )
 
 
+class ChangeEnvironmentRequest(BaseModel):
+    """Request body for setting top-level fields of an environment in one atomic step."""
+
+    set: dict[str, Any] = Field(description="The fields to set, each to its new value. The other fields are kept.")
+    expected_revision: int | None = Field(
+        default=None,
+        description=(
+            "The revision the change was computed from: it applies only at that revision, and is refused with "
+            "409 revision_conflict at any other. Omitted, the change applies at whatever revision is current."
+        ),
+    )
+
+
 class StartTurnRequest(BaseModel):
     message: str
 
@@ -154,8 +167,8 @@ class LateFactResponse(BaseModel):
 
     event: str = Field(
         description=(
-            "What was refused: start_call, finish_call, replace_environment, record_observations, start_turn, "
-            "reply_turn or seal."
+            "What was refused: start_call, finish_call, replace_environment, change_environment, "
+            "record_observations, start_turn, reply_turn or seal."
         )
     )
     stage: str = Field(description="The evaluation's stage when it arrived.")
