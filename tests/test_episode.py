@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import dataclasses
+import datetime
 
 import pytest
 from fastapi.testclient import TestClient
@@ -149,6 +150,93 @@ def test_turns_may_be_left_to_the_host_but_not_empty():
         _episode(turns=[])
     with pytest.raises(TypeError, match="not a string"):
         _episode(turns="one message")
+
+
+class _StatefulStr(str):
+    """A str that carries mutable state: equal to the plain string, but not data."""
+
+    seen: list[str]
+
+    def __new__(cls, value: str) -> _StatefulStr:
+        made = super().__new__(cls, value)
+        made.seen = []
+        return made
+
+
+class _MutableKey:
+    """Hashable by identity, with state that can change under the hash."""
+
+    def __init__(self) -> None:
+        self.name = "counter"
+
+
+class _StatefulInt(int):
+    pass
+
+
+class _StatefulZone(datetime.tzinfo):
+    def __init__(self) -> None:
+        self.offset = datetime.timedelta(0)
+
+    def utcoffset(self, dt):
+        return self.offset
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"environment": {"counter": _StatefulStr("0")}},
+        {"environment": {_StatefulStr("counter"): 0}},
+        {"environment": {"notes": [_StatefulInt(1)]}},
+        {"environment": {"at": datetime.datetime(2026, 1, 1, tzinfo=_StatefulZone())}},
+        {"security": {"output_contains": _StatefulStr("pwned")}},
+        {"utility": {_StatefulStr("output_contains"): "done"}},
+        {"runtime": {"type": "openshell", "image": "pi", "files": {_StatefulStr("a.txt"): "seed"}}},
+        {"turns": ["Write a note", _StatefulStr("Anything else?")]},
+        {"injections": {_StatefulStr("t:main"): "payload"}},
+        {"injections": {"t:main": _StatefulStr("payload")}},
+        {"suite_name": _StatefulStr("weather")},
+        {"user_task_id": _StatefulStr("ut")},
+        {"injection_task_id": _StatefulStr("it")},
+    ],
+    ids=[
+        "value",
+        "key",
+        "int-subclass",
+        "time-zone",
+        "check-value",
+        "check-key",
+        "runtime-key",
+        "turn",
+        "injection-probe",
+        "injection-payload",
+        "suite_name",
+        "user_task_id",
+        "injection_task_id",
+    ],
+)
+def test_an_episode_refuses_str_subclasses_and_other_stateful_data(changes):
+    with pytest.raises(TypeError):
+        _episode(**changes)
+
+
+@pytest.mark.parametrize("field", ["environment", "security", "injections"])
+def test_an_episode_refuses_a_mutable_key(field):
+    with pytest.raises(TypeError, match="key"):
+        _episode(**{field: {_MutableKey(): "x"}})
+
+
+@pytest.mark.parametrize("field", ["suite_name", "user_task_id", "injection_task_id"])
+@pytest.mark.parametrize("value", [["ut"], {"id": "ut"}, 7], ids=["list", "dict", "int"])
+def test_an_episode_refuses_provenance_that_is_not_a_str(field, value):
+    with pytest.raises(TypeError, match=field):
+        _episode(**{field: value})
+
+
+def test_plain_scalars_and_zoned_times_are_episode_data():
+    at = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
+    episode = _episode(environment={"counter": 0, "notes": [], "at": at, "day": at.date(), "raw": b"x", "f": 1.5})
+    assert episode.environment["at"] is at  # type: ignore[index]
 
 
 def test_an_episode_refuses_checks_it_cannot_hold_or_grade_with():

@@ -43,16 +43,9 @@ from midojo.verifiers.openshell import reads_openshell_observations
 DEFAULT_EPISODE_NAME = "episode"
 
 _RUNTIME_DEFINITION: TypeAdapter[AgentRuntimeDefinition] = TypeAdapter(AgentRuntimeDefinition)
-_IMMUTABLE_SCALARS = (
-    str,
-    bytes,
-    int,
-    float,
-    bool,
-    type(None),
-    datetime.date,
-    datetime.time,
-    datetime.timedelta,
+# Exactly these types, not their subclasses: a subclass can carry mutable state.
+_IMMUTABLE_SCALARS = frozenset(
+    {str, bytes, int, float, bool, type(None), datetime.date, datetime.datetime, datetime.time, datetime.timedelta}
 )
 
 
@@ -67,16 +60,33 @@ class UnknownTaskError(KeyError):
 def freeze(value: Any) -> Any:
     """A deep, read-only copy of JSON-like data: mappings become read-only views, lists and tuples tuples.
 
-    Raises TypeError for a value that is neither a mapping, a list, a tuple nor
-    an immutable scalar (a string, number, boolean, None, bytes, date or time).
+    Mapping keys must be exactly ``str``, and every other value a mapping, a
+    list, a tuple or exactly one of the immutable built-in scalars (``str``,
+    ``bytes``, ``int``, ``float``, ``bool``, None, ``date``, ``datetime``,
+    ``time``, ``timedelta``; a date or time only with no time zone or a
+    ``datetime.timezone``). Anything else, a subclass of these included, raises
+    TypeError: nothing is converted.
     """
     if isinstance(value, Mapping):
-        return MappingProxyType({key: freeze(item) for key, item in value.items()})
+        frozen: dict[str, Any] = {}
+        for key, item in value.items():
+            frozen[_exact_str(key, "a key in episode data")] = freeze(item)
+        return MappingProxyType(frozen)
     if isinstance(value, list | tuple):
         return tuple(freeze(item) for item in value)
-    if isinstance(value, _IMMUTABLE_SCALARS):
-        return value
-    raise TypeError(f"episode data must be JSON-like, not {type(value).__name__}")
+    if type(value) not in _IMMUTABLE_SCALARS:
+        raise TypeError(f"episode data must be JSON-like, not {type(value).__name__}")
+    tzinfo = getattr(value, "tzinfo", None)
+    if tzinfo is not None and type(tzinfo) is not datetime.timezone:
+        raise TypeError(f"a date or time in episode data needs a datetime.timezone, not {type(tzinfo).__name__}")
+    return value
+
+
+def _exact_str(value: Any, what: str) -> str:
+    """``value`` when it is exactly a ``str``; a subclass could carry mutable state, so it raises TypeError."""
+    if type(value) is not str:
+        raise TypeError(f"{what} must be a str, not {type(value).__name__}")
+    return value
 
 
 def thaw(value: Any) -> Any:
@@ -89,8 +99,9 @@ def thaw(value: Any) -> Any:
 
 
 def _runtime_data(runtime: AgentRuntimeDefinition | Mapping[str, Any]) -> Mapping[str, Any]:
-    """A runtime definition, validated, as frozen data."""
-    definition = _RUNTIME_DEFINITION.validate_python(runtime if isinstance(runtime, BaseModel) else thaw(runtime))
+    """A runtime definition, validated, as frozen data. Fields given as a mapping must be episode data already."""
+    given = runtime if isinstance(runtime, BaseModel) else thaw(freeze(runtime))
+    definition = _RUNTIME_DEFINITION.validate_python(given)
     return freeze(definition.model_dump())
 
 
@@ -116,7 +127,10 @@ class Episode:
 
     Every input is copied into frozen data at construction (see :func:`freeze`),
     so changing it afterwards changes nothing here, and nothing reachable from
-    the episode can be changed.
+    the episode can be changed. Turns, injection probes and payloads, and the
+    provenance IDs must be exactly ``str``; anything else raises TypeError.
+    ``environment_type``, like the verifier registry the checks resolve
+    against, is held by reference and treated as code, not data.
     """
 
     runtime: AgentRuntimeDefinition | Mapping[str, Any] = dataclasses.field(
@@ -138,8 +152,15 @@ class Episode:
                 raise TypeError("turns must be a sequence of messages, not a string")
             if not self.turns:
                 raise ValueError("turns must hold at least one message, or be None when the host drives them")
-            object.__setattr__(self, "turns", freeze(list(self.turns)))
-        object.__setattr__(self, "injections", freeze(dict(self.injections)))
+            turns = tuple(_exact_str(message, "a turn") for message in self.turns)
+            object.__setattr__(self, "turns", turns)
+        injections = freeze(dict(self.injections))
+        for payload in injections.values():
+            _exact_str(payload, "an injection payload")
+        object.__setattr__(self, "injections", injections)
+        for name in ("suite_name", "user_task_id", "injection_task_id"):
+            if (value := getattr(self, name)) is not None:
+                _exact_str(value, name)
         object.__setattr__(self, "runtime", _runtime_data(self.runtime))
         for name in ("security", "utility"):
             spec = getattr(self, name)
