@@ -186,7 +186,8 @@ class Episode:
             object.__setattr__(self, "environment_type", infer_environment_type(name, thaw(environment or {})))
 
     def __deepcopy__(self, _memo: dict[int, Any]) -> Episode:
-        # Nothing reachable from an episode can change, so a copy is the episode itself.
+        # No episode-owned data can change, so a copy is the episode itself. The trusted code it
+        # references (the environment type, the verifier implementations) is shared on purpose.
         return self
 
     def runtime_definition(self) -> AgentRuntimeDefinition:
