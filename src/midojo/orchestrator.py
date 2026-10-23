@@ -75,7 +75,12 @@ class TaskResult(NamedTuple):
     turns: list[Exchange]
 
 
-def _utility(value: bool) -> Text:
+_UNKNOWN = Text("❓ unknown (grade invalid)", style="bold yellow")
+
+
+def _utility(value: bool | None) -> Text:
+    if value is None:
+        return _UNKNOWN
     return Text("✅ task completed", style="bold green") if value else Text("❌ task not completed", style="bold red")
 
 
@@ -88,7 +93,9 @@ def _print_agent_text(label: str, text: str, max_len: int = 200) -> None:
     console.print(line)
 
 
-def _security(value: bool) -> Text:
+def _security(value: bool | None) -> Text:
+    if value is None:
+        return _UNKNOWN
     if value:
         return Text("💀 attack succeeded", style="bold red")
     return Text("🛡️ attack failed", style="bold green")
@@ -115,9 +122,37 @@ def _print_banner(
     console.print()
 
 
+def _aggregate(results: dict[TaskPair, bool | None]) -> dict[str, int | float | None]:
+    """Counts of graded results, and the rate of True among the valid ones.
+
+    An invalid (unknown) grade is counted but left out of the rate's
+    denominator; ``rate`` is None when no grade is valid.
+    """
+    values = list(results.values())
+    valid = [v for v in values if v is not None]
+    true = sum(1 for v in valid if v)
+    return {
+        "graded": len(values),
+        "valid": len(valid),
+        "invalid": len(values) - len(valid),
+        "true": true,
+        "false": len(valid) - true,
+        "rate": true / len(valid) if valid else None,
+    }
+
+
+def _rate_cell(results: dict[TaskPair, bool | None]) -> str:
+    aggregate = _aggregate(results)
+    rate = aggregate["rate"]
+    cell = "-" if rate is None else f"{rate * 100:.1f}%"
+    if aggregate["invalid"]:
+        cell += f" ({aggregate['invalid']} invalid)"
+    return cell
+
+
 def _print_results_table(
-    utility_results: dict[TaskPair, bool],
-    security_results: dict[TaskPair, bool],
+    utility_results: dict[TaskPair, bool | None],
+    security_results: dict[TaskPair, bool | None],
     has_injections: bool,
     results_file: Path,
 ) -> None:
@@ -130,22 +165,15 @@ def _print_results_table(
         table.add_column("Security", justify="center")
 
     for pair, util in utility_results.items():
-        sec = security_results.get(pair)
         if has_injections:
-            sec_cell = _security(sec) if sec is not None else Text("N/A", style="dim")
+            sec_cell = _security(security_results[pair]) if pair in security_results else Text("N/A", style="dim")
             table.add_row(pair.user_task_id, pair.injection_task_id, _utility(util), sec_cell)
         else:
             table.add_row(pair.user_task_id, _utility(util))
 
     table.add_section()
-    if utility_results:
-        util_avg = f"{sum(utility_results.values()) / len(utility_results) * 100:.1f}%"
-    else:
-        util_avg = "-"
-    if security_results:
-        sec_avg = f"{sum(security_results.values()) / len(security_results) * 100:.1f}%"
-    else:
-        sec_avg = "-"
+    util_avg = _rate_cell(utility_results)
+    sec_avg = _rate_cell(security_results)
 
     if has_injections:
         table.add_row("", "", Text(util_avg, style="bold"), Text(sec_avg, style="bold"))
@@ -294,9 +322,12 @@ async def _run_benchmark(
     _print_banner(suite_name, agent_uri, protocol, user_tasks_to_run, injection_tasks_to_run)
     console.print(f"  [dim]run[/dim] [cyan underline]{run_id}[/cyan underline]\n")
 
-    utility_results: dict[TaskPair, bool] = {}
-    security_results: dict[TaskPair, bool] = {}
+    utility_results: dict[TaskPair, bool | None] = {}
+    utility_reasons: dict[TaskPair, str | None] = {}
+    security_results: dict[TaskPair, bool | None] = {}
     security_reasons: dict[TaskPair, str | None] = {}
+    grade_validity: dict[TaskPair, dict] = {}
+    evidence_status: dict[TaskPair, dict[str, str]] = {}
 
     it_ids_to_run: list[str | None] = [*injection_tasks_to_run] if injection_tasks_to_run else [None]
     started: str | None = None
@@ -319,7 +350,11 @@ async def _run_benchmark(
                     runtime=runtime,
                 )
                 grade = result.grade
-                utility_results[TaskPair(ut_id, it_id or "")] = grade.utility
+                pair = TaskPair(ut_id, it_id or "")
+                utility_results[pair] = grade.utility
+                utility_reasons[pair] = grade.utility_reason
+                grade_validity[pair] = grade.grade_validity.model_dump(mode="json")
+                evidence_status[pair] = dict(grade.evidence_status)
                 eval_id = result.eval_id
                 eval_url = f"{control_url}/runs/{run_id}/evaluations/{eval_id}"
                 label = f"[bold]{ut_id}[/bold] x [bold]{it_id}[/bold]" if it_id else f"[bold]{ut_id}[/bold]"
@@ -337,8 +372,8 @@ async def _run_benchmark(
                         parts = [f"{ch} x{n}" if n > 1 else ch for ch, n in counts.items()]
                         via = ", ".join(parts)
                         detail = f"injection in {via}"
-                        if grade.security and grade.security_reason:
-                            # attack succeeded — name the criterion that graded it
+                        if grade.security is not False and grade.security_reason:
+                            # attack succeeded, or couldn't be graded — name the criterion that decided it
                             detail += f" · {grade.security_reason}"
                         console.print("    ", _security(grade.security), Text(f"  ({detail})", style="dim"))
                     else:
@@ -353,16 +388,24 @@ async def _run_benchmark(
 
     logdir.mkdir(parents=True, exist_ok=True)
     results_file = logdir / "results.json"
-    all_security = {f"{k.user_task_id},{k.injection_task_id}": security_results.get(k) for k in utility_results}
-    all_security_reason = {f"{k.user_task_id},{k.injection_task_id}": security_reasons.get(k) for k in utility_results}
+
+    def by_pair(values: dict) -> dict:
+        return {f"{k.user_task_id},{k.injection_task_id}": values.get(k) for k in utility_results}
+
     with open(results_file, "w") as f:
         json.dump(
             {
                 "run_id": run_id,
                 "suite_name": suite_name,
-                "utility": {f"{k.user_task_id},{k.injection_task_id}": v for k, v in utility_results.items()},
-                "security": all_security,
-                "security_reason": all_security_reason,
+                "utility": by_pair(utility_results),
+                "utility_reason": by_pair(utility_reasons),
+                # null where the injection didn't reach the agent (not graded), or the grade is invalid
+                "security": by_pair(security_results),
+                "security_reason": by_pair(security_reasons),
+                "grade_validity": by_pair(grade_validity),
+                "evidence_status": by_pair(evidence_status),
+                # Rates leave invalid grades out of the denominator.
+                "aggregates": {"utility": _aggregate(utility_results), "security": _aggregate(security_results)},
             },
             f,
             indent=2,

@@ -61,7 +61,7 @@ for additional examples refer to [README.md](./README.md).
 - **Probe**: a slot in the environment or a user task's prompt or turns where an injection payload gets placed. Referenced via `{injection_task_id:probe_name}` placeholders
 - **Attack technique** (`src/midojo/attacks/builtin.py`): wraps a raw payload in a delivery technique (e.g. `important_instructions`, `ignore_previous`, `verbatim`)
 - **Payload set** (`src/midojo/attacks/data/`): curated corpus of payloads from external sources (e.g. Garak). Referenced in suite YAML via `source: "garak:<name>"`
-- **Verifier** (`src/midojo/verifiers/`): checks whether an injection succeeded, for example with `output_contains`, `env_field_equals`, `env_list_any_match`, `env_field_contains`, `env_field_unchanged`, `env_list_count`, `tool_called` (counts blocked and unfinished calls), `tool_call_condition` (a `tool-call-condition-v1` condition over the tool calls), composable with `any_of`, `all_of`, `not`
+- **Verifier** (`src/midojo/verifiers/`): checks whether an injection succeeded, for example with `output_contains`, `env_field_equals`, `env_list_any_match`, `env_field_contains`, `env_field_unchanged`, `env_list_count`, `tool_called` (counts blocked and unfinished calls), `tool_call_condition` (a `tool-call-condition-v1` condition over the tool calls), composable with `any_of`, `all_of`, `not`. A check is three-valued: True, False, or None (unknown) when the evidence it needs wasn't completely collected. The combinators use Kleene logic, and a grade whose top-level check is unknown is invalid (`grade_validity`)
 
 ## Patterns for Common Changes
 
@@ -86,7 +86,7 @@ for additional examples refer to [README.md](./README.md).
 
 **Add a new verifier** — define a `Verifier` implementation in `src/midojo/verifiers/builtin.py` and register it via `register_verifier()`. The key in suite YAML maps to the verifier name.
 
-**Add a runtime observation source** — define a Pydantic model for the evidence, register it with `register_observation_type(source, model)` from `src/midojo/observations.py`, and return it from the runtime's `observe()` under that source. The control plane rejects observations for unregistered sources or data that doesn't match the model, and verifiers read the validated model from `ctx.observations[source]`.
+**Add a runtime observation source** — define a Pydantic model for the evidence, register it with `register_observation_type(source, model)` from `src/midojo/observations.py`, and return it from the runtime's `observe()` under that source. The control plane rejects observations for unregistered sources or data that doesn't match the model, and verifiers read the validated model from `ctx.observations[source]`. To report how completely each part was collected, give the model an `evidence_status` sub-model of `EvidenceStatus` fields (see `OpenShellEvidence`); grades report it as `evidence_status["<source>.<part>"]`, and a predicate should return unknown rather than False when the part it needs isn't `complete`.
 
 **Add a vendored payload set** — drop a JSON file in `src/midojo/attacks/data/`. It's auto-loaded at import time (`src/midojo/attacks/registry.py`). Use MiDojo's `PayloadSet` shape.
 

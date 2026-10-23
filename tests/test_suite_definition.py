@@ -135,7 +135,17 @@ def test_definition_preserves_verifier_extension_data(tmp_path, raw, monkeypatch
     env = suite.provision_environment(suite.get_probes_for_task("inject"))
     assert env.model_dump() == {"text": "injected"}
     grade = suite.grade("read", "inject", "done", env, env, [])
-    assert grade == {"utility": True, "security": True, "security_reason": "custom output check"}
+    assert grade == {
+        "utility": True,
+        "utility_reason": "custom output check",
+        "security": True,
+        "security_reason": "custom output check",
+        "grade_validity": {
+            "utility": {"status": "valid", "reasons": []},
+            "security": {"status": "valid", "reasons": []},
+        },
+        "evidence_status": {},
+    }
 
 
 def test_openshell_predicates_require_the_openshell_runtime(tmp_path, raw):

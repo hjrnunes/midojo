@@ -9,11 +9,28 @@ receive typed models instead of raw JSON.
 A backend registers its source when its module is imported::
 
     register_observation_type("openshell", OpenShellObservations)
+
+Evidence status:
+  A source reports how completely it collected each part of its evidence, as an
+  ``evidence_status`` field on its model (e.g. OpenShell's ``ocsf`` and
+  ``workdir``). :func:`evidence_status` flattens these into one map keyed by
+  ``<source>.<part>`` (``openshell.ocsf``). The map is open to other evidence,
+  such as ``function_calls``, that isn't a runtime observation.
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from typing import Literal
+
 from pydantic import BaseModel
+
+# How completely a part of the evidence was collected:
+#   complete       everything was collected
+#   incomplete     some was collected, but not all (e.g. the log sync timed out)
+#   failed         collection was attempted and nothing usable came back
+#   not_collected  collection never ran (e.g. no observations were recorded)
+EvidenceStatus = Literal["complete", "incomplete", "failed", "not_collected"]
 
 _OBSERVATION_TYPES: dict[str, type[BaseModel]] = {}
 
@@ -28,3 +45,13 @@ def register_observation_type(source: str, model: type[BaseModel]) -> None:
 def observation_type(source: str) -> type[BaseModel] | None:
     """The model registered for a source, or None if the source is unknown."""
     return _OBSERVATION_TYPES.get(source)
+
+
+def evidence_status(observations: Mapping[str, BaseModel]) -> dict[str, EvidenceStatus]:
+    """The evidence status each observation reports, keyed by ``<source>.<part>``."""
+    statuses: dict[str, EvidenceStatus] = {}
+    for source, observed in observations.items():
+        reported = getattr(observed, "evidence_status", None)
+        if isinstance(reported, BaseModel):
+            statuses.update({f"{source}.{part}": status for part, status in reported.model_dump().items()})
+    return statuses

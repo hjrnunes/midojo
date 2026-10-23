@@ -269,16 +269,16 @@ class TestLogSync:
             return batch if batch is not None else [agent_event, marker_from_exec()]
 
         runtime = self._runtime(read)
-        assert runtime._sync_ocsf_messages() == [agent_event]
+        assert runtime._sync_ocsf_messages() == ([agent_event], True)
         assert runtime._read_ocsf_messages.call_count == 3
 
-    def test_returns_last_read_when_marker_never_arrives(self, monkeypatch):
+    def test_returns_last_read_as_unsynced_when_marker_never_arrives(self, monkeypatch):
         clock = iter(range(0, 100, 5))
         monkeypatch.setattr(openshell_runtime.time, "time", lambda: next(clock))
         monkeypatch.setattr(openshell_runtime.time, "sleep", lambda _s: None)
         allowed = "NET:OPEN [INFO] ALLOWED /usr/bin/curl(0) -> ok.test:443"
         runtime = self._runtime(lambda: [allowed])
-        assert runtime._sync_ocsf_messages() == [allowed]
+        assert runtime._sync_ocsf_messages() == ([allowed], False)
 
 
 class TestObservedRun:
@@ -289,7 +289,7 @@ class TestObservedRun:
         client = _FakeSandboxClient()
         runtime._client = client
         runtime._workspace_name = "midojo-shell-abc123"
-        monkeypatch.setattr(runtime, "_sync_ocsf_messages", lambda: [])
+        monkeypatch.setattr(runtime, "_sync_ocsf_messages", lambda: ([], True))
         runtime.setup({}, session_token="tok", eval_id="e1", user_task_id="u1", injection_task_id=None)
         assert client.created_specs[0].template.image == "localhost/agent:latest"
         observed = runtime.observe()["openshell"]
@@ -520,6 +520,33 @@ class TestSeededFileExecs:
         assert _file_changes(runtime) == ([], [], ["/sandbox/workdir/notes.txt"])
         assert [r.levelname for r in caplog.records] == ["WARNING"]
         assert f"Seeded file check failed (exit {result.exit_code}" in caplog.text
+
+    def test_failed_check_makes_the_file_evidence_incomplete(self):
+        runtime, sandbox = _seeded_runtime({"notes.txt": "n", "/etc/a.conf": "a"})
+        observed = runtime.observe()["openshell"]
+        assert isinstance(observed, OpenShellObservations)
+        assert observed.evidence_status.workdir == "complete"
+
+        sandbox.status_result = ExecResult(exit_code=127, stdout="", stderr="sh: not found")
+        observed = runtime.observe()["openshell"]
+        assert isinstance(observed, OpenShellObservations)
+        assert observed.evidence_status.workdir == "incomplete"
+
+    def test_check_that_raises_reports_no_outside_seeds_and_incomplete_evidence(self, monkeypatch):
+        runtime, sandbox = _seeded_runtime({"notes.txt": "n", "/etc/a.conf": "a"})
+        sandbox.delete("/etc/a.conf")
+        exec_in_sandbox = sandbox.exec
+
+        def exec_raising_on_the_check(sandbox_name, command, **kwargs):
+            if command[:2] == ["sh", "-c"]:
+                raise RuntimeError("exec failed")
+            return exec_in_sandbox(sandbox_name, command, **kwargs)
+
+        monkeypatch.setattr(sandbox, "exec", exec_raising_on_the_check)
+        observed = runtime.observe()["openshell"]
+        assert isinstance(observed, OpenShellObservations)
+        assert observed.files_deleted == []
+        assert observed.evidence_status.workdir == "incomplete"
 
 
 class TestSeedStatusScript:

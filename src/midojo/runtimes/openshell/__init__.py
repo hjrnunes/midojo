@@ -29,9 +29,20 @@ Policy:
   proto-JSON dicts. ``_resolve_policy`` fills ``SandboxSpec.policy`` in-place via
   ``ParseDict`` — no direct import of ``SandboxPolicy`` needed.
 
+Evidence status:
+  ``observe()`` reports how completely it collected each part, as
+  ``evidence_status.ocsf`` and ``evidence_status.workdir`` (see
+  :data:`midojo.observations.EvidenceStatus`). A log read that raises is
+  ``failed``; a log sync whose marker never arrives is ``incomplete``. A failed
+  ``find`` is ``failed`` (both listings) or ``incomplete`` (one listing, a new
+  file whose contents couldn't be read, or a failed check of the seeded files
+  outside the workdir). Predicates that need a part that isn't
+  ``complete`` grade unknown rather than False.
+
 OCSF caching:
   ``_fetch_ocsf()`` fetches and caches the ``GetSandboxLogs`` response; subsequent
-  calls within the same evaluation return the cache. The cache is cleared at the
+  calls within the same evaluation return the cache. Only a complete fetch is
+  cached, so a failed or incomplete one is retried. The cache is cleared at the
   start of each ``setup()`` call.
 """
 
@@ -57,7 +68,7 @@ from openshell import SandboxClient, WorkspaceClient
 from openshell._proto import datamodel_pb2, openshell_pb2
 from pydantic import BaseModel, ConfigDict, Field
 
-from midojo.observations import register_observation_type
+from midojo.observations import EvidenceStatus, register_observation_type
 from midojo.probes import substitute_probes
 from midojo.runtimes.openshell.logs import OCSFEvents, parse_ocsf_lines
 
@@ -288,6 +299,19 @@ class ProcessRecord(BaseModel):
     exit_code: int | None = None  # None when no PROC:TERMINATE event was logged
 
 
+class OpenShellEvidence(BaseModel):
+    """How completely each part of the OpenShell evidence was collected.
+
+    Defaults to ``complete``, so observations recorded by a producer that doesn't
+    report status are graded as before.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    ocsf: EvidenceStatus = "complete"  # processes, network calls, findings
+    workdir: EvidenceStatus = "complete"  # files created, modified and deleted, and new files' contents
+
+
 class OpenShellObservations(BaseModel):
     """What OpenShell saw the agent do during one evaluation.
 
@@ -296,6 +320,8 @@ class OpenShellObservations(BaseModel):
     """
 
     model_config = ConfigDict(extra="forbid")
+
+    evidence_status: OpenShellEvidence = Field(default_factory=OpenShellEvidence)
 
     # File diff against the seeded files (absolute paths). Created files are
     # found in the workdir only; seeded files are checked wherever they were seeded.
@@ -321,6 +347,11 @@ class OpenShellObservations(BaseModel):
     # SandboxStatus) carries only the requested reference, SandboxTemplate.image.
     image_digest: str | None = None
     policy_digest: str | None = None  # "sha256:<hex>", or BUILTIN_POLICY_DIGEST
+
+    @classmethod
+    def not_collected(cls) -> OpenShellObservations:
+        """Stands in for observations that were never recorded."""
+        return cls(evidence_status=OpenShellEvidence(ocsf="not_collected", workdir="not_collected"))
 
 
 register_observation_type(OBSERVATIONS_SOURCE, OpenShellObservations)
@@ -586,7 +617,7 @@ class OpenShellRuntime:
         )
         return [log_line.message for log_line in logs_resp.logs if log_line.level.upper() == "OCSF"]
 
-    def _sync_ocsf_messages(self) -> list[str]:
+    def _sync_ocsf_messages(self) -> tuple[list[str], bool]:
         """Read OCSF messages after every event from the agent's session has arrived.
 
         The supervisor batches log lines and pushes them to the gateway in order
@@ -595,38 +626,102 @@ class OpenShellRuntime:
         supervisor refuses and logs, then poll until that refusal is visible:
         everything the agent caused was pushed before it. The marker's own events
         are removed from the result.
+
+        Returns the messages and whether the marker arrived. Without it, the
+        messages are the last successful read and may miss the agent's last
+        events. A read that raises before any read has succeeded propagates; a
+        later one ends the wait with the last successful read.
         """
         marker = f"sync-{uuid.uuid4().hex[:12]}{_SYNC_MARKER_SUFFIX}"
         self._exec(["sh", "-c", _SYNC_MARKER_SCRIPT.format(host=marker)], timeout_seconds=30)
 
         deadline = time.time() + _LOG_SYNC_BUDGET_SECONDS
-        messages: list[str] = []
+        messages: list[str] | None = None
         while time.time() < deadline:
-            messages = self._read_ocsf_messages()
+            try:
+                read = self._read_ocsf_messages()
+            except Exception as exc:
+                if messages is None:
+                    raise
+                logging.getLogger(__name__).warning(
+                    "OpenShell log read failed after an earlier read; network evidence is incomplete: %s", exc
+                )
+                return [message for message in messages if marker not in message], False
+            messages = read
             if any(marker in message for message in messages):
-                return [message for message in messages if marker not in message]
+                return [message for message in messages if marker not in message], True
             time.sleep(0.5)
         logging.getLogger(__name__).warning(
-            "OpenShell log sync marker did not arrive within %.0fs; network evidence may be incomplete",
+            "OpenShell log sync marker did not arrive within %.0fs; network evidence is incomplete",
             _LOG_SYNC_BUDGET_SECONDS,
         )
-        return messages
+        return messages or [], False
 
-    def _fetch_ocsf(self) -> OCSFEvents:
-        """Fetch and parse the evaluation's OCSF events, with caching."""
+    def _fetch_ocsf(self) -> tuple[OCSFEvents, EvidenceStatus]:
+        """Fetch and parse the evaluation's OCSF events, and how completely they were collected.
+
+        Only a complete fetch is cached: a failed or incomplete one is retried by
+        the next call.
+        """
         if self._cached_ocsf is not None:
-            return self._cached_ocsf
+            return self._cached_ocsf, "complete"
 
-        messages: list[str] = []
         try:
-            messages = self._sync_ocsf_messages()
+            messages, synced = self._sync_ocsf_messages()
         except Exception as exc:
             logging.getLogger(__name__).warning(
-                "OCSF log fetch failed — security predicates will degrade to False: %s", exc
+                "OCSF log fetch failed — predicates that need OCSF events will grade unknown: %s", exc
             )
+            return parse_ocsf_lines([]), "failed"
 
-        self._cached_ocsf = parse_ocsf_lines(messages)
-        return self._cached_ocsf
+        events = parse_ocsf_lines(messages)
+        if not synced:
+            return events, "incomplete"
+        self._cached_ocsf = events
+        return events, "complete"
+
+    def _list_workdir(self, *args: str) -> list[str] | None:
+        """The files ``find`` lists under the workdir, or None if it failed."""
+        try:
+            result = self._exec(["find", _WORKDIR, "-type", "f", *args])
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Workdir listing failed: %s", exc)
+            return None
+        if result.exit_code != 0:
+            logging.getLogger(__name__).warning(
+                "Workdir listing exited with code %d: %s", result.exit_code, result.stderr
+            )
+            return None
+        return [ln.strip() for ln in result.stdout.splitlines() if ln.strip()]
+
+    def _check_outside_seeds(self, outside_seeded: list[str], modified: list[str], deleted: list[str]) -> bool:
+        """Add the seeded files outside the workdir that changed; False if the check failed."""
+        try:
+            status = self._exec(["sh", "-c", _SEED_STATUS_SCRIPT, "sh", _BASELINE, *outside_seeded])
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "Seeded file check failed, reporting no changes to seeded files outside the workdir: %s", exc
+            )
+            return False
+        states = status.stdout.splitlines()
+        # Trust the batch whole or not at all: a partial or garbled result
+        # must not report a seeded file as deleted.
+        if status.exit_code == 0 and len(states) == len(outside_seeded) and set(states) <= _SEED_STATUSES:
+            for fpath, state in zip(outside_seeded, states, strict=True):
+                if state == "modified":
+                    modified.append(fpath)
+                elif state == "deleted":
+                    deleted.append(fpath)
+            return True
+        logging.getLogger(__name__).warning(
+            "Seeded file check failed (exit %d, %d statuses for %d files), "
+            "reporting no changes to seeded files outside the workdir: %s",
+            status.exit_code,
+            len(states),
+            len(outside_seeded),
+            status.stderr.strip(),
+        )
+        return False
 
     def observe(self) -> dict[str, BaseModel]:
         """Collect the file diff and OCSF events as ``observations["openshell"]``.
@@ -635,58 +730,55 @@ class OpenShellRuntime:
         files. Seeded files outside the workdir (absolute ``files`` paths) are
         checked by one extra exec, made only when there are any. An absolute path
         inside the workdir counts as a workdir file.
+
+        A check that fails contributes nothing: in particular, seeded files are
+        reported deleted only when the check that covers them succeeded.
         """
         seeded = list(dict.fromkeys(_seed_path(p) for p in self._files))
         workdir_seeded = [p for p in seeded if _in_workdir(p)]
         outside_seeded = [p for p in seeded if not _in_workdir(p)]
 
-        diff_result = self._exec(["find", _WORKDIR, "-type", "f", "-newer", _BASELINE])
-        all_result = self._exec(["find", _WORKDIR, "-type", "f"])
-
-        current = {ln.strip() for ln in all_result.stdout.splitlines() if ln.strip()}
+        changed = self._list_workdir("-newer", _BASELINE)
+        current = self._list_workdir()
 
         files_created: list[str] = []
         files_modified: list[str] = []
         new_file_contents: dict[str, str] = {}
+        unread_contents = False
 
-        for line in diff_result.stdout.splitlines():
-            fpath = line.strip()
-            if not fpath:
-                continue
+        for fpath in changed or []:
             if fpath in workdir_seeded:
                 files_modified.append(fpath)
             else:
                 files_created.append(fpath)
-                cat = self._exec(["cat", fpath])
-                if cat.exit_code == 0:
+                try:
+                    cat = self._exec(["cat", fpath])
+                except Exception as exc:
+                    logging.getLogger(__name__).warning("Reading %s failed: %s", fpath, exc)
+                    cat = None
+                if cat is not None and cat.exit_code == 0:
                     new_file_contents[fpath] = cat.stdout
+                else:
+                    unread_contents = True
 
-        files_deleted = [p for p in workdir_seeded if p not in current]
+        files_deleted = [p for p in workdir_seeded if p not in current] if current is not None else []
 
+        seeds_checked = True
         if outside_seeded:
-            status = self._exec(["sh", "-c", _SEED_STATUS_SCRIPT, "sh", _BASELINE, *outside_seeded])
-            states = status.stdout.splitlines()
-            # Trust the batch whole or not at all: a partial or garbled result
-            # must not report a seeded file as deleted.
-            if status.exit_code == 0 and len(states) == len(outside_seeded) and set(states) <= _SEED_STATUSES:
-                for fpath, state in zip(outside_seeded, states, strict=True):
-                    if state == "modified":
-                        files_modified.append(fpath)
-                    elif state == "deleted":
-                        files_deleted.append(fpath)
-            else:
-                logging.getLogger(__name__).warning(
-                    "Seeded file check failed (exit %d, %d statuses for %d files), "
-                    "reporting no changes to seeded files outside the workdir: %s",
-                    status.exit_code,
-                    len(states),
-                    len(outside_seeded),
-                    status.stderr.strip(),
-                )
+            seeds_checked = self._check_outside_seeds(outside_seeded, files_modified, files_deleted)
 
-        ocsf = self._fetch_ocsf()
+        workdir: EvidenceStatus
+        if changed is None and current is None and not (outside_seeded and seeds_checked):
+            workdir = "failed"
+        elif changed is None or current is None or unread_contents or not seeds_checked:
+            workdir = "incomplete"
+        else:
+            workdir = "complete"
+
+        ocsf, ocsf_status = self._fetch_ocsf()
 
         observed = OpenShellObservations(
+            evidence_status=OpenShellEvidence(ocsf=ocsf_status, workdir=workdir),
             files_created=files_created,
             files_modified=files_modified,
             files_deleted=files_deleted,

@@ -10,9 +10,13 @@ agent after each evaluation (``observations["openshell"]``, an
   exit codes, network connections, security findings) surfaced by the OpenShell
   policy proxy.
 
-All predicates are ``False`` when no OpenShell observations were recorded. A
-suite that uses them must declare the ``openshell`` agent runtime, which is
-checked when the suite loads. They are registered with the built-in
+Each predicate claims that something happened, and reads one part of the
+evidence (``ocsf`` or ``workdir``). Evidence of the event decides the predicate
+True even if that part was only partly collected. Its absence decides False only
+when that part is ``complete``; otherwise the predicate is unknown (None), and
+so is a grade that depends on it. Observations that were never recorded count
+as ``not_collected``. A suite that uses these predicates must declare the
+``openshell`` agent runtime, which is checked when the suite loads. They are registered with the built-in
 default verifier in :mod:`midojo.verifiers.builtin`, so they are usable directly
 in suite YAML without a verifier prefix::
 
@@ -31,6 +35,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from midojo.observations import EvidenceStatus
 from midojo.runtimes.openshell import OBSERVATIONS_SOURCE, OpenShellObservations
 from midojo.verifiers import VerificationContext, VerificationResult
 from midojo.verifiers.combinators import AllOf, AnyOf, Not
@@ -39,12 +44,27 @@ from midojo.verifiers.combinators import AllOf, AnyOf, Not
 def _observed(ctx: VerificationContext) -> OpenShellObservations:
     observed = ctx.observations.get(OBSERVATIONS_SOURCE)
     if observed is None:
-        return OpenShellObservations()
+        return OpenShellObservations.not_collected()
     if not isinstance(observed, OpenShellObservations):
         raise TypeError(
             f"{OBSERVATIONS_SOURCE} observations must be OpenShellObservations, got {type(observed).__name__}"
         )
     return observed
+
+
+def _result(found: bool, status: EvidenceStatus, part: str, criterion: str) -> VerificationResult:
+    """True on evidence of the event; False on its absence only if ``part`` was completely collected."""
+    if found or status == "complete":
+        return VerificationResult(found, criterion)
+    return VerificationResult.unknown(criterion, f"{OBSERVATIONS_SOURCE}.{part} evidence is {status}")
+
+
+def _ocsf(ctx: VerificationContext, found: bool, criterion: str) -> VerificationResult:
+    return _result(found, _observed(ctx).evidence_status.ocsf, "ocsf", criterion)
+
+
+def _workdir(ctx: VerificationContext, found: bool, criterion: str) -> VerificationResult:
+    return _result(found, _observed(ctx).evidence_status.workdir, "workdir", criterion)
 
 
 @dataclass
@@ -68,9 +88,9 @@ class CommandsMatchPattern:
         reason = f"a command matches /{self.pattern}/"
         if self.exit_code is not None:
             reason += f" and exited with code {self.exit_code}"
-        return VerificationResult(passed, reason)
+        return _ocsf(ctx, passed, reason)
 
-    def evaluate(self, ctx: VerificationContext) -> bool:
+    def evaluate(self, ctx: VerificationContext) -> bool | None:
         return self.assess(ctx).passed
 
 
@@ -83,9 +103,9 @@ class WorkdirFileExists:
     def assess(self, ctx: VerificationContext) -> VerificationResult:
         created = _observed(ctx).files_created
         passed = any(self.path in f for f in created)
-        return VerificationResult(passed, f'workdir file matching "{self.path}" was created')
+        return _workdir(ctx, passed, f'workdir file matching "{self.path}" was created')
 
-    def evaluate(self, ctx: VerificationContext) -> bool:
+    def evaluate(self, ctx: VerificationContext) -> bool | None:
         return self.assess(ctx).passed
 
 
@@ -98,9 +118,9 @@ class WorkdirFileDeleted:
     def assess(self, ctx: VerificationContext) -> VerificationResult:
         deleted = _observed(ctx).files_deleted
         passed = any(self.path in f for f in deleted)
-        return VerificationResult(passed, f'seeded file matching "{self.path}" was deleted')
+        return _workdir(ctx, passed, f'seeded file matching "{self.path}" was deleted')
 
-    def evaluate(self, ctx: VerificationContext) -> bool:
+    def evaluate(self, ctx: VerificationContext) -> bool | None:
         return self.assess(ctx).passed
 
 
@@ -117,9 +137,9 @@ class WorkdirFileContains:
             self.path in file_path and self.contains.lower() in content.lower()
             for file_path, content in contents.items()
         )
-        return VerificationResult(passed, f'a created file matching "{self.path}" contains "{self.contains}"')
+        return _workdir(ctx, passed, f'a created file matching "{self.path}" contains "{self.contains}"')
 
-    def evaluate(self, ctx: VerificationContext) -> bool:
+    def evaluate(self, ctx: VerificationContext) -> bool | None:
         return self.assess(ctx).passed
 
 
@@ -139,9 +159,9 @@ class ProcessRan:
         observed = _observed(ctx)
         binaries = [p.binary for p in observed.processes] + observed.network_callers
         passed = any(self.binary.lower() in b.lower() for b in binaries)
-        return VerificationResult(passed, f'process "{self.binary}" ran')
+        return _ocsf(ctx, passed, f'process "{self.binary}" ran')
 
-    def evaluate(self, ctx: VerificationContext) -> bool:
+    def evaluate(self, ctx: VerificationContext) -> bool | None:
         return self.assess(ctx).passed
 
 
@@ -154,9 +174,9 @@ class NetworkCallTo:
     def assess(self, ctx: VerificationContext) -> VerificationResult:
         calls = _observed(ctx).network_calls_allowed
         passed = any(self.host.lower() in c.lower() for c in calls)
-        return VerificationResult(passed, f'allowed network call to "{self.host}"')
+        return _ocsf(ctx, passed, f'allowed network call to "{self.host}"')
 
-    def evaluate(self, ctx: VerificationContext) -> bool:
+    def evaluate(self, ctx: VerificationContext) -> bool | None:
         return self.assess(ctx).passed
 
 
@@ -169,9 +189,9 @@ class NetworkCallBlockedTo:
     def assess(self, ctx: VerificationContext) -> VerificationResult:
         calls = _observed(ctx).network_calls_blocked
         passed = any(self.host.lower() in c.lower() for c in calls)
-        return VerificationResult(passed, f'blocked network call to "{self.host}"')
+        return _ocsf(ctx, passed, f'blocked network call to "{self.host}"')
 
-    def evaluate(self, ctx: VerificationContext) -> bool:
+    def evaluate(self, ctx: VerificationContext) -> bool | None:
         return self.assess(ctx).passed
 
 
@@ -184,9 +204,9 @@ class SecurityFindingRaised:
     def assess(self, ctx: VerificationContext) -> VerificationResult:
         findings = _observed(ctx).security_findings
         passed = any(self.finding.lower() in f.lower() for f in findings)
-        return VerificationResult(passed, f'security finding "{self.finding}" raised')
+        return _ocsf(ctx, passed, f'security finding "{self.finding}" raised')
 
-    def evaluate(self, ctx: VerificationContext) -> bool:
+    def evaluate(self, ctx: VerificationContext) -> bool | None:
         return self.assess(ctx).passed
 
 
