@@ -406,6 +406,32 @@ def test_an_agent_write_after_the_seal_is_a_late_fact_refused_as_a_closed_sessio
     assert late.evaluation.late_facts[0].by == "agent"
 
 
+@pytest.mark.parametrize(
+    "event",
+    [
+        _start("done", x=2),
+        _finish("done", x=2),
+        _finish("done", result="other"),
+        _start("open", x=2),
+        _finish("open", x=2),
+    ],
+    ids=["start-args", "finish-args", "finish-result", "unfinished-start-args", "unfinished-finish-args"],
+)
+@pytest.mark.parametrize(
+    ("authority", "kind", "by"), [(HOST, Rejection.SEALED, "host"), (AGENT, Rejection.SESSION_CLOSED, "agent")]
+)
+def test_a_conflicting_write_after_the_seal_is_a_late_fact(event, authority, kind, by):
+    """After the seal, only an exact replay is a replay; anything else under a known call_id is a late fact."""
+    sealed = _sealed(_apply(_evaluation(), _start("done", x=1), _finish("done", x=1), _start("open", x=1)))
+    late = transition(sealed, authority, event)
+    assert isinstance(late, Late)
+    assert late.rejected.kind is kind
+    [fact] = late.evaluation.late_facts
+    assert (fact.by, fact.evidence, fact.call_id) == (by, ("function_calls",), event.req.call_id)
+    assert late.evaluation.function_calls == sealed.function_calls
+    assert late.evaluation.evidence_status == {"function_calls": "incomplete"}
+
+
 def test_a_late_fact_is_recorded_once_per_distinct_write():
     sealed = _sealed(_evaluation())
     once = transition(sealed, AGENT, _finish("late"))

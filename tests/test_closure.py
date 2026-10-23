@@ -198,15 +198,35 @@ def test_idempotent_retries_after_the_seal_return_the_stored_records(client):
     ]:
         assert (send().status_code, send().json()) == (200, finished)
     assert started["timestamp"] == finished["timestamp"]
-    conflict = client.post(f"{url}/function-calls", json={**FINISH, "result": "other"})
-    assert conflict.json() == {
-        "detail": "call_id 'c1' is already recorded with another body",
-        "kind": "call_conflict",
-        "late_fact": False,
-    }
     assert client.post(f"{url}/complete", json={"agent_output": "done"}).status_code == 200
     evaluation = client.get(url).json()
     assert (len(evaluation["function_calls"]), evaluation["late_facts"]) == (1, [])
+
+
+def test_a_conflicting_write_after_the_seal_is_a_late_fact(client):
+    """Only an exact replay is answered from the record after the seal; any other body is a late fact."""
+    url, session = _evaluation(client)
+    client.post("/agent/function-calls", headers=session, json=FINISH)
+    client.post(f"{url}/complete", json={"agent_output": "done"})
+
+    conflict = client.post(f"{url}/function-calls", json={**FINISH, "result": "other"})
+    assert (conflict.status_code, conflict.json()) == (
+        409,
+        {"detail": "Evaluation already completed", "kind": "sealed", "late_fact": True},
+    )
+    conflict = client.post("/agent/function-calls/start", headers=session, json={**START, "args": {"city": "Paris"}})
+    assert (conflict.status_code, conflict.json()["kind"], conflict.json()["late_fact"]) == (
+        401,
+        "session_closed",
+        True,
+    )
+    evaluation = client.get(url).json()
+    assert [call["result"] for call in evaluation["function_calls"]] == ["72°F, sunny"]
+    assert [(fact["event"], fact["by"]) for fact in evaluation["late_facts"]] == [
+        ("finish_call", "host"),
+        ("start_call", "agent"),
+    ]
+    assert evaluation["evidence_status"]["function_calls"] == "incomplete"
 
 
 def test_a_late_fact_retried_is_recorded_once(client):

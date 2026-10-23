@@ -22,7 +22,7 @@ The rules kept here:
   environment;
 * call-ID idempotency and conflicts: one record per ``call_id``; a replay with
   the same body returns the stored record, at any stage, and another body is a
-  conflict;
+  conflict until the seal, and a late fact after it;
 * unfinished calls: a start appends an unfinished record that the finish
   completes in place, keeping its start order and its start's turn;
 * turns: a call carries the index of the latest started turn, a turn starts
@@ -439,11 +439,12 @@ def _start_call(evaluation: Evaluation, authority: Authority, event: StartCall) 
     # A start replays any record with its call_id, finished or not, when the function and args match.
     if (index := _find_call(evaluation, req.call_id)) is not None:
         existing = evaluation.function_calls[index]
-        if canonical_body(existing, _START_FIELDS) != canonical_body(req, _START_FIELDS):
+        if canonical_body(existing, _START_FIELDS) == canonical_body(req, _START_FIELDS):
+            return Accepted(evaluation, (existing, False))
+        if evaluation.stage is not Stage.SEALED:
             return Rejected(
                 Rejection.CALL_CONFLICT, f"call_id {req.call_id!r} is already recorded with another function or args"
             )
-        return Accepted(evaluation, (existing, False))
     if evaluation.stage is not Stage.OPEN:
         return _late(
             evaluation, authority, "start_call", event.at, _CALL_EVIDENCE, req.model_dump(mode="json"), req.call_id
@@ -465,16 +466,18 @@ def _finish_call(evaluation: Evaluation, authority: Authority, event: FinishCall
     index = _find_call(evaluation, req.call_id) if req.call_id is not None else None
     if index is not None:
         existing = evaluation.function_calls[index]
-        if existing.complete:
-            if canonical_body(existing) != canonical_body(req):
+        if existing.complete and canonical_body(existing) == canonical_body(req):
+            return Accepted(evaluation, (existing, False))
+        # After the seal, a conflict is a late fact like any other write that isn't an exact replay.
+        if evaluation.stage is not Stage.SEALED:
+            if existing.complete:
                 return Rejected(
                     Rejection.CALL_CONFLICT, f"call_id {req.call_id!r} is already recorded with another body"
                 )
-            return Accepted(evaluation, (existing, False))
-        if canonical_body(existing, _START_FIELDS) != canonical_body(req, _START_FIELDS):
-            return Rejected(
-                Rejection.CALL_CONFLICT, f"call_id {req.call_id!r} was started with another function or args"
-            )
+            if canonical_body(existing, _START_FIELDS) != canonical_body(req, _START_FIELDS):
+                return Rejected(
+                    Rejection.CALL_CONFLICT, f"call_id {req.call_id!r} was started with another function or args"
+                )
     # An admitted call may finish until the closure wait ends; a new call only while the evaluation is open.
     admitted = (Stage.OPEN, Stage.CLOSING) if index is not None else (Stage.OPEN,)
     if evaluation.stage not in admitted:

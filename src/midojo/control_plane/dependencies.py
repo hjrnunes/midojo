@@ -138,8 +138,9 @@ def validate_observations(source: str, data: dict) -> BaseModel:
 _CLOSED_RESPONSES: dict[int | str, dict] = {
     status.HTTP_401_UNAUTHORIZED: {
         "description": (
-            "/agent routes: the session is invalid, expired or closed. After the evaluation is sealed, a new "
-            "call or finish sent with its session is still recorded as a late fact (`late_fact` true)."
+            "/agent routes: the session is invalid, expired or closed. After the evaluation is sealed, a call "
+            "sent with its session that isn't an exact replay (a new call, a finish, or another body under a "
+            "recorded call_id) is still recorded as a late fact (`late_fact` true)."
         )
     },
 }
@@ -156,10 +157,11 @@ RECORD_FUNCTION_CALL_RESPONSES: dict[int | str, dict] = {
     **_CLOSED_RESPONSES,
     status.HTTP_409_CONFLICT: {
         "description": (
-            "`kind` call_conflict: the call_id is already finished with a different body, or was started with "
-            "another function or args; nothing is appended or changed. `kind` closing or sealed: the evaluation "
-            "no longer admits this call (a new call once closure has begun, a finish once the closure wait is "
-            "over); it is recorded as a late fact, and the evaluation's records don't change."
+            "`kind` call_conflict: before the seal, the call_id is already finished with a different body, or was "
+            "started with another function or args; nothing is appended or changed. `kind` closing or sealed: "
+            "the evaluation no longer admits this call (a new call once closure has begun, a finish once the "
+            "closure wait is over, any body but an exact replay after the seal); it is recorded as a late fact, "
+            "and the evaluation's records don't change."
         )
     },
 }
@@ -175,9 +177,10 @@ START_FUNCTION_CALL_RESPONSES: dict[int | str, dict] = {
     **_CLOSED_RESPONSES,
     status.HTTP_409_CONFLICT: {
         "description": (
-            "`kind` call_conflict: the call_id is already recorded with another function or args; nothing is "
-            "appended. `kind` closing or sealed: closure has begun and no new call is admitted; the start is "
-            "recorded as a late fact."
+            "`kind` call_conflict: before the seal, the call_id is already recorded with another function or "
+            "args; nothing is appended. `kind` closing or sealed: closure has begun and no new call is admitted, "
+            "or the evaluation is sealed and the start isn't an exact replay; the start is recorded as a late "
+            "fact."
         )
     },
 }
