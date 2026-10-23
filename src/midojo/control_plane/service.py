@@ -216,10 +216,14 @@ class ControlPlane:
 
         Needs no registered suite or run: without ``run_id``, the evaluation is
         outside any run, and addressed as ``ById(None, eval_id)`` (or by its
-        session). With one, the run must exist. The episode's suite and task IDs
-        are kept as provenance; grading uses its checks.
+        session). With one, the run must exist, and the episode must name its
+        ``user_task_id`` (the run's routes report every evaluation by it), or
+        this raises ValueError. The episode's suite and task IDs are kept as
+        provenance; grading uses its checks.
         """
         run = self.run(run_id) if run_id is not None else None
+        if run is not None and episode.user_task_id is None:
+            raise ValueError("An episode opened in a run needs a user_task_id")
         environment = episode.provision_environment()
         turns = episode.turns
         evaluation = Evaluation(

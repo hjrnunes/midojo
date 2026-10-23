@@ -13,7 +13,7 @@ from pydantic import BaseModel, ValidationError
 from midojo.attacks import resolve_source, wrap_payload
 from midojo.control_plane.config import CONTROL_TOKEN_ENV
 from midojo.env_inference import infer_environment_type
-from midojo.episode import Episode, UnknownTaskError
+from midojo.episode import Episode, UnknownTaskError, freeze
 from midojo.probes import substitute_probes, substitute_probes_deep
 from midojo.runtimes import AgentRuntime, build_runtime
 from midojo.suite_definition import OpenShellRuntimeDefinition, ProbeDefinition, SuiteDefinition
@@ -82,6 +82,8 @@ class UserTask:
     # The user's messages, one per turn; a prompt task has one.
     turns: list[str]
     check: Check
+    # The utility check as authored, frozen: what an episode of the task is graded with.
+    spec: Mapping[str, Any] | None = None
 
     @property
     def prompt(self) -> str:
@@ -94,6 +96,8 @@ class InjectionTask:
     description: str
     probes: dict[str, str] = field(default_factory=dict)
     check: Check | None = None
+    # The security check as authored, frozen: what an episode of the task is graded with.
+    spec: Mapping[str, Any] | None = None
 
 
 class YAMLTaskSuite:
@@ -150,8 +154,8 @@ class YAMLTaskSuite:
             runtime=self.definition.agent_runtime,
             turns=self.inject_user_task_turns(user_task_id, active),
             injections=active,
-            security=injection_task.check if injection_task is not None else None,
-            utility=self.user_tasks[user_task_id].check,
+            security=injection_task.spec if injection_task is not None else None,
+            utility=self.user_tasks[user_task_id].spec,
             environment=cast(dict[str, Any], substitute_probes_deep(self.definition.environment, active)),
             environment_type=self.environment_type,
             suite_name=self.name,
@@ -199,7 +203,7 @@ class YAMLTaskSuite:
     def _register_tasks(self) -> None:
         for task in self.definition.user_tasks:
             check = self._parse_check(task.id, task.utility)
-            self.user_tasks[task.id] = UserTask(id=task.id, turns=task.messages, check=check)
+            self.user_tasks[task.id] = UserTask(id=task.id, turns=task.messages, check=check, spec=freeze(task.utility))
 
         for task in self.definition.injection_tasks:
             check = self._parse_check(task.id, task.security)
@@ -209,6 +213,7 @@ class YAMLTaskSuite:
                 description=task.description,
                 check=check,
                 probes=probes,
+                spec=freeze(task.security),
             )
 
     def _parse_check(self, task_id: str, raw: dict[str, Any]) -> Check:

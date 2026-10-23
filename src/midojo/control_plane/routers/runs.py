@@ -46,6 +46,12 @@ from ..state import Evaluation, Run
 router = APIRouter(prefix="/runs")
 
 
+def _user_task_id(evaluation: Evaluation) -> str:
+    # ControlPlane.open_evaluation puts an episode in a run only with its user task ID.
+    assert evaluation.user_task_id is not None
+    return evaluation.user_task_id
+
+
 @router.post("", response_model=CreateRunResponse, status_code=status.HTTP_201_CREATED)
 async def create_run(
     req: CreateRunRequest,
@@ -66,7 +72,7 @@ async def retrieve_run(run: Annotated[Run, Depends(get_run)], control: Annotated
         evaluations=[
             EvaluationSummary(
                 id=e.id,
-                user_task_id=e.user_task_id,
+                user_task_id=_user_task_id(e),
                 injection_task_id=e.injection_task_id,
                 completed=e.completed,
                 stage=e.stage.value,
@@ -98,7 +104,7 @@ async def retrieve_evaluation(evaluation: Annotated[Evaluation, Depends(get_eval
     grade = evaluation.grade
     return EvaluationResponse(
         id=evaluation.id,
-        user_task_id=evaluation.user_task_id,
+        user_task_id=_user_task_id(evaluation),
         injection_task_id=evaluation.injection_task_id,
         completed=evaluation.completed,
         stage=evaluation.stage.value,

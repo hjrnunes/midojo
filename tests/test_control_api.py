@@ -8,8 +8,9 @@ from midojo.control_plane.config import AppConfig
 from midojo.control_plane.main import create_app
 from midojo.control_plane.models import EvaluationResponse
 from midojo.control_plane.state import Evaluation
+from midojo.episode import freeze
 from midojo.runtimes.openshell import OpenShellObservations
-from midojo.verifiers import ConversationTurn, VerificationResult
+from midojo.verifiers import ConversationTurn, VerificationResult, register_verifier
 
 
 def _evaluation(client: TestClient, run_id: str, eval_id: str) -> Evaluation:
@@ -838,23 +839,39 @@ def test_create_evaluation_substitutes_probes_in_every_turn(client, suite, monke
     assert client.get(f"/runs/{run_id}/evaluations/{data['id']}").json()["agent_input"] == data["turns"][0]
 
 
-class _RecordingCheck:
-    """Stands in for a user task's check and keeps the context it was graded with."""
+class _RecordingVerifier:
+    """A verifier that keeps the contexts it grades with; a check selects it with ``{"record_context": {}}``."""
 
-    def __init__(self):
-        self.contexts = []
+    name = "record_context"
 
-    def assess(self, ctx):
+    def __init__(self) -> None:
+        self.contexts: list = []
+
+    def parse(self, check_spec: dict) -> dict:
+        return check_spec
+
+    def assess(self, check: dict, ctx):
         self.contexts.append(ctx)
         return VerificationResult(True, "recorded")
 
-    def evaluate(self, ctx):
-        return self.assess(ctx).passed
+    def evaluate(self, check: dict, ctx):
+        return self.assess(check, ctx).passed
 
 
-def test_grade_gives_verifiers_the_conversation(client, suite, monkeypatch):
-    check = _RecordingCheck()
-    monkeypatch.setattr(suite.user_tasks["weather_new_york"], "check", check)
+# Registered once for the module — register_verifier rejects duplicates.
+_RECORDER = _RecordingVerifier()
+register_verifier(_RECORDER)
+
+
+@pytest.fixture
+def recorded(suite, monkeypatch) -> list:
+    """The contexts the weather_new_york utility check is graded with, from now on."""
+    monkeypatch.setattr(suite.user_tasks["weather_new_york"], "spec", freeze({"record_context": {}}))
+    monkeypatch.setattr(_RECORDER, "contexts", [])
+    return _RECORDER.contexts
+
+
+def test_grade_gives_verifiers_the_conversation(client, recorded):
     run_id = _create_run(client)
     eval_id = _create_evaluation(client, run_id)["id"]
     turns_url = f"/runs/{run_id}/evaluations/{eval_id}/turns"
@@ -864,20 +881,18 @@ def test_grade_gives_verifiers_the_conversation(client, suite, monkeypatch):
     client.post(f"/runs/{run_id}/evaluations/{eval_id}/complete", json={"agent_output": "two"})
 
     assert client.post(f"/runs/{run_id}/evaluations/{eval_id}/grade").status_code == 200
-    (ctx,) = check.contexts
+    (ctx,) = recorded
     assert ctx.turns == [ConversationTurn("first", "one"), ConversationTurn("second", "two")]
     assert ctx.agent_output == "two"
 
 
-def test_grade_without_turns_gives_an_empty_conversation(client, suite, monkeypatch):
-    check = _RecordingCheck()
-    monkeypatch.setattr(suite.user_tasks["weather_new_york"], "check", check)
+def test_grade_without_turns_gives_an_empty_conversation(client, recorded):
     run_id = _create_run(client)
     eval_id = _create_evaluation(client, run_id)["id"]
     client.post(f"/runs/{run_id}/evaluations/{eval_id}/complete", json={"agent_output": "done"})
 
     assert client.post(f"/runs/{run_id}/evaluations/{eval_id}/grade").status_code == 200
-    assert check.contexts[0].turns == []
+    assert recorded[0].turns == []
 
 
 def test_a_started_call_keeps_the_turn_it_started_in(client):

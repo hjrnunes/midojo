@@ -5,6 +5,12 @@ the checks that grade it, the initial state of the simulated tools, and the
 runtime it needs, as a definition (never a live runtime object). An evaluation
 is the record of one run of an episode.
 
+An episode holds only frozen data: read-only mappings, tuples and immutable
+scalars. Everything live is built fresh from that data each time it's needed:
+the checks when grading, the environment when an evaluation is provisioned,
+and the runtime definition and the runtime itself. So nothing a caller gets
+from an episode, or from a copy of one, can change what it describes.
+
 A suite compiles one of its user task x injection task pairs into an episode
 (:meth:`midojo.yaml_task_suite.YAMLTaskSuite.episode`); a direct caller builds
 one from these parts and runs it through the control plane
@@ -14,26 +20,40 @@ suite or run registered.
 
 from __future__ import annotations
 
-import copy
 import dataclasses
+import datetime
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any
+from typing import Any, cast
 
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter
 
 from midojo.env_inference import infer_environment_type
 from midojo.observations import evidence_status
 from midojo.runtimes import AgentRuntime, build_runtime
 from midojo.runtimes.openshell import OBSERVATIONS_SOURCE, OpenShellObservations
-from midojo.suite_definition import AgentRuntimeDefinition, OpenShellRuntimeDefinition, UnmanagedRuntimeDefinition
+from midojo.suite_definition import AgentRuntimeDefinition
 from midojo.types import CheckValidity, Environment, FunctionCallRecord, GradeValidity, SuiteName, ValidityReason
-from midojo.verifier import Check, VerificationContext, VerificationResult
+from midojo.verifier import Check, VerificationContext, VerificationResult, parse_check
 from midojo.verifiers import ConversationTurn
+from midojo.verifiers.openshell import reads_openshell_observations
 
 # The name a runtime is built under when the episode has no suite.
 DEFAULT_EPISODE_NAME = "episode"
+
+_RUNTIME_DEFINITION: TypeAdapter[AgentRuntimeDefinition] = TypeAdapter(AgentRuntimeDefinition)
+_IMMUTABLE_SCALARS = (
+    str,
+    bytes,
+    int,
+    float,
+    bool,
+    type(None),
+    datetime.date,
+    datetime.time,
+    datetime.timedelta,
+)
 
 
 class UnknownTaskError(KeyError):
@@ -44,22 +64,34 @@ class UnknownTaskError(KeyError):
         self.detail = detail
 
 
-def _freeze(value: Any) -> Any:
-    """A deep, read-only copy of JSON-like data: mappings become read-only views, lists tuples."""
+def freeze(value: Any) -> Any:
+    """A deep, read-only copy of JSON-like data: mappings become read-only views, lists and tuples tuples.
+
+    Raises TypeError for a value that is neither a mapping, a list, a tuple nor
+    an immutable scalar (a string, number, boolean, None, bytes, date or time).
+    """
     if isinstance(value, Mapping):
-        return MappingProxyType({key: _freeze(item) for key, item in value.items()})
+        return MappingProxyType({key: freeze(item) for key, item in value.items()})
     if isinstance(value, list | tuple):
-        return tuple(_freeze(item) for item in value)
-    return copy.deepcopy(value)
+        return tuple(freeze(item) for item in value)
+    if isinstance(value, _IMMUTABLE_SCALARS):
+        return value
+    raise TypeError(f"episode data must be JSON-like, not {type(value).__name__}")
 
 
-def _thaw(value: Any) -> Any:
-    """Plain, mutable data from :func:`_freeze`'s output."""
+def thaw(value: Any) -> Any:
+    """Plain, mutable data (dicts and lists) from :func:`freeze`'s output: a new copy each call."""
     if isinstance(value, Mapping):
-        return {key: _thaw(item) for key, item in value.items()}
+        return {key: thaw(item) for key, item in value.items()}
     if isinstance(value, tuple):
-        return [_thaw(item) for item in value]
-    return copy.deepcopy(value)
+        return [thaw(item) for item in value]
+    return value
+
+
+def _runtime_data(runtime: AgentRuntimeDefinition | Mapping[str, Any]) -> Mapping[str, Any]:
+    """A runtime definition, validated, as frozen data."""
+    definition = _RUNTIME_DEFINITION.validate_python(runtime if isinstance(runtime, BaseModel) else thaw(runtime))
+    return freeze(definition.model_dump())
 
 
 @dataclass(frozen=True)
@@ -69,26 +101,31 @@ class Episode:
     ``turns`` are the user's messages, sent one at a time in one evaluation, or
     None when the host drives the conversation. ``injections`` maps each active
     probe (``"<task>:<probe>"``) to its payload. ``security`` and ``utility``
-    grade it; either may be absent. ``environment`` is the initial state of the
-    simulated tools, as data, validated with ``environment_type`` (inferred from
-    the state when not given) each time an evaluation is provisioned.
-    ``runtime`` is the runtime the episode needs, as its definition:
-    :meth:`new_runtime` builds a fresh one.
+    are the checks as authored (a suite's ``security:``/``utility:`` blocks,
+    e.g. ``{"output_contains": "pwned"}``); either may be absent. Each grading
+    parses a fresh :class:`~midojo.verifier.Check` from them. ``environment``
+    is the initial state of the simulated tools, validated with
+    ``environment_type`` (inferred from the state when not given) each time an
+    evaluation is provisioned. ``runtime`` is the runtime the episode needs: an
+    ``agent_runtime`` definition, given as the model or as its fields, kept as
+    its fields; :meth:`runtime_definition` and :meth:`new_runtime` build fresh
+    objects from it.
 
     ``suite_name``, ``user_task_id`` and ``injection_task_id`` are provenance:
     set when a suite compiled the episode, and None otherwise.
 
-    Every input is copied at construction, so changing it afterwards changes
-    nothing here; mappings are read-only views and sequences tuples.
+    Every input is copied into frozen data at construction (see :func:`freeze`),
+    so changing it afterwards changes nothing here, and nothing reachable from
+    the episode can be changed.
     """
 
-    runtime: AgentRuntimeDefinition = dataclasses.field(
-        default_factory=lambda: UnmanagedRuntimeDefinition(type="unmanaged")
+    runtime: AgentRuntimeDefinition | Mapping[str, Any] = dataclasses.field(
+        default_factory=lambda: MappingProxyType({"type": "unmanaged"})
     )
     turns: Sequence[str] | None = None
     injections: Mapping[str, str] = dataclasses.field(default_factory=dict)
-    security: Check | None = None
-    utility: Check | None = None
+    security: Mapping[str, Any] | None = None
+    utility: Mapping[str, Any] | None = None
     environment: Mapping[str, Any] | None = None
     environment_type: type[Environment] | None = None
     suite_name: SuiteName | None = None
@@ -101,30 +138,49 @@ class Episode:
                 raise TypeError("turns must be a sequence of messages, not a string")
             if not self.turns:
                 raise ValueError("turns must hold at least one message, or be None when the host drives them")
-            object.__setattr__(self, "turns", tuple(self.turns))
-        object.__setattr__(self, "injections", MappingProxyType(dict(self.injections)))
-        object.__setattr__(self, "runtime", self.runtime.model_copy(deep=True))
-        environment = None if self.environment is None else _freeze(self.environment)
+            object.__setattr__(self, "turns", freeze(list(self.turns)))
+        object.__setattr__(self, "injections", freeze(dict(self.injections)))
+        object.__setattr__(self, "runtime", _runtime_data(self.runtime))
+        for name in ("security", "utility"):
+            spec = getattr(self, name)
+            if spec is not None:
+                object.__setattr__(self, name, freeze(spec))
+                self._check(name)  # Refuse a check that doesn't parse, or doesn't fit the runtime, now.
+        environment = None if self.environment is None else freeze(self.environment)
         object.__setattr__(self, "environment", environment)
         if self.environment_type is None:
             name = self.suite_name or DEFAULT_EPISODE_NAME
-            object.__setattr__(self, "environment_type", infer_environment_type(name, _thaw(environment or {})))
+            object.__setattr__(self, "environment_type", infer_environment_type(name, thaw(environment or {})))
 
     def __deepcopy__(self, _memo: dict[int, Any]) -> Episode:
-        # Everything but the runtime definition is read-only (the checks are never changed, by
-        # convention), so a copy shares it; the definition's settings get their own copy.
-        clone = copy.copy(self)
-        object.__setattr__(clone, "runtime", self.runtime.model_copy(deep=True))
-        return clone
+        # Nothing reachable from an episode can change, so a copy is the episode itself.
+        return self
+
+    def runtime_definition(self) -> AgentRuntimeDefinition:
+        """A fresh copy of the runtime definition the episode needs."""
+        return _RUNTIME_DEFINITION.validate_python(thaw(self.runtime))
 
     def new_runtime(self) -> AgentRuntime:
         """A fresh runtime for one run of this episode: it shares no state with any other."""
-        return build_runtime(self.suite_name or DEFAULT_EPISODE_NAME, self.runtime)
+        return build_runtime(self.suite_name or DEFAULT_EPISODE_NAME, self.runtime_definition())
 
     def provision_environment(self) -> Environment:
         """A fresh environment from the initial state; the episode keeps none of it."""
         assert self.environment_type is not None  # __post_init__ infers one.
-        return self.environment_type.model_validate(_thaw(self.environment or {}))
+        return self.environment_type.model_validate(thaw(self.environment or {}))
+
+    def _on_openshell(self) -> bool:
+        return cast(Mapping[str, Any], self.runtime)["type"] == "openshell"
+
+    def _check(self, name: str) -> Check | None:
+        """A fresh check parsed from the ``security`` or ``utility`` spec, or None without one."""
+        spec = getattr(self, name)
+        if spec is None:
+            return None
+        check = parse_check(thaw(spec))
+        if not self._on_openshell() and reads_openshell_observations(check.parsed):
+            raise ValueError(f"The {name} check uses OpenShell predicates, which require the openshell agent_runtime")
+        return check
 
     def grade(
         self,
@@ -135,7 +191,7 @@ class Episode:
         observations: Mapping[str, BaseModel] | None = None,
         turns: list[ConversationTurn] | None = None,
     ) -> dict[str, Any]:
-        """Grade one run of the episode with its checks.
+        """Grade one run of the episode with checks parsed fresh from its specs.
 
         ``utility`` and ``security`` are True, False, or None when the check
         couldn't be decided from the evidence collected; ``grade_validity`` marks
@@ -145,7 +201,7 @@ class Episode:
         how completely each evidence source was collected.
         """
         observations = dict(observations or {})
-        if isinstance(self.runtime, OpenShellRuntimeDefinition) and OBSERVATIONS_SOURCE not in observations:
+        if self._on_openshell() and OBSERVATIONS_SOURCE not in observations:
             observations[OBSERVATIONS_SOURCE] = OpenShellObservations.not_collected()
         ctx = VerificationContext(
             agent_output=agent_output,
@@ -156,8 +212,8 @@ class Episode:
             turns=turns or [],
         )
         # One traversal per check grades it and names the criterion that decided it.
-        utility, utility_reason, utility_validity = _assess(self.utility, ctx)
-        security, security_reason, security_validity = _assess(self.security, ctx)
+        utility, utility_reason, utility_validity = _assess(self._check("utility"), ctx)
+        security, security_reason, security_validity = _assess(self._check("security"), ctx)
         return {
             "utility": utility,
             "utility_reason": utility_reason,
