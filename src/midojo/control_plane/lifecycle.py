@@ -26,6 +26,15 @@ The rules kept here:
   conflict until the seal, and a late fact after it;
 * unfinished calls: a start appends an unfinished record that the finish
   completes in place, keeping its start order and its start's turn;
+* dispositions: what the interception layer did with a call, optional on a
+  start and a finish. A denied or blocked call is ``blocked`` and a forwarded
+  or simulated one isn't; a refused call never runs, so it's never started.
+  Any other pairing is ``invalid_disposition``, at any stage. A disposition
+  left out (None) says nothing, so it matches any: a finish that leaves it out
+  keeps its start's, and a replay without one replays a record with one. Two
+  named dispositions must be the same, or it's a ``call_conflict`` like
+  another function or args: what the layer did with a call is decided when it
+  starts, so a finish never overrides it;
 * environment history: a record carries environment snapshots only when the
   evaluation was created to keep them, as what was observed when the call
   started and finished, never as what the call caused;
@@ -61,7 +70,7 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 
 from midojo.observations import evidence_status
-from midojo.types import Environment, FunctionCallRecord
+from midojo.types import REFUSED_DISPOSITIONS, CallDisposition, Environment, FunctionCallRecord
 
 from .models import (
     CreateFunctionCallRecord,
@@ -91,6 +100,7 @@ class Rejection(enum.StrEnum):
     NOT_SEALED = "not_sealed"
     # Calls and turns.
     CALL_CONFLICT = "call_conflict"
+    INVALID_DISPOSITION = "invalid_disposition"
     TURN_PENDING = "turn_pending"
     TURN_NOT_STARTED = "turn_not_started"
     TURN_ANSWERED = "turn_answered"
@@ -438,7 +448,8 @@ def _canonical(data: Mapping[str, Any]) -> str:
 
 # --- function calls ---
 
-_BODY_FIELDS = set(FunctionCallBody.model_fields)
+# The disposition is compared on its own (see ``_same_disposition``): a body that leaves it out matches any.
+_BODY_FIELDS = set(FunctionCallBody.model_fields) - {"disposition"}
 _START_FIELDS = set(FunctionCallStart.model_fields)
 _CALL_EVIDENCE = ("function_calls",)
 
@@ -453,6 +464,18 @@ def canonical_body(call: FunctionCallStart | FunctionCallRecord, fields: set[str
     picks the fields compared: the whole body, or a start's function and args.
     """
     return json.dumps(call.model_dump(mode="json", include=fields), sort_keys=True, separators=(",", ":"))
+
+
+def _same_disposition(a: CallDisposition | None, b: CallDisposition | None) -> bool:
+    """Whether two dispositions agree: None says nothing, so it agrees with any."""
+    return a is None or b is None or a == b
+
+
+def _invalid_disposition(disposition: CallDisposition | None, blocked: bool) -> str | None:
+    """Why ``disposition`` can't go with ``blocked``, or None when it can."""
+    if disposition is None or (disposition in REFUSED_DISPOSITIONS) == blocked:
+        return None
+    return f"A {disposition} call must have blocked={not blocked}"
 
 
 def _find_call(evaluation: Evaluation, call_id: str) -> int | None:
@@ -470,14 +493,22 @@ def _observed(evaluation: Evaluation) -> Environment | None:
 
 def _start_call(evaluation: Evaluation, authority: Authority, event: StartCall) -> Outcome:
     req = event.req
-    # A start replays any record with its call_id, finished or not, when the function and args match.
+    if req.disposition in REFUSED_DISPOSITIONS:
+        return Rejected(
+            Rejection.INVALID_DISPOSITION,
+            f"A {req.disposition} call never runs, so it isn't started: its finish records it whole",
+        )
+    # A start replays any record with its call_id, finished or not, when the function, args and disposition match.
     if (index := _find_call(evaluation, req.call_id)) is not None:
         existing = evaluation.function_calls[index]
-        if canonical_body(existing, _START_FIELDS) == canonical_body(req, _START_FIELDS):
+        if canonical_body(existing, _START_FIELDS) == canonical_body(req, _START_FIELDS) and _same_disposition(
+            existing.disposition, req.disposition
+        ):
             return Accepted(evaluation, (existing, False))
         if evaluation.stage is not Stage.SEALED:
             return Rejected(
-                Rejection.CALL_CONFLICT, f"call_id {req.call_id!r} is already recorded with another function or args"
+                Rejection.CALL_CONFLICT,
+                f"call_id {req.call_id!r} is already recorded with another function, args or disposition",
             )
     if evaluation.stage is not Stage.OPEN:
         return _late(
@@ -498,10 +529,13 @@ def _start_call(evaluation: Evaluation, authority: Authority, event: StartCall) 
 
 def _finish_call(evaluation: Evaluation, authority: Authority, event: FinishCall) -> Outcome:
     req = event.req
+    if (invalid := _invalid_disposition(req.disposition, req.blocked)) is not None:
+        return Rejected(Rejection.INVALID_DISPOSITION, invalid)
     index = _find_call(evaluation, req.call_id) if req.call_id is not None else None
     if index is not None:
         existing = evaluation.function_calls[index]
-        if existing.complete and canonical_body(existing) == canonical_body(req):
+        same_disposition = _same_disposition(existing.disposition, req.disposition)
+        if existing.complete and canonical_body(existing) == canonical_body(req) and same_disposition:
             return Accepted(evaluation, (existing, False))
         # After the seal, a conflict is a late fact like any other write that isn't an exact replay.
         if evaluation.stage is not Stage.SEALED:
@@ -509,9 +543,16 @@ def _finish_call(evaluation: Evaluation, authority: Authority, event: FinishCall
                 return Rejected(
                     Rejection.CALL_CONFLICT, f"call_id {req.call_id!r} is already recorded with another body"
                 )
-            if canonical_body(existing, _START_FIELDS) != canonical_body(req, _START_FIELDS):
+            if canonical_body(existing, _START_FIELDS) != canonical_body(req, _START_FIELDS) or not same_disposition:
                 return Rejected(
-                    Rejection.CALL_CONFLICT, f"call_id {req.call_id!r} was started with another function or args"
+                    Rejection.CALL_CONFLICT,
+                    f"call_id {req.call_id!r} was started with another function, args or disposition",
+                )
+            # A finish that leaves the disposition out keeps the start's: a blocked finish contradicts it.
+            if _invalid_disposition(existing.disposition, req.blocked) is not None:
+                return Rejected(
+                    Rejection.CALL_CONFLICT,
+                    f"call_id {req.call_id!r} was started {existing.disposition}, so its finish can't be blocked",
                 )
     # An admitted call may finish until the closure wait ends; a new call only while the evaluation is open.
     admitted = (Stage.OPEN, Stage.CLOSING) if index is not None else (Stage.OPEN,)
@@ -521,11 +562,13 @@ def _finish_call(evaluation: Evaluation, authority: Authority, event: FinishCall
         )
     if index is not None:
         # Finish a started call in place, so the record keeps its place in start order.
-        finished = evaluation.function_calls[index].model_copy(
+        started = evaluation.function_calls[index]
+        finished = started.model_copy(
             update={
                 "result": req.result,
                 "error": req.error,
                 "blocked": req.blocked,
+                "disposition": req.disposition or started.disposition,
                 "complete": True,
                 "post_environment": _observed(evaluation),
             }

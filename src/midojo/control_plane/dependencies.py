@@ -34,6 +34,7 @@ REJECTION_STATUS: dict[Rejection, int] = {
     Rejection.CLOSURE_PENDING: status.HTTP_409_CONFLICT,
     Rejection.NOT_SEALED: status.HTTP_400_BAD_REQUEST,
     Rejection.CALL_CONFLICT: status.HTTP_409_CONFLICT,
+    Rejection.INVALID_DISPOSITION: status.HTTP_422_UNPROCESSABLE_CONTENT,
     Rejection.TURN_PENDING: status.HTTP_409_CONFLICT,
     Rejection.TURN_NOT_STARTED: status.HTTP_404_NOT_FOUND,
     Rejection.TURN_ANSWERED: status.HTTP_409_CONFLICT,
@@ -145,7 +146,8 @@ _CLOSED_RESPONSES: dict[int | str, dict] = {
 RECORD_FUNCTION_CALL_RESPONSES: dict[int | str, dict] = {
     status.HTTP_200_OK: {
         "description": (
-            "Replay: the call_id is already finished with this body, at any stage. Nothing is appended or changed."
+            "Replay: the call_id is already finished with this body, at any stage (a disposition left out on "
+            "either side matches any). Nothing is appended or changed."
         )
     },
     status.HTTP_201_CREATED: {
@@ -155,10 +157,18 @@ RECORD_FUNCTION_CALL_RESPONSES: dict[int | str, dict] = {
     status.HTTP_409_CONFLICT: {
         "description": (
             "`kind` call_conflict: before the seal, the call_id is already finished with a different body, or was "
-            "started with another function or args; nothing is appended or changed. `kind` closing or sealed: "
-            "the evaluation no longer admits this call (a new call once closure has begun, a finish once the "
-            "closure wait is over, any body but an exact replay after the seal); it is recorded as a late fact, "
-            "and the evaluation's records don't change."
+            "started with another function, args or disposition, or started forwarded or simulated and finished "
+            "blocked; nothing is appended or changed. `kind` closing or sealed: the evaluation no longer admits "
+            "this call (a new call once closure has begun, a finish once the closure wait is over, any body but "
+            "an exact replay after the seal); it is recorded as a late fact, and the evaluation's records don't "
+            "change."
+        )
+    },
+    status.HTTP_422_UNPROCESSABLE_CONTENT: {
+        "description": (
+            "`kind` invalid_disposition: the disposition doesn't go with `blocked` (a denied or blocked call is "
+            "blocked, a forwarded or simulated one isn't), at any stage; nothing is appended, changed or recorded "
+            "as a late fact. Without a `kind`, the request body itself is malformed."
         )
     },
 }
@@ -167,17 +177,24 @@ START_FUNCTION_CALL_RESPONSES: dict[int | str, dict] = {
     status.HTTP_200_OK: {
         "description": (
             "Replay: the call_id is already recorded, finished or not, with this function and args, at any "
-            "stage. Nothing is appended."
+            "stage, and the same disposition when both name one. Nothing is appended."
         )
     },
     status.HTTP_201_CREATED: {"description": "The call is started: an unfinished record is appended."},
     **_CLOSED_RESPONSES,
     status.HTTP_409_CONFLICT: {
         "description": (
-            "`kind` call_conflict: before the seal, the call_id is already recorded with another function or "
-            "args; nothing is appended. `kind` closing or sealed: closure has begun and no new call is admitted, "
-            "or the evaluation is sealed and the start isn't an exact replay; the start is recorded as a late "
-            "fact."
+            "`kind` call_conflict: before the seal, the call_id is already recorded with another function, args "
+            "or disposition; nothing is appended. `kind` closing or sealed: closure has begun and no new call is "
+            "admitted, or the evaluation is sealed and the start isn't an exact replay; the start is recorded as "
+            "a late fact."
+        )
+    },
+    status.HTTP_422_UNPROCESSABLE_CONTENT: {
+        "description": (
+            "`kind` invalid_disposition: the disposition is denied or blocked; a refused call never runs, so it "
+            "is recorded whole, never started. Nothing is appended. Without a `kind`, the request body itself is "
+            "malformed."
         )
     },
 }

@@ -5,12 +5,19 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny
 
 from midojo.observations import EvidenceStatus
-from midojo.types import Environment, GradeValidity, SuiteName
+from midojo.types import CallDisposition, Environment, GradeValidity, SuiteName
 
 # --- Run / Evaluation request/response models ---
 
 
 CALL_ID_MAX_LENGTH = 256
+
+_DISPOSITION_DESCRIPTION = (
+    "What the interception layer did with the call: forwarded, simulated, denied or blocked. Optional: None "
+    "says nothing. A denied or blocked call has `blocked` true, a forwarded or simulated one false; any other "
+    "pairing is a 422 `invalid_disposition`. A finish that leaves it out keeps its start's; one that names "
+    "another than its start's is a 409 `call_conflict`."
+)
 
 
 class FunctionCallStart(BaseModel):
@@ -29,6 +36,7 @@ class FunctionCallBody(FunctionCallStart):
         default=False,
         description="The tool never ran: the agent's call was blocked, and `result` is what the agent was told instead.",
     )
+    disposition: CallDisposition | None = Field(default=None, description=_DISPOSITION_DESCRIPTION)
 
 
 class CreateFunctionCallRecord(FunctionCallBody):
@@ -43,10 +51,11 @@ class CreateFunctionCallRecord(FunctionCallBody):
         max_length=CALL_ID_MAX_LENGTH,
         description=(
             "Client-chosen ID for this record, unique within the evaluation. When the call_id was started and "
-            "not finished, this finishes that record in place; its function and args must match the start, or "
-            "it's a 409. Resending a finished record with the same call_id and body returns the stored record "
-            "instead of appending a duplicate; the same call_id with a different body is a 409. When omitted, "
-            "the server assigns a UUID and the record isn't deduplicated."
+            "not finished, this finishes that record in place; its function and args must match the start, and "
+            "its disposition, when both name one, or it's a 409. Resending a finished record with the same "
+            "call_id and body returns the stored record instead of appending a duplicate (a disposition left out "
+            "on either side matches any); the same call_id with a different body is a 409. When omitted, the "
+            "server assigns a UUID and the record isn't deduplicated."
         ),
     )
 
@@ -60,7 +69,16 @@ class CreateFunctionCallStart(FunctionCallStart):
         description=(
             "Client-chosen ID for the call, unique within the evaluation. The finish sends the same call_id. "
             "Resending a start with the same call_id, function and args returns the stored record, finished or "
-            "not; the same call_id with another function or args is a 409."
+            "not (a disposition left out on either side matches any); the same call_id with another function, "
+            "args or disposition is a 409."
+        ),
+    )
+    disposition: CallDisposition | None = Field(
+        default=None,
+        description=(
+            "What the interception layer does with the call: forwarded or simulated. Optional: None says nothing. "
+            "A denied or blocked call never runs, so it's recorded whole, never started: starting one is a 422 "
+            "`invalid_disposition`."
         ),
     )
 
@@ -79,6 +97,13 @@ class FunctionCallResponse(FunctionCallBody):
     result: str | None = Field(default=None, description="What the agent saw. None while the call is unfinished.")
     complete: bool = Field(
         default=True, description="False while the call is started but not finished: it has no result yet."
+    )
+    disposition: CallDisposition | None = Field(
+        default=None,
+        description=(
+            "What the interception layer did with the call: forwarded, simulated, denied or blocked. None when "
+            "neither its start nor its finish said."
+        ),
     )
     timestamp: str
     turn: int | None = Field(
