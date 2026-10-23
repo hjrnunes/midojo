@@ -27,7 +27,8 @@ class _Sandbox:
     ``new`` and ``files`` are what ``find`` lists (newer than the baseline, and
     all files). ``find`` set to an exception raises it; set to an int, ``find``
     exits with that code and prints nothing. ``log_errors`` are raised by
-    successive log reads before the reads succeed.
+    successive log reads before the reads succeed; a None entry lets that read
+    succeed.
     """
 
     def __init__(
@@ -38,7 +39,7 @@ class _Sandbox:
         find: Exception | int | None = None,
         cat_fails: tuple[str, ...] = (),
         ocsf: tuple[str, ...] = (),
-        log_errors: tuple[Exception, ...] = (),
+        log_errors: tuple[Exception | None, ...] = (),
         marker: bool = True,
     ):
         self.new, self.files, self.find, self.cat_fails = new, files, find, cat_fails
@@ -65,8 +66,9 @@ class _Sandbox:
 
     def GetSandboxLogs(self, request, timeout):  # noqa: N802 - mirrors the gRPC stub
         self.log_reads += 1
-        if self.log_errors:
-            raise self.log_errors.pop(0)
+        error = self.log_errors.pop(0) if self.log_errors else None
+        if error is not None:
+            raise error
         response = openshell_pb2.GetSandboxLogsResponse()
         messages = list(self.ocsf)
         if self.marker and self.markers:
@@ -227,6 +229,28 @@ def test_every_grade_carries_a_reason(suite, sandbox, expected):
 
 
 # --- collection details ---
+
+
+@pytest.mark.parametrize(("ocsf", "expected"), [((DENIED_EVIL,), True), ((), None)], ids=["evidence", "no-evidence"])
+def test_log_read_error_after_a_successful_read_keeps_its_evidence(suite, ocsf, expected):
+    # The first read succeeds without the marker; the next one raises.
+    sandbox = _Sandbox(ocsf=ocsf, marker=False, log_errors=(None, RuntimeError("gateway unavailable")))
+    grade = _grade(suite, sandbox, "exfil")
+    assert sandbox.log_reads == 2
+    assert grade["evidence_status"]["openshell.ocsf"] == "incomplete"
+    assert grade["security"] is expected
+    assert grade["grade_validity"]["security"]["status"] == ("valid" if expected else "invalid")
+
+
+def test_incomplete_ocsf_fetch_is_not_cached(suite):
+    sandbox = _Sandbox(ocsf=(DENIED_EVIL,), marker=False, log_errors=(None, RuntimeError("gateway unavailable")))
+    runtime = _runtime(suite, sandbox)
+    events, status = runtime._fetch_ocsf()
+    assert (events.network_blocked_endpoints, status) == (["evil.test:443"], "incomplete")
+    sandbox.marker = True
+    reads = sandbox.log_reads
+    assert runtime._fetch_ocsf()[1] == "complete"
+    assert sandbox.log_reads > reads  # the incomplete fetch was retried, not served from the cache
 
 
 def test_failed_ocsf_fetch_is_not_cached(suite):

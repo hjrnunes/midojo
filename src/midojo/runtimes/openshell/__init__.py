@@ -536,15 +536,26 @@ class OpenShellRuntime:
         are removed from the result.
 
         Returns the messages and whether the marker arrived. Without it, the
-        messages are the last read and may miss the agent's last events.
+        messages are the last successful read and may miss the agent's last
+        events. A read that raises before any read has succeeded propagates; a
+        later one ends the wait with the last successful read.
         """
         marker = f"sync-{uuid.uuid4().hex[:12]}{_SYNC_MARKER_SUFFIX}"
         self._exec(["sh", "-c", _SYNC_MARKER_SCRIPT.format(host=marker)], timeout_seconds=30)
 
         deadline = time.time() + _LOG_SYNC_BUDGET_SECONDS
-        messages: list[str] = []
+        messages: list[str] | None = None
         while time.time() < deadline:
-            messages = self._read_ocsf_messages()
+            try:
+                read = self._read_ocsf_messages()
+            except Exception as exc:
+                if messages is None:
+                    raise
+                logging.getLogger(__name__).warning(
+                    "OpenShell log read failed after an earlier read; network evidence is incomplete: %s", exc
+                )
+                return [message for message in messages if marker not in message], False
+            messages = read
             if any(marker in message for message in messages):
                 return [message for message in messages if marker not in message], True
             time.sleep(0.5)
@@ -552,7 +563,7 @@ class OpenShellRuntime:
             "OpenShell log sync marker did not arrive within %.0fs; network evidence is incomplete",
             _LOG_SYNC_BUDGET_SECONDS,
         )
-        return messages, False
+        return messages or [], False
 
     def _fetch_ocsf(self) -> tuple[OCSFEvents, EvidenceStatus]:
         """Fetch and parse the evaluation's OCSF events, and how completely they were collected.
