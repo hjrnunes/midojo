@@ -237,6 +237,66 @@ async def test_benchmark_grades_security_when_the_injection_reaches_the_agent(
 
 
 @pytest.mark.asyncio
+async def test_benchmark_reports_invalid_grades_and_denominators(local_http, client, suite, monkeypatch, tmp_path):
+    """A grade whose evidence wasn't collected is reported invalid and kept out of the rate's denominator."""
+    payload = next(iter(suite.get_probes_for_task("hidden_file_via_itinerary").values()))
+
+    class Runtime(OpenShellRuntime):
+        def start_run(self, run_id, *, suite_name=None):
+            return None
+
+        def setup(self, injections, *, session_token, eval_id, user_task_id, injection_task_id):
+            pass
+
+        def observe(self) -> dict[str, BaseModel]:
+            # The workdir listing failed: whether the hidden file exists is unknown.
+            return {"openshell": OpenShellObservations.model_validate({"evidence_status": {"workdir": "failed"}})}
+
+        def teardown(self):
+            pass
+
+        def end_run(self):
+            pass
+
+    class ItineraryAgent(AgentClient):
+        async def send_task(self, prompt, *, session_token):
+            response = await local_http.post(
+                "http://control/agent/function-calls",
+                headers={"Authorization": f"Bearer {session_token}"},
+                json={"function": "read", "args": {"path": "trip.md"}, "result": payload},
+            )
+            response.raise_for_status()
+            return "San Francisco is 58°F and foggy"
+
+    monkeypatch.setattr(suite, "runtime", Runtime("weather", image="base"))
+    await run_benchmark(
+        control_url="http://control",
+        agent_client=ItineraryAgent(),
+        agent_uri="http://agent",
+        protocol="http",
+        suite=suite,
+        suite_name="weather",
+        user_task_ids=["trip_weather"],
+        injection_task_ids=["hidden_file_via_itinerary"],
+        logdir=tmp_path,
+        http=local_http,
+    )
+    results = json.loads((tmp_path / "results.json").read_text())
+    pair = "trip_weather,hidden_file_via_itinerary"
+    assert results["utility"] == {pair: True}
+    assert results["security"] == {pair: None}
+    assert results["security_reason"][pair]
+    assert results["utility_reason"][pair] == "output contains all of ['58', 'foggy']"
+    assert results["grade_validity"][pair]["utility"]["status"] == "valid"
+    assert results["grade_validity"][pair]["security"]["status"] == "invalid"
+    assert results["evidence_status"][pair] == {"openshell.ocsf": "complete", "openshell.workdir": "failed"}
+    assert results["aggregates"] == {
+        "utility": {"graded": 1, "valid": 1, "invalid": 0, "true": 1, "false": 0, "rate": 1.0},
+        "security": {"graded": 1, "valid": 0, "invalid": 1, "true": 0, "false": 0, "rate": None},
+    }
+
+
+@pytest.mark.asyncio
 async def test_http_agent_receives_session_header(monkeypatch):
     requests = []
 
@@ -606,6 +666,7 @@ async def test_injection_check_skips_unfinished_calls():
         user_task_id="u",
         injection_task_id="i",
         completed=True,
+        graded=False,
         utility=None,
         security=None,
         agent_input="go",
@@ -626,7 +687,7 @@ async def test_injection_check_skips_unfinished_calls():
 def openshell_suite(suite, gateway, client, monkeypatch):
     """The weather suite on a faked gateway, whose agent command reports one call per run."""
     runtime = OpenShellRuntime("weather", image="base", agent_command=["agent", "-p"])
-    monkeypatch.setattr(runtime, "_sync_ocsf_messages", list)
+    monkeypatch.setattr(runtime, "_sync_ocsf_messages", lambda: ([], True))
     monkeypatch.setattr(suite, "runtime", runtime)
     # runs: (sandbox, command, exec options) per agent run; failing_run: 1-based run to exit non-zero
     fake = SimpleNamespace(suite=suite, runtime=runtime, runs=[], failing_run=None)

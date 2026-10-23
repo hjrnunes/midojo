@@ -74,7 +74,7 @@ def test_no_observation_makes_security_false(tmp_path):
         observations={"openshell": OpenShellObservations(network_calls_allowed=["api.anthropic.com:443"])},
     )
     assert result["security"] is False
-    assert result["security_reason"] is None
+    assert result["security_reason"] == "net_egress"  # the reason is kept whatever the outcome
 
     # Same suite, no observations passed at all → still False (defaults to {}).
     result_empty = suite.grade(
@@ -86,4 +86,4 @@ def test_no_observation_makes_security_false(tmp_path):
         function_calls=[],
     )
     assert result_empty["security"] is False
-    assert result_empty["security_reason"] is None
+    assert result_empty["security_reason"] == "net_egress"

@@ -9,7 +9,7 @@ import pytest
 
 from midojo.control_plane.models import CreateFunctionCallRecord, CreateFunctionCallStart
 from midojo.control_plane.store import FunctionCallConflictError, InMemoryStore
-from midojo.types import Environment
+from midojo.types import CheckValidity, Environment, GradeValidity, ValidityReason
 
 
 @pytest.fixture
@@ -32,11 +32,12 @@ def _make_eval(
     environment: Environment | None = None,
     pre_environment: Environment | None = None,
     agent_input: str | None = None,
+    injection_task_id: str | None = None,
 ):
     return store.create_evaluation(
         run_id,
         user_task_id="ut",
-        injection_task_id=None,
+        injection_task_id=injection_task_id,
         pre_environment=pre_environment if pre_environment is not None else _Env(),
         environment=environment if environment is not None else _Env(),
         active_injections={},
@@ -275,20 +276,48 @@ def test_record_observations_keyed_by_source(store):
 
 def test_set_grade(store):
     run = store.create_run("test")
-    ev = _make_eval(store, run.id)
+    ev = _make_eval(store, run.id, injection_task_id="it")
+    assert not ev.graded
     # Distinct values guard against the two flags being swapped.
     assert store.set_grade(run.id, ev.id, utility=True, security=True, security_reason="output contains X") is ev
     assert ev.utility is True
     assert ev.security is True
     assert ev.security_reason == "output contains X"
+    # Without a validity, a decided grade is stored as valid, and the evaluation is graded.
+    assert ev.graded
+    assert ev.grade_validity == GradeValidity(
+        utility=CheckValidity(status="valid"), security=CheckValidity(status="valid")
+    )
 
 
 def test_set_grade_security_reason_defaults_to_none(store):
     run = store.create_run("test")
     ev = _make_eval(store, run.id)
-    # Reason is optional: an attack that failed (or a utility-only grade) leaves it None.
+    # Reason is optional at the store: a utility-only grade leaves it None.
     assert store.set_grade(run.id, ev.id, utility=True, security=False) is ev
     assert ev.security_reason is None
+    assert ev.utility_reason is None  # stored as given; the grade route always passes reasons
+    assert ev.graded
+    # No injection task: security is not applicable, whatever value was passed.
+    assert ev.grade_validity == GradeValidity(
+        utility=CheckValidity(status="valid"), security=CheckValidity(status="not_applicable")
+    )
+
+
+def test_set_grade_without_validity_marks_an_unknown_grade_invalid(store):
+    run = store.create_run("test")
+    ev = _make_eval(store, run.id, injection_task_id="it")
+    store.set_grade(run.id, ev.id, utility=None, security=None, security_reason="blocked network call")
+    assert ev.graded
+    assert (ev.utility, ev.security) == (None, None)
+    assert ev.grade_validity == GradeValidity(
+        utility=CheckValidity(
+            status="invalid", reasons=[ValidityReason(check="utility", reason="the grade is unknown")]
+        ),
+        security=CheckValidity(
+            status="invalid", reasons=[ValidityReason(check="blocked network call", reason="the grade is unknown")]
+        ),
+    )
 
 
 def test_complete_evaluation(store):
@@ -325,3 +354,26 @@ def test_set_grade_unknown_returns_none(store):
 
 def test_complete_evaluation_unknown_returns_none(store):
     assert store.complete_evaluation("nope", "nope", "out") is None
+
+
+def test_set_grade_persists_validity_and_evidence(store):
+    run = store.create_run("test")
+    ev = _make_eval(store, run.id)
+    assert ev.grade_validity is None  # not graded yet
+    validity = GradeValidity(
+        utility=CheckValidity(status="valid"),
+        security=CheckValidity(status="invalid", reasons=[ValidityReason(check="c", reason="r")]),
+    )
+    store.set_grade(
+        run.id,
+        ev.id,
+        utility=True,
+        security=None,
+        utility_reason="u",
+        security_reason="s",
+        grade_validity=validity,
+        evidence_status={"openshell.ocsf": "failed"},
+    )
+    assert (ev.utility, ev.security, ev.utility_reason, ev.security_reason) == (True, None, "u", "s")
+    assert ev.grade_validity == validity
+    assert ev.evidence_status == {"openshell.ocsf": "failed"}

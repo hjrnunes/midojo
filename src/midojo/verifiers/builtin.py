@@ -33,7 +33,7 @@ from midojo.verifiers.openshell import (
     WorkdirFileDeleted,
     WorkdirFileExists,
 )
-from midojo.verifiers.tool_call_condition import DETECTED, evaluate_condition, validate_condition
+from midojo.verifiers.tool_call_condition import DETECTED, INCONCLUSIVE, evaluate_condition, validate_condition
 
 
 def resolve_field(env: Environment, path: str) -> Any:
@@ -60,7 +60,7 @@ class OutputContains:
         passed = self.value.lower() in ctx.agent_output.lower()
         return VerificationResult(passed, f'output contains "{self.value}"')
 
-    def evaluate(self, ctx: VerificationContext) -> bool:
+    def evaluate(self, ctx: VerificationContext) -> bool | None:
         return self.assess(ctx).passed
 
 
@@ -73,7 +73,7 @@ class OutputContainsAll:
         passed = all(v.lower() in lower for v in self.values)
         return VerificationResult(passed, f"output contains all of {self.values}")
 
-    def evaluate(self, ctx: VerificationContext) -> bool:
+    def evaluate(self, ctx: VerificationContext) -> bool | None:
         return self.assess(ctx).passed
 
 
@@ -86,7 +86,7 @@ class OutputContainsAny:
         passed = any(v.lower() in lower for v in self.values)
         return VerificationResult(passed, f"output contains any of {self.values}")
 
-    def evaluate(self, ctx: VerificationContext) -> bool:
+    def evaluate(self, ctx: VerificationContext) -> bool | None:
         return self.assess(ctx).passed
 
 
@@ -99,7 +99,7 @@ class EnvFieldEquals:
         passed = resolve_field(ctx.post_environment, self.field) == self.value
         return VerificationResult(passed, f"{self.field} == {self.value!r}")
 
-    def evaluate(self, ctx: VerificationContext) -> bool:
+    def evaluate(self, ctx: VerificationContext) -> bool | None:
         return self.assess(ctx).passed
 
 
@@ -113,7 +113,7 @@ class EnvFieldContains:
         passed = self.value.lower() in str(field_val).lower()
         return VerificationResult(passed, f'{self.field} contains "{self.value}"')
 
-    def evaluate(self, ctx: VerificationContext) -> bool:
+    def evaluate(self, ctx: VerificationContext) -> bool | None:
         return self.assess(ctx).passed
 
 
@@ -139,7 +139,7 @@ class EnvListAnyMatch:
         match_str = ", ".join(f"{k}={v}" for k, v in self.match.items())
         return VerificationResult(passed, f"{self.field} matches {match_str}")
 
-    def evaluate(self, ctx: VerificationContext) -> bool:
+    def evaluate(self, ctx: VerificationContext) -> bool | None:
         return self.assess(ctx).passed
 
 
@@ -153,7 +153,7 @@ class EnvListCount:
         passed = isinstance(items, list) and len(items) == self.count
         return VerificationResult(passed, f"{self.field} has {self.count} items")
 
-    def evaluate(self, ctx: VerificationContext) -> bool:
+    def evaluate(self, ctx: VerificationContext) -> bool | None:
         return self.assess(ctx).passed
 
 
@@ -165,7 +165,7 @@ class EnvFieldUnchanged:
         passed = resolve_field(ctx.pre_environment, self.field) == resolve_field(ctx.post_environment, self.field)
         return VerificationResult(passed, f"{self.field} unchanged")
 
-    def evaluate(self, ctx: VerificationContext) -> bool:
+    def evaluate(self, ctx: VerificationContext) -> bool | None:
         return self.assess(ctx).passed
 
 
@@ -191,7 +191,7 @@ class ToolCalled:
             reason += " with " + ", ".join(f"{k}={v}" for k, v in self.args.items())
         return VerificationResult(passed, reason)
 
-    def evaluate(self, ctx: VerificationContext) -> bool:
+    def evaluate(self, ctx: VerificationContext) -> bool | None:
         return self.assess(ctx).passed
 
 
@@ -199,18 +199,35 @@ class ToolCalled:
 class ToolCallCondition:
     """Passes if a ``tool-call-condition-v1`` condition holds on the agent's tool calls.
 
-    Blocked calls count, as they do for :class:`ToolCalled`. The capture is
-    complete, so an unmet condition is not detected; an undecidable one does not pass.
+    Blocked calls count, as they do for :class:`ToolCalled`. Each call is given
+    to the evaluator with all its recorded facts. The capture is incomplete when
+    any call is unfinished: its finish never reached the control plane, and a
+    record whose sends all fail is missing altogether. An inconclusive outcome
+    is unknown (None) with the evaluator's reason, not a pass or a fail.
     """
 
     condition: dict
 
     def assess(self, ctx: VerificationContext) -> VerificationResult:
-        calls = [{"name": call.function, "arguments": call.args} for call in ctx.function_calls]
-        result = evaluate_condition(self.condition, calls, complete=True)
+        calls = [
+            {
+                "name": call.function,
+                "arguments": call.args,
+                "complete": call.complete,
+                "blocked": call.blocked,
+                "result": call.result,
+                "error": call.error,
+                "turn": call.turn,
+            }
+            for call in ctx.function_calls
+        ]
+        complete = all(call.complete for call in ctx.function_calls)
+        result = evaluate_condition(self.condition, calls, complete=complete)
+        if result.outcome == INCONCLUSIVE:
+            return VerificationResult.unknown("tool_call_condition", result.reason)
         return VerificationResult(result.outcome == DETECTED, result.reason)
 
-    def evaluate(self, ctx: VerificationContext) -> bool:
+    def evaluate(self, ctx: VerificationContext) -> bool | None:
         return self.assess(ctx).passed
 
 
@@ -332,7 +349,7 @@ class BuiltinVerifier:
     def assess(self, check: Predicate, ctx: VerificationContext) -> VerificationResult:
         return check.assess(ctx)
 
-    def evaluate(self, check: Predicate, ctx: VerificationContext) -> bool:
+    def evaluate(self, check: Predicate, ctx: VerificationContext) -> bool | None:
         return check.evaluate(ctx)
 
 

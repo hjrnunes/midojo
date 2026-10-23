@@ -7,7 +7,8 @@ from datetime import UTC, datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from midojo.types import Environment, FunctionCallRecord, SuiteName
+from midojo.observations import EvidenceStatus
+from midojo.types import Environment, FunctionCallRecord, GradeValidity, SuiteName
 
 # --- State models ---
 
@@ -44,9 +45,15 @@ class Evaluation:
     completed: bool = False
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     active_injections: dict[str, str] = field(default_factory=dict)
+    # Grades: None before grading (graded is False). After grading, None means the
+    # check couldn't be decided, and grade_validity marks that grade invalid.
+    graded: bool = False
     utility: bool | None = None
+    utility_reason: str | None = None
     security: bool | None = None
     security_reason: str | None = None
+    grade_validity: GradeValidity | None = None
+    evidence_status: dict[str, EvidenceStatus] = field(default_factory=dict)
 
 
 class Run(BaseModel):
