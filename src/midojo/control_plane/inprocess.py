@@ -31,7 +31,7 @@ from midojo_sdk.recorder import (
 from pydantic import BaseModel, ValidationError
 
 from .lifecycle import RejectedError, Rejection
-from .models import CreateFunctionCallRecord, CreateFunctionCallStart
+from .models import ChangeEnvironmentRequest, CreateFunctionCallRecord, CreateFunctionCallStart
 from .service import BySession, ControlPlane
 
 RequestT = TypeVar("RequestT", bound=BaseModel)
@@ -110,10 +110,12 @@ class InProcessAgentClient:
     async def change(
         self, values: dict[str, Any], *, expected_revision: int | None = None
     ) -> EnvironmentRevision | None:
+        # The body the PATCH route validates: the same inputs are accepted, coerced or refused as over HTTP.
+        req = _request(ChangeEnvironmentRequest, set=values, expected_revision=expected_revision)
         try:
-            revision, environment = self._control.change_environment(self._target, values, expected_revision)
+            revision, environment = self._control.change_environment(self._target, req.set, req.expected_revision)
         except RejectedError as e:
-            if e.kind is Rejection.REVISION_CONFLICT and expected_revision is not None:
+            if e.kind is Rejection.REVISION_CONFLICT and req.expected_revision is not None:
                 return None
             raise sdk_error(e) from e
         return EnvironmentRevision(revision, environment.model_dump(mode="json"))

@@ -266,6 +266,10 @@ def test_a_change_at_a_stale_revision_is_refused_and_changes_nothing():
     evaluation = _apply(_evaluation(), ChangeEnvironment({"counter": 1}, AT))
     outcome = transition(evaluation, AGENT, ChangeEnvironment({"counter": 9}, AT, expected_revision=0))
     assert isinstance(outcome, Rejected) and outcome.kind is Rejection.REVISION_CONFLICT
+    # A rejection leaves nothing behind: the evaluation is still at revision 1, with counter 1.
+    assert (evaluation.environment_revision, evaluation.environment) == (1, _Env(counter=1))
+    after = _accept(evaluation, ChangeEnvironment({}, AT, expected_revision=1), AGENT)
+    assert after.result == (2, _Env(counter=1))
 
 
 def test_a_change_without_a_revision_applies_at_any_revision():

@@ -12,7 +12,7 @@ from fastapi.dependencies.models import Dependant
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from midojo_sdk.context import ToolContext
-from midojo_sdk.recorder import ControlPlaneRejectedError, RejectionKind
+from midojo_sdk.recorder import ControlPlaneRejectedError, InvalidRequestError, RejectionKind
 from midojo_sdk.session import MidojoSessionMiddleware, MissingSessionError, session_context, session_token
 from pydantic import ValidationError
 
@@ -232,6 +232,46 @@ async def test_a_change_at_a_stale_revision_changes_nothing(client, backend):
         revision + 1,
         {**environment, "weather_alerts": [{"city": "Boston", "message": "first"}]},
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("values", "expected_revision"),
+    [
+        ({"weather_alerts": []}, "bad"),
+        ({"weather_alerts": []}, 1.5),
+        ([{"weather_alerts": []}], None),
+        ("weather_alerts", None),
+    ],
+    ids=["revision-not-an-integer", "revision-fractional", "values-a-list", "values-a-string"],
+)
+async def test_a_malformed_change_is_an_invalid_request_on_both_implementations(
+    client, backend, values, expected_revision
+):
+    _, ev = new_evaluation(client)
+    agent = backend.agent(ev["session_token"])
+    before = await agent.read()
+
+    with pytest.raises(InvalidRequestError):
+        await agent.change(values, expected_revision=expected_revision)  # pyright: ignore[reportArgumentType]
+
+    assert await agent.read() == before
+
+
+@pytest.mark.asyncio
+async def test_a_coercible_revision_means_the_same_on_both_implementations(client, backend):
+    """The request model coerces "0" to 0 over HTTP, and so does the in-process client."""
+    _, ev = new_evaluation(client)
+    agent = backend.agent(ev["session_token"])
+    _, environment = await agent.read()
+    alerts = [{"city": "Boston", "message": "storm"}]
+
+    changed = await agent.change({"weather_alerts": alerts}, expected_revision="0")  # pyright: ignore[reportArgumentType]
+    stale = await agent.change({"weather_alerts": []}, expected_revision="0")  # pyright: ignore[reportArgumentType]
+
+    assert changed == (1, {**environment, "weather_alerts": alerts})
+    assert stale is None
+    assert await agent.read() == (1, {**environment, "weather_alerts": alerts})
 
 
 @pytest.mark.asyncio
