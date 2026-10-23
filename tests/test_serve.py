@@ -86,3 +86,18 @@ def test_serve_requires_the_control_token_when_set(caplog, args, env):
     client = TestClient(serve.call_args.args[0])
     assert client.get("/suites").status_code == 401
     assert client.get("/suites", headers={"Authorization": "Bearer secret"}).status_code == 200
+
+
+@pytest.mark.parametrize(("args", "expected"), [([], 5.0), (["--closure-wait", "0.5"], 0.5)])
+def test_serve_sets_the_closure_wait(args, expected):
+    with patch("midojo.serve.uvicorn.run") as serve:
+        result = CliRunner().invoke(main, ["--load-suite", "weather", *args])
+    assert result.exit_code == 0, result.exception
+    assert serve.call_args.args[0].state.config.closure_wait_seconds == expected
+
+
+def test_serve_refuses_a_negative_closure_wait():
+    with patch("midojo.serve.uvicorn.run") as serve:
+        result = CliRunner().invoke(main, ["--load-suite", "weather", "--closure-wait", "-1"])
+    assert result.exit_code != 0
+    serve.assert_not_called()

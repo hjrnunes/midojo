@@ -6,6 +6,7 @@ import httpx
 from pydantic import BaseModel
 
 from midojo.control_plane.models import (
+    CloseResponse,
     CreateEvaluationResponse,
     CreateRunResponse,
     EvaluationResponse,
@@ -76,6 +77,14 @@ class ControlPlaneClient:
         )
         response.raise_for_status()
         return TurnResponse.model_validate(response.json())
+
+    async def close_evaluation(self, run_id: str, eval_id: str) -> CloseResponse:
+        """Stop admitting new calls, and wait (up to the control plane's closure wait) for admitted ones to finish."""
+        response = await self._http.post(
+            f"{self._base_url}/runs/{run_id}/evaluations/{eval_id}/close", headers=self._headers
+        )
+        response.raise_for_status()
+        return CloseResponse.model_validate(response.json())
 
     async def complete_evaluation(self, run_id: str, eval_id: str, agent_output: str) -> None:
         response = await self._http.post(

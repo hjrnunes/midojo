@@ -173,6 +173,42 @@ async def test_runner_records_sandbox_observations(local_http, client):
 
 
 @pytest.mark.asyncio
+async def test_runner_closes_before_collecting_the_final_observations(local_http, client):
+    """Calls already admitted may finish, then the runtime observes, then the evaluation is sealed and graded."""
+    stages: dict[str, str] = {}
+
+    class Runtime(OpenShellRuntime):
+        def setup(self, injections, *, session_token, eval_id, user_task_id, injection_task_id):
+            self.eval_id = eval_id
+
+        def observe(self) -> dict[str, BaseModel]:
+            stages["observe"] = client.get(f"/runs/{run['id']}/evaluations/{self.eval_id}").json()["stage"]
+            return {"openshell": OpenShellObservations()}
+
+        def teardown(self):
+            stages["teardown"] = client.get(f"/runs/{run['id']}/evaluations/{self.eval_id}").json()["stage"]
+
+    run = client.post("/runs", json={"suite_name": "weather"}).json()
+    control = ControlPlaneClient("http://control", http=local_http)
+    try:
+        result = await run_task(
+            control,
+            ReportingAgent(local_http),
+            run["id"],
+            "weather_new_york",
+            None,
+            {},
+            runtime=Runtime("test", image="base"),
+        )
+    finally:
+        await control.aclose()
+    assert stages == {"observe": "collecting", "teardown": "collecting"}
+    evaluation = client.get(f"/runs/{run['id']}/evaluations/{result.eval_id}").json()
+    assert (evaluation["stage"], evaluation["graded"], evaluation["late_facts"]) == ("sealed", True, [])
+    assert "openshell" in evaluation["observations"]
+
+
+@pytest.mark.asyncio
 async def test_benchmark_selects_suite_and_creates_unique_sessions(local_http, client, unmanaged_suite, tmp_path):
     agent = ReportingAgent(local_http)
     await run_benchmark(
