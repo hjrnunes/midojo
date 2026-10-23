@@ -19,6 +19,7 @@ from midojo.episode import Episode, UnknownTaskError, freeze, thaw
 from midojo.runtimes import UnmanagedRuntime
 from midojo.runtimes.openshell import OpenShellObservations, OpenShellRuntime
 from midojo.suite_definition import OpenShellRuntimeDefinition, UnmanagedRuntimeDefinition
+from midojo.types import Environment
 from midojo.verifier import parse_check
 
 
@@ -220,6 +221,35 @@ def test_an_episode_refuses_str_subclasses_and_other_stateful_data(changes):
         _episode(**changes)
 
 
+class _StatefulOffset(datetime.timedelta):
+    pass
+
+
+@pytest.mark.parametrize(
+    "zone",
+    [
+        datetime.timezone(_StatefulOffset(hours=1)),
+        datetime.timezone(datetime.timedelta(hours=1), _StatefulStr("CET")),
+    ],
+    ids=["offset", "name"],
+)
+@pytest.mark.parametrize("kind", ["datetime", "time"])
+def test_an_episode_refuses_a_timezone_built_from_subclasses(zone, kind):
+    value = datetime.datetime(2026, 1, 1, tzinfo=zone) if kind == "datetime" else datetime.time(12, tzinfo=zone)
+    with pytest.raises(TypeError, match="exact timedelta offset and str name"):
+        _episode(environment={"at": value})
+
+
+@pytest.mark.parametrize(
+    "environment_type",
+    [lambda: Environment(), lambda: _episode().provision_environment(), lambda: dict, lambda: "Environment"],
+    ids=["base-instance", "model-instance", "other-class", "str"],
+)
+def test_an_episode_refuses_an_environment_type_that_is_not_an_environment_class(environment_type):
+    with pytest.raises(TypeError, match="environment_type must be an Environment subclass"):
+        _episode(environment_type=environment_type())
+
+
 @pytest.mark.parametrize("field", ["environment", "security", "injections"])
 def test_an_episode_refuses_a_mutable_key(field):
     with pytest.raises(TypeError, match="key"):
@@ -235,8 +265,11 @@ def test_an_episode_refuses_provenance_that_is_not_a_str(field, value):
 
 def test_plain_scalars_and_zoned_times_are_episode_data():
     at = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
-    episode = _episode(environment={"counter": 0, "notes": [], "at": at, "day": at.date(), "raw": b"x", "f": 1.5})
+    noon = datetime.time(12, tzinfo=datetime.timezone(datetime.timedelta(hours=1), "CET"))
+    environment = {"counter": 0, "notes": [], "at": at, "day": at.date(), "noon": noon, "raw": b"x", "f": 1.5}
+    episode = _episode(environment=environment)
     assert episode.environment["at"] is at  # type: ignore[index]
+    assert _episode(environment_type=type(episode.provision_environment())).environment_type is not None
 
 
 def test_an_episode_refuses_checks_it_cannot_hold_or_grade_with():

@@ -5,11 +5,13 @@ the checks that grade it, the initial state of the simulated tools, and the
 runtime it needs, as a definition (never a live runtime object). An evaluation
 is the record of one run of an episode.
 
-An episode holds only frozen data: read-only mappings, tuples and immutable
-scalars. Everything live is built fresh from that data each time it's needed:
-the checks when grading, the environment when an evaluation is provisioned,
-and the runtime definition and the runtime itself. So nothing a caller gets
-from an episode, or from a copy of one, can change what it describes.
+All the data an episode owns is frozen: read-only mappings, tuples and
+immutable scalars. Everything live is built fresh from that data each time
+it's needed: the checks when grading, the environment when an evaluation is
+provisioned, and the runtime definition and the runtime itself. So no data a
+caller gets from an episode, or from a copy of one, can change what it
+describes. The environment type and the verifier implementations the checks
+resolve to are trusted code, shared by reference, not data.
 
 A suite compiles one of its user task x injection task pairs into an episode
 (:meth:`midojo.yaml_task_suite.YAMLTaskSuite.episode`); a direct caller builds
@@ -64,7 +66,8 @@ def freeze(value: Any) -> Any:
     list, a tuple or exactly one of the immutable built-in scalars (``str``,
     ``bytes``, ``int``, ``float``, ``bool``, None, ``date``, ``datetime``,
     ``time``, ``timedelta``; a date or time only with no time zone or a
-    ``datetime.timezone``). Anything else, a subclass of these included, raises
+    ``datetime.timezone`` whose offset is exactly a ``timedelta`` and whose name
+    exactly a ``str``). Anything else, a subclass of these included, raises
     TypeError: nothing is converted.
     """
     if isinstance(value, Mapping):
@@ -77,8 +80,12 @@ def freeze(value: Any) -> Any:
     if type(value) not in _IMMUTABLE_SCALARS:
         raise TypeError(f"episode data must be JSON-like, not {type(value).__name__}")
     tzinfo = getattr(value, "tzinfo", None)
-    if tzinfo is not None and type(tzinfo) is not datetime.timezone:
-        raise TypeError(f"a date or time in episode data needs a datetime.timezone, not {type(tzinfo).__name__}")
+    if tzinfo is not None:
+        if type(tzinfo) is not datetime.timezone:
+            raise TypeError(f"a date or time in episode data needs a datetime.timezone, not {type(tzinfo).__name__}")
+        # A timezone keeps the offset and name it was built with, subclasses included.
+        if type(tzinfo.utcoffset(None)) is not datetime.timedelta or type(tzinfo.tzname(None)) is not str:
+            raise TypeError("a datetime.timezone in episode data needs an exact timedelta offset and str name")
     return value
 
 
@@ -126,11 +133,12 @@ class Episode:
     set when a suite compiled the episode, and None otherwise.
 
     Every input is copied into frozen data at construction (see :func:`freeze`),
-    so changing it afterwards changes nothing here, and nothing reachable from
-    the episode can be changed. Turns, injection probes and payloads, and the
+    so changing it afterwards changes nothing here, and none of the data the
+    episode owns can be changed. Turns, injection probes and payloads, and the
     provenance IDs must be exactly ``str``; anything else raises TypeError.
-    ``environment_type``, like the verifier registry the checks resolve
-    against, is held by reference and treated as code, not data.
+    ``environment_type`` must be an :class:`~midojo.types.Environment` subclass
+    (a class, not an instance); like the verifier registry the checks resolve
+    against, it is held by reference and treated as code, not data.
     """
 
     runtime: AgentRuntimeDefinition | Mapping[str, Any] = dataclasses.field(
@@ -169,6 +177,10 @@ class Episode:
                 self._check(name)  # Refuse a check that doesn't parse, or doesn't fit the runtime, now.
         environment = None if self.environment is None else freeze(self.environment)
         object.__setattr__(self, "environment", environment)
+        if self.environment_type is not None and not (
+            isinstance(self.environment_type, type) and issubclass(self.environment_type, Environment)
+        ):
+            raise TypeError(f"environment_type must be an Environment subclass, not {self.environment_type!r}")
         if self.environment_type is None:
             name = self.suite_name or DEFAULT_EPISODE_NAME
             object.__setattr__(self, "environment_type", infer_environment_type(name, thaw(environment or {})))
