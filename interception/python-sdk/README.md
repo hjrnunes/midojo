@@ -39,6 +39,8 @@ if __name__ == "__main__":
 
 The SDK attempts to record each call with its arguments and the result the agent saw. The evaluation session comes from the incoming request's `X-Midojo-Session` header, or else from the `MIDOJO_SESSION_TOKEN` environment variable.
 
+`await mcp.mirror_upstream()` exposes every upstream tool the server doesn't define itself. A mirrored tool is listed exactly as the upstream lists it (name, description, input and output schemas, annotations, `_meta`), and a call gets the upstream's result as sent: content blocks, structured content, error flag, and a JSON-RPC error as the same JSON-RPC error. `mcp.block(*names)` and `@mcp.deny(name)` refuse calls: the tool never runs and the agent gets an error result, "Tool execution was blocked" or the reason the denial check returned. Each call has a disposition: `forwarded` (mirrored), `simulated` (a tool defined with `@mcp.tool()`), `blocked` or `denied`. Pass a `recorder` (a `midojo_sdk.recorder.CallRecorder`) to receive it; the control plane's `/agent` API records only the `blocked` flag it implies.
+
 ## LangChain agents
 
 `midojo_sdk.langchain.MidojoMiddleware` is [agent middleware](https://docs.langchain.com/oss/python/langchain/middleware/overview) that intercepts the tool calls of a [LangChain](https://docs.langchain.com) agent. It picks tools by name, like the PI SDK's `hooks`, `blockTools` and `reportTools`. The agent keeps its real tools, so it sees the same tool names, descriptions and arguments as it does without midojo.
