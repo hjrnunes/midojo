@@ -147,12 +147,12 @@ class AgentControlPlaneClient:
     # --- Recorder ---
 
     async def start_call(self, *, call_id: str, function: str, args: dict[str, Any], disposition: Disposition) -> None:
-        """Send a call's start once.
+        """Send a call's start once, with its disposition (``forwarded`` or ``simulated``).
 
-        The API has no field for the disposition: a started call is forwarded
-        or simulated, never blocked, so the start carries nothing for it.
+        A denied or blocked call never runs, so it's never started: the control
+        plane refuses its start as ``invalid_disposition``.
         """
-        await self._post("/agent/function-calls/start", {"call_id": call_id, "function": function, "args": args})
+        await self._post("/agent/function-calls/start", _start_body(call_id, function, args, disposition))
 
     async def finish_call(
         self,
@@ -164,12 +164,13 @@ class AgentControlPlaneClient:
         disposition: Disposition,
         error: str | None = None,
     ) -> None:
-        """Send a call's finish once.
+        """Send a call's finish once, with its disposition.
 
-        The API has no field for the disposition, so the record carries only
-        what the disposition implies: ``blocked`` for a denied or blocked call.
+        The body also carries the ``blocked`` flag the disposition implies (a
+        denied or blocked call), so a control plane that predates the
+        disposition field still records a refused call as blocked.
         """
-        body = _finish_body(call_id, function, args, result, error, disposition in REFUSED)
+        body = _finish_body(call_id, function, args, result, error, disposition in REFUSED, disposition)
         await self._post("/agent/function-calls", body)
 
     # --- the /agent API, with resends ---
@@ -182,7 +183,7 @@ class AgentControlPlaneClient:
         the call stays on the control plane as unfinished. Resent like
         ``record_function_call``; a resent start doesn't record the call twice.
         """
-        body = {"call_id": call_id, "function": function, "args": args}
+        body = _start_body(call_id, function, args)
         await retry(lambda: self._post("/agent/function-calls/start", body), retryable=transient)
 
     async def record_function_call(
@@ -214,17 +215,25 @@ class AgentControlPlaneClient:
         _raise_for_status(response)
 
 
-def _finish_body(
-    call_id: str, function: str, args: dict[str, Any], result: str, error: str | None, blocked: bool
+def _start_body(
+    call_id: str, function: str, args: dict[str, Any], disposition: Disposition | None = None
 ) -> dict[str, Any]:
-    return {
-        "call_id": call_id,
-        "function": function,
-        "args": args,
-        "result": result,
-        "error": error,
-        "blocked": blocked,
-    }
+    body: dict[str, Any] = {"call_id": call_id, "function": function, "args": args}
+    if disposition is not None:
+        body["disposition"] = disposition
+    return body
+
+
+def _finish_body(
+    call_id: str,
+    function: str,
+    args: dict[str, Any],
+    result: str,
+    error: str | None,
+    blocked: bool,
+    disposition: Disposition | None = None,
+) -> dict[str, Any]:
+    return {**_start_body(call_id, function, args, disposition), "result": result, "error": error, "blocked": blocked}
 
 
 def _raise_for_status(response: httpx.Response) -> None:

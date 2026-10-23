@@ -74,6 +74,7 @@ class RejectionKind(enum.StrEnum):
     CLOSURE_PENDING = "closure_pending"
     NOT_SEALED = "not_sealed"
     CALL_CONFLICT = "call_conflict"
+    INVALID_DISPOSITION = "invalid_disposition"
     TURN_PENDING = "turn_pending"
     TURN_NOT_STARTED = "turn_not_started"
     TURN_ANSWERED = "turn_answered"

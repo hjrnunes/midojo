@@ -71,9 +71,14 @@ async def test_midojo_mcp_starts_and_finishes_each_call_with_a_uuid_call_id(monk
     paths = [path for path, _ in sent]
     assert paths == ["/agent/function-calls/start", "/agent/function-calls"] * 2
     first_start, first_finish, second_start, _ = (body for _, body in sent)
-    assert first_start == {"call_id": first_start["call_id"], "function": "my_tool", "args": {"name": "Ada"}}
+    assert first_start == {
+        "call_id": first_start["call_id"],
+        "function": "my_tool",
+        "args": {"name": "Ada"},
+        "disposition": "simulated",
+    }
     assert first_finish["call_id"] == first_start["call_id"]
-    assert first_finish["result"] == "hello Ada"
+    assert (first_finish["result"], first_finish["disposition"]) == ("hello Ada", "simulated")
     assert str(uuid.UUID(first_start["call_id"])) == first_start["call_id"]
     assert second_start["call_id"] != first_start["call_id"]
 

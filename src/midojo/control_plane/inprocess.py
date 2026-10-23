@@ -55,9 +55,9 @@ class InProcessAgentClient:
 
     Each method submits one event to the control plane's writer and returns
     once it's committed or refused. The records it makes are the ones the HTTP
-    client makes for the same calls: the disposition becomes the ``blocked``
-    flag it implies, and nothing else. Nothing is resent: a refusal is final,
-    and there is no transport to fail.
+    client makes for the same calls: each start and finish carries its
+    disposition, and a finish the ``blocked`` flag the disposition implies.
+    Nothing is resent: a refusal is final, and there is no transport to fail.
     """
 
     def __init__(self, control: ControlPlane, session_token: str) -> None:
@@ -67,7 +67,7 @@ class InProcessAgentClient:
     # --- Recorder ---
 
     async def start_call(self, *, call_id: str, function: str, args: dict[str, Any], disposition: Disposition) -> None:
-        req = _request(CreateFunctionCallStart, call_id=call_id, function=function, args=args)
+        req = _request(CreateFunctionCallStart, call_id=call_id, function=function, args=args, disposition=disposition)
         try:
             self._control.start_call(self._target, req)
         except RejectedError as e:
@@ -91,6 +91,7 @@ class InProcessAgentClient:
             result=result,
             error=error,
             blocked=disposition in REFUSED,
+            disposition=disposition,
         )
         try:
             self._control.finish_call(self._target, req)

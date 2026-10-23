@@ -195,7 +195,13 @@ async def test_a_retrying_recorder_resends_a_start_like_a_finish():
     await retrying(http).start_call(call_id="call-1", function="get_weather", args={}, disposition="simulated")
 
     assert len(sent) == 3
-    assert json.loads(sent[0]) == {"call_id": "call-1", "function": "get_weather", "args": {}}
+    assert len(set(sent)) == 1
+    assert json.loads(sent[0]) == {
+        "call_id": "call-1",
+        "function": "get_weather",
+        "args": {},
+        "disposition": "simulated",
+    }
 
 
 @pytest.mark.asyncio
@@ -376,6 +382,7 @@ async def test_both_implementations_record_the_same_call(client, backend):
         "result": "r",
         "error": "e",
         "blocked": False,
+        "disposition": "forwarded",
         "complete": True,
         "turn": None,
     }
@@ -456,8 +463,8 @@ async def test_the_deprecated_control_plane_recorder_still_records_and_resends()
     await recorder.start_call(call_id="c1", function="f", args={}, disposition="simulated")
     await recorder.finish_call(call_id="c1", function="f", args={}, result="r", disposition="denied")
 
-    start = {"call_id": "c1", "function": "f", "args": {}}
-    finish = {**start, "result": "r", "error": None, "blocked": True}
+    start = {"call_id": "c1", "function": "f", "args": {}, "disposition": "simulated"}
+    finish = {**start, "result": "r", "error": None, "blocked": True, "disposition": "denied"}
     assert [json.loads(body) for body in sent] == [start, start, finish]
 
 

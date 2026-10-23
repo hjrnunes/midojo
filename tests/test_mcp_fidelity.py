@@ -330,7 +330,7 @@ async def test_a_blocked_tool_the_layer_defines_never_runs(monkeypatch):
 @pytest.mark.parametrize(
     ("disposition", "blocked"), [("forwarded", False), ("simulated", False), ("denied", True), ("blocked", True)]
 )
-async def test_the_http_recorder_sends_blocked_for_a_refused_call(disposition, blocked):
+async def test_the_http_recorder_sends_the_disposition_and_the_blocked_flag_it_implies(disposition, blocked):
     sent = []
 
     def handle(request: httpx.Request) -> httpx.Response:
@@ -343,9 +343,10 @@ async def test_the_http_recorder_sends_blocked_for_a_refused_call(disposition, b
             await recorder.start_call(call_id="c1", function="f", args={}, disposition=disposition)
         await recorder.finish_call(call_id="c1", function="f", args={}, result="r", disposition=disposition)
 
-    # The /agent API has no disposition field: the record carries the blocked flag it implies.
-    finish = {"call_id": "c1", "function": "f", "args": {}, "result": "r", "error": None, "blocked": blocked}
-    assert sent == ([] if blocked else [{"call_id": "c1", "function": "f", "args": {}}]) + [finish]
+    # The finish keeps the blocked flag alongside, for a control plane that predates the disposition field.
+    start = {"call_id": "c1", "function": "f", "args": {}, "disposition": disposition}
+    finish = {**start, "result": "r", "error": None, "blocked": blocked}
+    assert sent == ([] if blocked else [start]) + [finish]
 
 
 @pytest.mark.asyncio
