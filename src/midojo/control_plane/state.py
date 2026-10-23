@@ -138,6 +138,11 @@ class Evaluation:
     # Read-only: copying the evaluation shares it (see Episode.__deepcopy__).
     episode: Episode | None = None
     suite_name: SuiteName | None = None
+    # How many times the environment has changed since the evaluation was created.
+    environment_revision: int = 0
+    # Whether call records carry environment snapshots: the environment observed when each call started and
+    # finished, which shows what changed during the call, not what the call caused.
+    environment_history: bool = False
 
     @property
     def completed(self) -> bool:

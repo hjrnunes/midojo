@@ -11,6 +11,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Response
 
 from ..dependencies import (
+    CHANGE_ENVIRONMENT_RESPONSES,
     RECORD_FUNCTION_CALL_RESPONSES,
     START_FUNCTION_CALL_RESPONSES,
     created_or_replayed,
@@ -18,18 +19,25 @@ from ..dependencies import (
     get_session_token,
     validate_environment,
 )
-from ..models import CreateFunctionCallRecord, CreateFunctionCallStart, FunctionCallResponse
+from ..models import ChangeEnvironmentRequest, CreateFunctionCallRecord, CreateFunctionCallStart, FunctionCallResponse
 from ..service import BySession, ControlPlane
 
 router = APIRouter(prefix="/agent")
 
+# The response header that carries the environment's revision.
+REVISION_HEADER = "X-Midojo-Environment-Revision"
+
 
 @router.get("/environment")
 async def get_environment(
+    response: Response,
     session_token: Annotated[str, Depends(get_session_token)],
     control: Annotated[ControlPlane, Depends(get_control)],
 ) -> dict:
-    return control.evaluation(BySession(session_token)).environment.model_dump()
+    """The session's environment, with its revision in ``X-Midojo-Environment-Revision``."""
+    evaluation = control.evaluation(BySession(session_token))
+    response.headers[REVISION_HEADER] = str(evaluation.environment_revision)
+    return evaluation.environment.model_dump()
 
 
 @router.put("/environment")
@@ -41,6 +49,24 @@ async def put_environment(
     target = BySession(session_token)
     env = validate_environment(control.evaluation(target), body)
     return control.replace_environment(target, env).model_dump()
+
+
+@router.patch("/environment", responses=CHANGE_ENVIRONMENT_RESPONSES)
+async def change_environment(
+    req: ChangeEnvironmentRequest,
+    response: Response,
+    session_token: Annotated[str, Depends(get_session_token)],
+    control: Annotated[ControlPlane, Depends(get_control)],
+) -> dict:
+    """Set top-level fields of the session's environment in one atomic step.
+
+    Returns the changed environment, with its new revision in
+    ``X-Midojo-Environment-Revision``. With ``expected_revision``, the change
+    applies only at that revision: 409 ``revision_conflict`` at any other.
+    """
+    revision, environment = control.change_environment(BySession(session_token), req.set, req.expected_revision)
+    response.headers[REVISION_HEADER] = str(revision)
+    return environment.model_dump()
 
 
 @router.post(

@@ -37,6 +37,8 @@ REJECTION_STATUS: dict[Rejection, int] = {
     Rejection.TURN_PENDING: status.HTTP_409_CONFLICT,
     Rejection.TURN_NOT_STARTED: status.HTTP_404_NOT_FOUND,
     Rejection.TURN_ANSWERED: status.HTTP_409_CONFLICT,
+    Rejection.REVISION_CONFLICT: status.HTTP_409_CONFLICT,
+    Rejection.INVALID_ENVIRONMENT: status.HTTP_422_UNPROCESSABLE_CONTENT,
 }
 
 
@@ -176,6 +178,23 @@ START_FUNCTION_CALL_RESPONSES: dict[int | str, dict] = {
             "args; nothing is appended. `kind` closing or sealed: closure has begun and no new call is admitted, "
             "or the evaluation is sealed and the start isn't an exact replay; the start is recorded as a late "
             "fact."
+        )
+    },
+}
+
+
+CHANGE_ENVIRONMENT_RESPONSES: dict[int | str, dict] = {
+    **_CLOSED_RESPONSES,
+    status.HTTP_409_CONFLICT: {
+        "description": (
+            "`kind` revision_conflict: the environment is no longer at `expected_revision`; nothing is changed. "
+            "`kind` closing or sealed: the closure wait is over; the change is recorded as a late fact."
+        )
+    },
+    status.HTTP_422_UNPROCESSABLE_CONTENT: {
+        "description": (
+            "`kind` invalid_environment: a field is unknown, or the changed environment doesn't fit the suite's "
+            "environment type; nothing is changed. Without a `kind`, the request body itself is malformed."
         )
     },
 }

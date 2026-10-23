@@ -15,3 +15,7 @@ class AppConfig(BaseModel):
     control_token: str | None = Field(default=None, min_length=1)
     # Once an evaluation starts closing, how long calls already admitted may still finish.
     closure_wait_seconds: float = Field(default=DEFAULT_CLOSURE_WAIT_SECONDS, ge=0)
+    # Whether call records carry environment snapshots (FunctionCallRecord.pre_environment and post_environment):
+    # what the environment was when each call started and finished. Off by default: they show what changed during
+    # a call, not what the call caused, and each one copies the whole environment.
+    environment_history: bool = False

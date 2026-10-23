@@ -15,6 +15,7 @@ from midojo.control_plane.lifecycle import (
     Accepted,
     AgentSession,
     BeginClosure,
+    ChangeEnvironment,
     CloseSession,
     EndClosureWait,
     FinishCall,
@@ -110,6 +111,8 @@ ALL_EVENTS = [
     StartTurn("m", AT),
     ReplyTurn(0, "r", AT),
     ReplaceEnvironment(_Env(counter=5), AT),
+    ChangeEnvironment({"counter": 6}, AT),
+    ChangeEnvironment({"counter": 6}, AT, expected_revision=0),
     RecordObservations("openshell", OpenShellObservations(), AT),
     BeginClosure(AT, T + 50),
     EndClosureWait(now=T + 60),
@@ -245,11 +248,55 @@ def test_opening_a_session_replaces_the_previous_one_only_while_open():
     assert (closed.evaluation.session, closed.effects) == (None, (lifecycle.SessionUnbound(TOKEN),))
 
 
+# --- the environment: revisions and atomic changes ---
+
+
+def test_every_environment_change_counts_a_revision():
+    evaluation = _apply(_evaluation(), ReplaceEnvironment(_Env(counter=1), AT), ChangeEnvironment({"counter": 2}, AT))
+    assert (evaluation.environment_revision, evaluation.environment) == (2, _Env(counter=2))
+
+
+def test_a_change_returns_the_new_revision_and_environment():
+    outcome = _accept(_evaluation(), ChangeEnvironment({"counter": 4}, AT, expected_revision=0), AGENT)
+    assert outcome.result == (1, _Env(counter=4))
+    assert outcome.evaluation.environment == _Env(counter=4)
+
+
+def test_a_change_at_a_stale_revision_is_refused_and_changes_nothing():
+    evaluation = _apply(_evaluation(), ChangeEnvironment({"counter": 1}, AT))
+    outcome = transition(evaluation, AGENT, ChangeEnvironment({"counter": 9}, AT, expected_revision=0))
+    assert isinstance(outcome, Rejected) and outcome.kind is Rejection.REVISION_CONFLICT
+    # A rejection leaves nothing behind: the evaluation is still at revision 1, with counter 1.
+    assert (evaluation.environment_revision, evaluation.environment) == (1, _Env(counter=1))
+    after = _accept(evaluation, ChangeEnvironment({}, AT, expected_revision=1), AGENT)
+    assert after.result == (2, _Env(counter=1))
+
+
+def test_a_change_without_a_revision_applies_at_any_revision():
+    evaluation = _apply(_evaluation(), ReplaceEnvironment(_Env(counter=1), AT), ChangeEnvironment({"counter": 5}, AT))
+    assert evaluation.environment == _Env(counter=5)
+
+
+@pytest.mark.parametrize("values", [{"unknown": 1}, {"counter": "not a number"}], ids=["unknown", "invalid"])
+def test_a_change_that_does_not_fit_the_environment_is_refused(values):
+    evaluation = _apply(_evaluation(), ChangeEnvironment({"counter": 1}, AT))
+    outcome = transition(evaluation, AGENT, ChangeEnvironment(values, AT))
+    assert isinstance(outcome, Rejected) and outcome.kind is Rejection.INVALID_ENVIRONMENT
+    # A rejection leaves nothing behind: the next change still applies at the same revision.
+    after = _accept(evaluation, ChangeEnvironment({"counter": 2}, AT, expected_revision=1), AGENT)
+    assert after.result == (2, _Env(counter=2))
+
+
 # --- calls: idempotency, conflicts and unfinished calls ---
 
 
+def test_records_carry_no_environment_snapshots_by_default():
+    evaluation = _apply(_evaluation(environment=_Env(counter=3)), _start("a"), _finish("b"), _finish("a"))
+    assert [(call.pre_environment, call.post_environment) for call in evaluation.function_calls] == [(None, None)] * 2
+
+
 def test_the_first_call_chains_from_the_pre_environment():
-    evaluation = _evaluation(pre_environment=_Env(counter=7), environment=_Env(counter=9))
+    evaluation = _evaluation(pre_environment=_Env(counter=7), environment=_Env(counter=9), environment_history=True)
     outcome = _accept(evaluation, _finish())
     record, created = outcome.result
     assert created is True
@@ -259,7 +306,9 @@ def test_the_first_call_chains_from_the_pre_environment():
 
 
 def test_each_call_chains_from_the_previous_post_environment():
-    evaluation = _apply(_evaluation(), _finish("a"), ReplaceEnvironment(_Env(counter=1), AT), _finish("b"))
+    evaluation = _apply(
+        _evaluation(environment_history=True), _finish("a"), ReplaceEnvironment(_Env(counter=1), AT), _finish("b")
+    )
     first, second = evaluation.function_calls
     assert second.pre_environment == first.post_environment
     assert second.post_environment == _Env(counter=1)
@@ -289,7 +338,12 @@ def test_a_replay_with_another_body_is_a_conflict(change):
 
 
 def test_a_start_is_finished_in_place_keeping_its_order_and_turn():
-    evaluation = _apply(_evaluation(environment=_Env(counter=3)), StartTurn("m", AT), _start("a"), _finish("b"))
+    evaluation = _apply(
+        _evaluation(environment=_Env(counter=3), environment_history=True),
+        StartTurn("m", AT),
+        _start("a"),
+        _finish("b"),
+    )
     started = evaluation.function_calls[0]
     assert (started.complete, started.result, started.post_environment, started.turn) == (False, None, None, 0)
     assert started.pre_environment == _Env(counter=3)
@@ -313,7 +367,9 @@ def test_a_start_and_its_finish_must_name_the_same_call(change):
 
 
 def test_a_record_after_an_unfinished_call_starts_from_the_live_environment():
-    evaluation = _apply(_evaluation(), _start("a"), ReplaceEnvironment(_Env(counter=4), AT), _finish("b"))
+    evaluation = _apply(
+        _evaluation(environment_history=True), _start("a"), ReplaceEnvironment(_Env(counter=4), AT), _finish("b")
+    )
     a, b = evaluation.function_calls
     assert (a.complete, a.pre_environment, b.pre_environment) == (False, _Env(counter=0), _Env(counter=4))
 
@@ -367,12 +423,17 @@ def test_closing_admits_finishes_of_admitted_calls_and_no_new_call():
         assert [fact.event for fact in late.evaluation.late_facts] == [name]
     # The environment stays writable for calls finishing during the wait.
     assert _apply(closing, ReplaceEnvironment(_Env(counter=2), AT), authority=AGENT).environment == _Env(counter=2)
+    assert _apply(closing, ChangeEnvironment({"counter": 3}, AT), authority=AGENT).environment == _Env(counter=3)
 
 
 @pytest.mark.parametrize(
     ("event", "name"),
-    [(_finish("a"), "finish_call"), (ReplaceEnvironment(_Env(counter=2), AT), "replace_environment")],
-    ids=["finish", "environment"],
+    [
+        (_finish("a"), "finish_call"),
+        (ReplaceEnvironment(_Env(counter=2), AT), "replace_environment"),
+        (ChangeEnvironment({"counter": 2}, AT), "change_environment"),
+    ],
+    ids=["finish", "environment", "change"],
 )
 def test_a_write_after_the_closure_deadline_is_late_and_moves_closure_on(event, name):
     """The stage may still say closing (no one ended the wait), but the event arrived after the deadline."""
@@ -403,7 +464,12 @@ def test_any_event_after_the_closure_deadline_moves_closure_on():
 def test_collecting_takes_observations_and_no_call_or_environment():
     collecting = _collecting(_apply(_evaluation(), _start("a")))
     assert "openshell" in _apply(collecting, RecordObservations("openshell", OpenShellObservations(), AT)).observations
-    for event in [_finish("a"), ReplaceEnvironment(_Env(counter=2), AT), StartTurn("m", AT)]:
+    for event in [
+        _finish("a"),
+        ReplaceEnvironment(_Env(counter=2), AT),
+        ChangeEnvironment({"counter": 2}, AT),
+        StartTurn("m", AT),
+    ]:
         late = transition(collecting, HOST, event)
         assert isinstance(late, Late) and late.rejected.kind is Rejection.CLOSING
 
@@ -431,6 +497,7 @@ def test_the_seal_fixes_the_snapshot_and_unfinished_calls_stay_unfinished():
         (_start("new"), Rejection.SEALED, ("function_calls",)),
         (_finish("c1"), Rejection.SEALED, ("function_calls",)),
         (ReplaceEnvironment(_Env(counter=9), AT), Rejection.SEALED, ("environment",)),
+        (ChangeEnvironment({"counter": 9}, AT), Rejection.SEALED, ("environment",)),
         (
             RecordObservations("openshell", OpenShellObservations(), AT),
             Rejection.SEALED,

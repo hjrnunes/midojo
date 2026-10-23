@@ -36,6 +36,12 @@ def _create_evaluation(client: TestClient, run_id: str, **kwargs) -> dict:
     return data
 
 
+@pytest.fixture
+def history_client(suite) -> TestClient:
+    """A client for a control plane whose call records keep environment history."""
+    return TestClient(create_app({"weather": suite}, config=AppConfig(environment_history=True)))
+
+
 def test_create_run(client):
     run_id = _create_run(client)
     assert len(run_id) > 0
@@ -184,18 +190,31 @@ def test_record_function_call_via_post(client):
     assert resp.status_code == 200
     assert len(resp.json()) == 1
 
-    # ...but they are still captured server-side for grading.
+    # ...and by default the record carries none: grading reads the evaluation's own environments.
+    recorded = _evaluation(client, run_id, eval_id).function_calls[0]
+    assert (recorded.pre_environment, recorded.post_environment) == (None, None)
+
+
+def test_record_function_call_keeps_environment_history_when_asked(history_client):
+    client = history_client
+    run_id = _create_run(client)
+    eval_id = _create_evaluation(client, run_id)["id"]
+
+    resp = client.post("/agent/function-calls", json={"function": "get_weather", "args": {}, "result": "sunny"})
+
+    assert "pre_environment" not in resp.json()
     recorded = _evaluation(client, run_id, eval_id).function_calls[0]
     assert recorded.pre_environment is not None
     assert recorded.post_environment is not None
 
 
-def test_record_function_call_pre_env_chain(client):
+def test_record_function_call_pre_env_chain(history_client):
     """pre_environment of each call should match post_environment of the previous call.
 
     The chaining is an internal invariant (env snapshots aren't exposed over the
     API), so it's asserted against the recorded server-side state.
     """
+    client = history_client
     run_id = _create_run(client)
     eval_data = _create_evaluation(client, run_id)
     eval_id = eval_data["id"]
@@ -222,6 +241,7 @@ def test_record_function_call_pre_env_chain(client):
     )
 
     calls = _evaluation(client, run_id, eval_id).function_calls
+    assert calls[0].pre_environment is not None
     assert calls[0].pre_environment.model_dump() == initial_env
     assert calls[1].pre_environment == calls[0].post_environment
     assert calls[1].post_environment is not None
@@ -247,6 +267,65 @@ def test_agent_environment_put(client):
 
     fresh = client.get(f"/runs/{run_id}/evaluations/{eval_id}/environment").json()
     assert fresh["weather_alerts"] == [{"city": "Boston", "message": "blizzard"}]
+
+
+def test_agent_environment_carries_its_revision(client):
+    run_id = _create_run(client)
+    eval_id = _create_evaluation(client, run_id)["id"]
+
+    assert client.get("/agent/environment").headers["X-Midojo-Environment-Revision"] == "0"
+    env = client.get(f"/runs/{run_id}/evaluations/{eval_id}/environment").json()
+    client.put(f"/runs/{run_id}/evaluations/{eval_id}/environment", json=env)
+    assert client.get("/agent/environment").headers["X-Midojo-Environment-Revision"] == "1"
+
+
+def test_agent_environment_patch_sets_fields_atomically_at_a_revision(client):
+    run_id = _create_run(client)
+    eval_id = _create_evaluation(client, run_id)["id"]
+    alert = [{"city": "Boston", "message": "blizzard"}]
+
+    changed = client.patch("/agent/environment", json={"set": {"weather_alerts": alert}, "expected_revision": 0})
+    assert changed.status_code == 200
+    assert changed.headers["X-Midojo-Environment-Revision"] == "1"
+    assert changed.json()["weather_alerts"] == alert
+    assert changed.json()["cities"] == client.get("/agent/environment").json()["cities"]
+
+    stale = client.patch("/agent/environment", json={"set": {"weather_alerts": []}, "expected_revision": 0})
+    assert stale.status_code == 409
+    assert stale.json() == {"detail": stale.json()["detail"], "kind": "revision_conflict", "late_fact": False}
+    unconditional = client.patch("/agent/environment", json={"set": {"weather_alerts": []}})
+    assert (unconditional.status_code, unconditional.headers["X-Midojo-Environment-Revision"]) == (200, "2")
+    fresh = client.get(f"/runs/{run_id}/evaluations/{eval_id}/environment").json()
+    assert fresh["weather_alerts"] == []
+
+
+@pytest.mark.parametrize("values", [{"no_such_field": 1}, {"weather_alerts": "not a list"}])
+def test_agent_environment_patch_refuses_an_environment_the_suite_does_not_allow(client, values):
+    run_id = _create_run(client)
+    eval_id = _create_evaluation(client, run_id)["id"]
+    before = client.get("/agent/environment").json()
+
+    response = client.patch("/agent/environment", json={"set": values})
+
+    assert (response.status_code, response.json()["kind"]) == (422, "invalid_environment")
+    assert client.get(f"/runs/{run_id}/evaluations/{eval_id}/environment").json() == before
+    assert client.get("/agent/environment").headers["X-Midojo-Environment-Revision"] == "0"
+
+
+def test_agent_environment_patch_after_the_seal_is_a_late_fact(client):
+    run_id = _create_run(client)
+    eval_id = _create_evaluation(client, run_id)["id"]
+    token = client.headers["Authorization"]
+    del client.headers["Authorization"]
+    client.post(f"/runs/{run_id}/evaluations/{eval_id}/complete", json={"agent_output": "done"})
+
+    response = client.patch(
+        "/agent/environment", json={"set": {"weather_alerts": []}}, headers={"Authorization": token}
+    )
+
+    assert (response.status_code, response.json()["late_fact"]) == (401, True)
+    [fact] = client.get(f"/runs/{run_id}/evaluations/{eval_id}").json()["late_facts"]
+    assert (fact["event"], fact["evidence"]) == ("change_environment", ["environment"])
 
 
 def test_an_evaluation_response_carries_its_environments(client):
@@ -566,7 +645,8 @@ _FINISH = {**_START, "result": "ok"}
 
 
 @pytest.mark.parametrize("route", _RECORD_ROUTES)
-def test_start_then_finish_leaves_one_complete_record(client, route):
+def test_start_then_finish_leaves_one_complete_record(history_client, route):
+    client = history_client
     run_id = _create_run(client)
     eval_id = _create_evaluation(client, run_id)["id"]
     env = client.get(_env_url(route, run_id, eval_id)).json()
@@ -584,6 +664,7 @@ def test_start_then_finish_leaves_one_complete_record(client, route):
     assert finished.json() == {**started.json(), "result": "ok", "complete": True}
     [call] = _evaluation(client, run_id, eval_id).function_calls
     assert call.complete is True
+    assert call.pre_environment is not None
     assert call.pre_environment.model_dump()["weather_alerts"] == [{"city": "Boston", "message": "a"}]
     assert call.post_environment is not None
     assert call.post_environment.model_dump()["weather_alerts"] == [{"city": "Paris", "message": "b"}]
@@ -697,8 +778,9 @@ def test_records_stay_in_start_order(client, route):
 
 
 @pytest.mark.parametrize("route", _RECORD_ROUTES)
-def test_record_after_an_unfinished_call_does_not_take_its_changes(client, route):
+def test_record_after_an_unfinished_call_does_not_take_its_changes(history_client, route):
     """A's changes since its start stay out of B's record: B's pre-env is the live environment."""
+    client = history_client
     run_id = _create_run(client)
     eval_id = _create_evaluation(client, run_id)["id"]
     env = client.get(_env_url(route, run_id, eval_id)).json()
@@ -711,6 +793,7 @@ def test_record_after_an_unfinished_call_does_not_take_its_changes(client, route
 
     a, b = _evaluation(client, run_id, eval_id).function_calls
     assert (a.complete, b.complete) == (False, True)
+    assert a.pre_environment is not None and b.pre_environment is not None
     assert a.pre_environment.model_dump()["weather_alerts"] == env["weather_alerts"]
     assert b.pre_environment.model_dump()["weather_alerts"] == alert
     assert b.post_environment == b.pre_environment
@@ -746,7 +829,8 @@ def test_start_requires_a_call_id(client, route, body):
     assert _evaluation(client, run_id, eval_id).function_calls == ()
 
 
-def test_record_without_start_is_complete(client):
+def test_record_without_start_is_complete(history_client):
+    client = history_client
     run_id = _create_run(client)
     eval_id = _create_evaluation(client, run_id)["id"]
 
