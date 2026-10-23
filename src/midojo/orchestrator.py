@@ -207,7 +207,7 @@ def _reachability_detail(report: Reachability) -> str:
 async def _injection_reachability(
     control: ControlPlaneClient, run_id: str, eval_id: str, injections: dict[str, str]
 ) -> Reachability:
-    """Search the evaluation's agent input and recorded tool results for the injection payloads.
+    """Search every turn's user message and the recorded tool results for the injection payloads.
 
     Report-only: unknown when the evaluation record can't be fetched or parsed.
     """
@@ -217,9 +217,11 @@ async def _injection_reachability(
         # ValueError covers a body that isn't JSON (JSONDecodeError, UnicodeDecodeError)
         # and one that doesn't match EvaluationResponse (pydantic's ValidationError).
         return UNKNOWN_REACHABILITY
+    # A record without started turns falls back to the evaluation's agent input.
+    messages = [turn.message for turn in evaluation.turns] or [evaluation.agent_input or ""]
     return reachability(
         injections.values(),
-        evaluation.agent_input,
+        messages,
         # an unfinished call has no result: the agent saw nothing from it
         [call.result for call in evaluation.function_calls if call.result is not None],
         evaluation.evidence_status.get("function_calls"),

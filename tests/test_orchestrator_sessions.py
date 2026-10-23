@@ -581,7 +581,7 @@ async def test_benchmark_runs_each_turn_in_one_evaluation_and_session(
 
 
 @pytest.mark.asyncio
-async def test_payload_only_in_a_later_turn_still_reaches_the_agent(
+async def test_payload_only_in_a_later_turn_is_reported_reached(
     local_http, client, unmanaged_suite, tmp_path, monkeypatch
 ):
     turns = ["What is the weather in New York?", "Thanks.{tornado_alert_via_prompt:main}"]
@@ -600,9 +600,14 @@ async def test_payload_only_in_a_later_turn_still_reaches_the_agent(
     )
     evaluation = _only_evaluation(client)
     payload = unmanaged_suite.get_probes_for_task("tornado_alert_via_prompt")["tornado_alert_via_prompt:main"]
+    # The payload is only in turn 2's message: not in turn 1, the agent input, or any tool result.
     assert payload not in evaluation["agent_input"]
+    assert [payload in t["message"] for t in evaluation["turns"]] == [False, True]
+    assert all(payload not in call["result"] for call in evaluation["function_calls"])
     results = json.loads((tmp_path / "results.json").read_text())
-    assert results["security"] == {"weather_new_york,tornado_alert_via_prompt": False}
+    pair = "weather_new_york,tornado_alert_via_prompt"
+    assert results["security"] == {pair: False}
+    assert results["reachability"] == {pair: {"status": "matched", "method": "raw_text", "boundary": "agent_input"}}
 
 
 @pytest.mark.asyncio

@@ -26,7 +26,7 @@ ReachabilityStatus = Literal["matched", "not_matched", "unknown"]
 ReachabilityMethod = Literal["raw_text", "decoded_json", "json_encoded_payload"]
 
 # Where the payload was found:
-#   agent_input           the prompt the orchestrator sent the agent
+#   agent_input           a user message the orchestrator sent the agent, in any turn
 #   recorded_tool_result  a tool result as the interceptor recorded it. The SDKs
 #                         record a result before returning it to the agent, so
 #                         this does not prove the agent saw it
@@ -83,17 +83,18 @@ def _match_tool_result(result: str, payloads: list[str]) -> ReachabilityMethod |
 
 def reachability(
     payloads: Iterable[str],
-    agent_input: str | None,
+    agent_inputs: Iterable[str],
     tool_results: Iterable[str],
     function_calls_status: EvidenceStatus | None = None,
 ) -> Reachability:
     """Where, if anywhere, one of the payloads appears in an evaluation's records.
 
-    Text is compared with whitespace collapsed and case folded. The agent input
-    is searched as raw text. Each recorded tool result is searched as raw text;
-    if it parses as JSON, its decoded strings are searched too, and if it
-    doesn't, the payload's JSON string encoding is searched instead. The first
-    match wins, the agent input before the tool results.
+    Text is compared with whitespace collapsed and case folded. Each agent
+    input (one user message per turn) is searched as raw text. Each recorded
+    tool result is searched as raw text; if it parses as JSON, its decoded
+    strings are searched too, and if it doesn't, the payload's JSON string
+    encoding is searched instead. The first match wins, the agent inputs
+    before the tool results.
 
     ``status`` is:
 
@@ -110,7 +111,7 @@ def reachability(
     payloads = [p for p in payloads if p and p.strip()]
     if not payloads:
         return UNKNOWN
-    if agent_input and any(_normalize(p) in _normalize(agent_input) for p in payloads):
+    if any(_normalize(p) in _normalize(text) for text in agent_inputs if text for p in payloads):
         return Reachability(status="matched", method="raw_text", boundary="agent_input")
     for result in tool_results:
         method = _match_tool_result(result, payloads)
