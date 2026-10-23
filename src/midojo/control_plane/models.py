@@ -207,9 +207,12 @@ class GradeResponse(BaseModel):
     evidence_status: dict[str, EvidenceStatus] = Field(default_factory=dict, description=_EVIDENCE_STATUS_DESCRIPTION)
 
 
+_TASK_ID_DESCRIPTION = "The suite's user task the episode was compiled from; None for a direct caller's episode."
+
+
 class EvaluationSummary(BaseModel):
     id: str
-    user_task_id: str
+    user_task_id: str | None = Field(description=_TASK_ID_DESCRIPTION)
     injection_task_id: str | None
     completed: bool
     stage: str = Field(default="open", description=_STAGE_DESCRIPTION)
@@ -228,7 +231,7 @@ class RunResponse(BaseModel):
 
 class EvaluationResponse(BaseModel):
     id: str
-    user_task_id: str
+    user_task_id: str | None = Field(description=_TASK_ID_DESCRIPTION)
     injection_task_id: str | None
     completed: bool
     stage: str = Field(default="open", description=_STAGE_DESCRIPTION)

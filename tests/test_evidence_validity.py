@@ -119,7 +119,7 @@ def fast_clock(monkeypatch):
 
 
 def _runtime(suite: YAMLTaskSuite, sandbox: _Sandbox) -> OpenShellRuntime:
-    runtime = suite.runtime
+    runtime = suite.new_runtime()
     assert isinstance(runtime, OpenShellRuntime)
     runtime._client = sandbox
     runtime._workspace_name = "midojo-evide-abc123"

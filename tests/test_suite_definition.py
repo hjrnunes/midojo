@@ -153,7 +153,7 @@ def test_openshell_predicates_require_the_openshell_runtime(tmp_path, raw):
     with pytest.raises(ValueError, match="'inject' uses OpenShell predicates"):
         load(tmp_path, raw)
     raw["agent_runtime"] = {"image": "pi"}
-    assert isinstance(load(tmp_path, raw).runtime, OpenShellRuntime)
+    assert isinstance(load(tmp_path, raw).new_runtime(), OpenShellRuntime)
 
 
 @pytest.mark.parametrize(
@@ -200,14 +200,14 @@ def test_prompt_task_is_a_single_turn(tmp_path, raw):
 @pytest.mark.parametrize("value", [300, 0.5])
 def test_openshell_timeout_seconds_reaches_the_runtime(tmp_path, raw, value):
     raw["agent_runtime"] = {"image": "pi", "timeout_seconds": value}
-    runtime = load(tmp_path, raw).runtime
+    runtime = load(tmp_path, raw).new_runtime()
     assert isinstance(runtime, OpenShellRuntime)
     assert runtime.agent_timeout_seconds == value
 
 
 def test_openshell_timeout_seconds_defaults_to_300(tmp_path, raw):
     raw["agent_runtime"] = {"image": "pi"}
-    runtime = load(tmp_path, raw).runtime
+    runtime = load(tmp_path, raw).new_runtime()
     assert isinstance(runtime, OpenShellRuntime)
     assert runtime.agent_timeout_seconds == 300
 

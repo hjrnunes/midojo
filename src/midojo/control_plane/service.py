@@ -21,6 +21,12 @@ keeps a copy of the next value, and every read returns a copy.
 Outcomes are domain values: a refusal raises :class:`RejectedError` with its
 :class:`Rejection` kind, and only the HTTP edge (``dependencies.py``) turns a
 kind into a status code.
+
+An evaluation is one run of an :class:`~midojo.episode.Episode`.
+:meth:`ControlPlane.open_evaluation` creates one from any episode, with no
+suite or run registered (``run_id`` None); :meth:`ControlPlane.create_evaluation`
+compiles a registered suite's task pair into an episode and opens it in a run.
+Grading reads the episode's checks.
 """
 
 from __future__ import annotations
@@ -36,6 +42,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from midojo.episode import Episode, UnknownTaskError
 from midojo.types import Environment, FunctionCallRecord, SuiteName
 from midojo.yaml_task_suite import YAMLTaskSuite
 
@@ -53,9 +60,9 @@ CLOSURE_POLL_SECONDS = 0.05
 
 @dataclass(frozen=True)
 class ById:
-    """An evaluation addressed by its IDs, by the host (authorized at the edge)."""
+    """An evaluation addressed by its IDs, by the host (authorized at the edge). ``run_id`` is None outside a run."""
 
-    run_id: str
+    run_id: str | None
     eval_id: str
 
 
@@ -67,6 +74,18 @@ class BySession:
 
 
 Target = ById | BySession
+
+
+@dataclass(frozen=True)
+class OpenedEvaluation:
+    """A new evaluation and its open session. This is the only place the session token appears."""
+
+    id: str
+    run_id: str | None
+    # The episode's turns, or None when the host drives the conversation.
+    turns: tuple[str, ...] | None
+    session_token: str
+    session_expires_at: str
 
 
 def _now() -> str:
@@ -96,14 +115,14 @@ class ControlPlane:
 
     # --- the single writer ---
 
-    def _resolve(self, target: Target) -> tuple[str, str, lifecycle.Authority]:
+    def _resolve(self, target: Target) -> tuple[str | None, str, lifecycle.Authority]:
         if isinstance(target, BySession):
             hashed = token_hash(target.token)
             bound = self.store.session_target(hashed)
             if bound is None:
                 raise _reject(Rejection.INVALID_SESSION, lifecycle.INVALID_SESSION_DETAIL)
             return bound[0], bound[1], AgentSession(hashed, time.time())
-        if self.store.get_run(target.run_id) is None:
+        if target.run_id is not None and self.store.get_run(target.run_id) is None:
             raise _reject(Rejection.UNKNOWN_RUN, f"Unknown run: {target.run_id}")
         return target.run_id, target.eval_id, HOST
 
@@ -136,7 +155,7 @@ class ControlPlane:
         # The writer kept its own copy of the evaluation, so the result shares nothing with what's stored.
         return outcome.result
 
-    def _apply_effects(self, outcome: Accepted, run_id: str, eval_id: str) -> None:
+    def _apply_effects(self, outcome: Accepted, run_id: str | None, eval_id: str) -> None:
         for effect in outcome.effects:
             if isinstance(effect, lifecycle.SessionBound):
                 self.store.bind_session(effect.token_hash, run_id, eval_id)
@@ -177,46 +196,65 @@ class ControlPlane:
         injection_task_id: str | None = None,
         injections: Mapping[str, str] | None = None,
     ) -> CreateEvaluationResponse:
-        """Create an evaluation and open its session. The response is the only place the token appears."""
-        injections = detached(dict(injections or {}))
-        suite = self.suite(run_id)
-        if user_task_id not in suite.user_tasks:
-            raise _reject(Rejection.UNKNOWN_TASK, f"Unknown user task: {user_task_id}")
-        if injection_task_id is not None and injection_task_id not in suite.injection_tasks:
-            raise _reject(Rejection.UNKNOWN_TASK, f"Unknown injection task: {injection_task_id}")
-        environment = suite.provision_environment(injections)
-        turns = suite.inject_user_task_turns(user_task_id, injections)
+        """Compile the run's suite pair into an episode and open it. The response is the only place the token appears."""
+        try:
+            episode = self.suite(run_id).episode(user_task_id, injection_task_id, detached(dict(injections or {})))
+        except UnknownTaskError as exc:
+            raise _reject(Rejection.UNKNOWN_TASK, exc.detail) from None
+        opened = self.open_evaluation(episode, run_id=run_id)
+        assert opened.turns is not None  # A suite's episode always has its user task's turns.
+        return CreateEvaluationResponse(
+            id=opened.id,
+            prompt=opened.turns[0],
+            turns=list(opened.turns),
+            session_token=opened.session_token,
+            session_expires_at=opened.session_expires_at,
+        )
+
+    def open_evaluation(self, episode: Episode, *, run_id: str | None = None) -> OpenedEvaluation:
+        """Create an evaluation of ``episode`` and open its session.
+
+        Needs no registered suite or run: without ``run_id``, the evaluation is
+        outside any run, and addressed as ``ById(None, eval_id)`` (or by its
+        session). With one, the run must exist. The episode's suite and task IDs
+        are kept as provenance; grading uses its checks.
+        """
+        run = self.run(run_id) if run_id is not None else None
+        environment = episode.provision_environment()
+        turns = episode.turns
         evaluation = Evaluation(
             id=self.store.new_evaluation_id(),
             run_id=run_id,
-            user_task_id=user_task_id,
-            injection_task_id=injection_task_id,
+            user_task_id=episode.user_task_id,
+            injection_task_id=episode.injection_task_id,
             pre_environment=environment.model_copy(deep=True),
             environment=environment,
-            active_injections=injections,
-            agent_input=turns[0],
+            active_injections=dict(episode.injections),
+            agent_input=turns[0] if turns else None,
+            episode=episode,
+            suite_name=episode.suite_name if episode.suite_name is not None else (run.suite_name if run else None),
         )
         self.store.insert_evaluation(evaluation)
         token = secrets.token_urlsafe(32)
         expires = time.time() + self.config.session_ttl_seconds
         self.apply(ById(run_id, evaluation.id), lifecycle.OpenSession(token_hash(token), expires))
-        return CreateEvaluationResponse(
+        return OpenedEvaluation(
             id=evaluation.id,
-            prompt=turns[0],
-            turns=turns,
+            run_id=run_id,
+            turns=None if turns is None else tuple(turns),
             session_token=token,
             session_expires_at=datetime.fromtimestamp(expires, UTC).isoformat(),
         )
 
-    def close_session(self, run_id: str, eval_id: str) -> None:
+    def close_session(self, run_id: str | None, eval_id: str) -> None:
         self.apply(ById(run_id, eval_id), lifecycle.CloseSession())
 
     # --- turns, calls, environment and observations ---
 
-    def start_turn(self, run_id: str, eval_id: str, message: str) -> Turn:
+    def start_turn(self, run_id: str | None, eval_id: str, message: str) -> Turn:
         return self.apply(ById(run_id, eval_id), lifecycle.StartTurn(message, _now()))
 
-    def record_turn_reply(self, run_id: str, eval_id: str, index: int, reply: str) -> Turn:
+    def record_turn_reply(self, run_id: str | None, eval_id: str, index: int, reply: str) -> Turn:
         return self.apply(ById(run_id, eval_id), lifecycle.ReplyTurn(index, reply, _now()))
 
     def start_call(self, target: Target, req: CreateFunctionCallStart) -> tuple[FunctionCallRecord, bool]:
@@ -228,16 +266,18 @@ class ControlPlane:
         return self.apply(target, lifecycle.FinishCall(req, _now()))
 
     def replace_environment(self, target: Target, environment: Environment) -> Environment:
-        """Install ``environment``, already validated against the evaluation's suite."""
+        """Install ``environment``, already validated against the evaluation's episode (``environment_type``)."""
         return self.apply(target, lifecycle.ReplaceEnvironment(environment, _now()))
 
-    def record_observations(self, run_id: str, eval_id: str, source: str, observed: BaseModel) -> dict[str, BaseModel]:
+    def record_observations(
+        self, run_id: str | None, eval_id: str, source: str, observed: BaseModel
+    ) -> dict[str, BaseModel]:
         """Record ``source``'s observations, already validated against the model registered for it."""
         return dict(self.apply(ById(run_id, eval_id), lifecycle.RecordObservations(source, observed, _now())))
 
     # --- staged closure ---
 
-    async def close(self, run_id: str, eval_id: str) -> Evaluation:
+    async def close(self, run_id: str | None, eval_id: str) -> Evaluation:
         """Stop admitting new calls, and wait for admitted calls to finish, up to the closure wait.
 
         Returns once the evaluation is collecting its final observations (or
@@ -257,7 +297,7 @@ class ControlPlane:
             remaining = (evaluation.closure_deadline or 0.0) - time.time()
             await asyncio.sleep(max(0.0, min(CLOSURE_POLL_SECONDS, remaining)))
 
-    async def complete(self, run_id: str, eval_id: str, agent_output: str) -> Snapshot:
+    async def complete(self, run_id: str | None, eval_id: str, agent_output: str) -> Snapshot:
         """Seal the evaluation with the agent's final output, closing it first if needed.
 
         Completing a sealed evaluation again with the same output returns its
@@ -269,8 +309,8 @@ class ControlPlane:
 
     # --- grading ---
 
-    def grade(self, run_id: str, eval_id: str) -> GradeResponse:
-        """Grade the sealed snapshot, once. The grade is computed with no lock held, and never replaced.
+    def grade(self, run_id: str | None, eval_id: str) -> GradeResponse:
+        """Grade the sealed snapshot with the episode's checks, once: with no lock held, and never replaced.
 
         The response's evidence status also marks every key a late fact has
         marked, including facts that arrived after the grade.
@@ -280,7 +320,9 @@ class ControlPlane:
         if evaluation.grade is None:
             if evaluation.snapshot is None:
                 raise _reject(Rejection.NOT_SEALED, "Evaluation not completed. Call complete first.")
-            graded = grade_snapshot(self.suite(run_id), evaluation.snapshot)
+            if evaluation.episode is None:
+                raise RuntimeError(f"Evaluation {eval_id} has no episode to grade it with")
+            graded = grade_snapshot(evaluation.episode, evaluation.snapshot)
             evaluation = self.apply(target, lifecycle.RecordGrade(graded))
         assert evaluation.grade is not None
         return evaluation.grade.model_copy(update={"evidence_status": evaluation.evidence_status})

@@ -15,7 +15,6 @@ from ..dependencies import (
     get_control,
     get_evaluation_by_id,
     get_run,
-    get_run_suite,
     get_suites,
     resolve_suite,
     validate_environment,
@@ -187,10 +186,9 @@ async def get_environment(evaluation: Annotated[Evaluation, Depends(get_evaluati
 async def update_environment(
     body: dict,
     evaluation: Annotated[Evaluation, Depends(get_evaluation_by_id)],
-    suite: Annotated[YAMLTaskSuite, Depends(get_run_suite)],
     control: Annotated[ControlPlane, Depends(get_control)],
 ) -> dict:
-    env = validate_environment(suite, body)
+    env = validate_environment(evaluation, body)
     return control.replace_environment(ById(evaluation.run_id, evaluation.id), env).model_dump()
 
 

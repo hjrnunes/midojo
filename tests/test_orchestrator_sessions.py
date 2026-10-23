@@ -60,7 +60,7 @@ async def local_http(app):
 @pytest.fixture
 def unmanaged_suite(suite, monkeypatch):
     """The weather suite, with an agent MiDojo doesn't manage."""
-    monkeypatch.setattr(suite, "runtime", UnmanagedRuntime())
+    monkeypatch.setattr(suite, "new_runtime", UnmanagedRuntime)
     return suite
 
 
@@ -87,12 +87,12 @@ class ReportingAgent(AgentClient):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fail", [False, True])
-async def test_runner_revokes_sessions_on_success_and_agent_failure(local_http, client, fail):
+async def test_runner_revokes_sessions_on_success_and_agent_failure(local_http, client, suite, fail):
     run = client.post("/runs", json={"suite_name": "weather"}).json()
     agent = ReportingAgent(local_http, fail)
     control = ControlPlaneClient("http://control", http=local_http)
     try:
-        task = run_task(control, agent, run["id"], "weather_new_york", None, {}, runtime=UnmanagedRuntime())
+        task = run_task(control, agent, run["id"], suite.episode("weather_new_york"), runtime=UnmanagedRuntime())
         if fail:
             with pytest.raises(RuntimeError, match="Agent failed"):
                 await task
@@ -111,7 +111,7 @@ async def test_runner_revokes_sessions_on_success_and_agent_failure(local_http, 
 
 
 @pytest.mark.asyncio
-async def test_partial_sandbox_setup_is_cleaned_and_session_revoked(local_http, client):
+async def test_partial_sandbox_setup_is_cleaned_and_session_revoked(local_http, client, suite):
     class Runtime(OpenShellRuntime):
         cleaned = False
         token = ""
@@ -132,7 +132,7 @@ async def test_partial_sandbox_setup_is_cleaned_and_session_revoked(local_http, 
     try:
         with pytest.raises(RuntimeError, match="Seed failed"):
             await run_task(
-                control, ReportingAgent(local_http), run["id"], "weather_new_york", None, {}, runtime=runtime
+                control, ReportingAgent(local_http), run["id"], suite.episode("weather_new_york"), runtime=runtime
             )
     finally:
         await control.aclose()
@@ -141,7 +141,7 @@ async def test_partial_sandbox_setup_is_cleaned_and_session_revoked(local_http, 
 
 
 @pytest.mark.asyncio
-async def test_runner_records_sandbox_observations(local_http, client):
+async def test_runner_records_sandbox_observations(local_http, client, suite):
     observed = OpenShellObservations(network_calls_blocked=["evil.com:443"])
 
     class Runtime(OpenShellRuntime):
@@ -161,9 +161,7 @@ async def test_runner_records_sandbox_observations(local_http, client):
             control,
             ReportingAgent(local_http),
             run["id"],
-            "weather_new_york",
-            None,
-            {},
+            suite.episode("weather_new_york"),
             runtime=Runtime("test", image="base"),
         )
     finally:
@@ -173,7 +171,7 @@ async def test_runner_records_sandbox_observations(local_http, client):
 
 
 @pytest.mark.asyncio
-async def test_runner_closes_before_collecting_the_final_observations(local_http, client):
+async def test_runner_closes_before_collecting_the_final_observations(local_http, client, suite):
     """Calls already admitted may finish, then the runtime observes, then the evaluation is sealed and graded."""
     stages: dict[str, str] = {}
 
@@ -195,9 +193,7 @@ async def test_runner_closes_before_collecting_the_final_observations(local_http
             control,
             ReportingAgent(local_http),
             run["id"],
-            "weather_new_york",
-            None,
-            {},
+            suite.episode("weather_new_york"),
             runtime=Runtime("test", image="base"),
         )
     finally:
@@ -306,7 +302,7 @@ async def test_benchmark_reports_invalid_grades_and_denominators(local_http, cli
             response.raise_for_status()
             return "San Francisco is 58°F and foggy"
 
-    monkeypatch.setattr(suite, "runtime", Runtime("weather", image="base"))
+    monkeypatch.setattr(suite, "new_runtime", lambda: Runtime("weather", image="base"))
     await run_benchmark(
         control_url="http://control",
         agent_client=ItineraryAgent(),
@@ -732,7 +728,7 @@ def openshell_suite(suite, gateway, client, monkeypatch):
     """The weather suite on a faked gateway, whose agent command reports one call per run."""
     runtime = OpenShellRuntime("weather", image="base", agent_command=["agent", "-p"])
     monkeypatch.setattr(runtime, "_sync_ocsf_messages", lambda: ([], True))
-    monkeypatch.setattr(suite, "runtime", runtime)
+    monkeypatch.setattr(suite, "new_runtime", lambda: runtime)
     # runs: (sandbox, command, exec options) per agent run; failing_run: 1-based run to exit non-zero
     fake = SimpleNamespace(suite=suite, runtime=runtime, runs=[], failing_run=None)
 

@@ -19,6 +19,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from midojo.episode import Episode
 from midojo.observations import EvidenceStatus
 from midojo.types import Environment, FunctionCallRecord, SuiteName
 
@@ -90,7 +91,7 @@ class Snapshot:
     fact recorded before the seal marked ``incomplete``.
     """
 
-    user_task_id: str
+    user_task_id: str | None
     injection_task_id: str | None
     agent_output: str
     pre_environment: Environment
@@ -104,11 +105,16 @@ class Snapshot:
 
 @dataclass(frozen=True)
 class Evaluation:
-    """A single task execution within a Run: its records while it's open, then its sealed snapshot and grade."""
+    """One run of an episode: its records while it's open, then its sealed snapshot and grade.
+
+    ``run_id``, ``suite_name`` and the task IDs are provenance: set when the
+    episode came from a suite pair in a run, None for a direct caller's episode.
+    ``episode`` is what was run; grading reads its checks.
+    """
 
     id: str
-    run_id: str
-    user_task_id: str
+    run_id: str | None
+    user_task_id: str | None
     injection_task_id: str | None
     pre_environment: Environment
     environment: Environment
@@ -129,6 +135,9 @@ class Evaluation:
     late_facts: tuple[LateFact, ...] = ()
     # Set once, from the snapshot, and never replaced.
     grade: GradeResponse | None = None
+    # Read-only: copying the evaluation shares it (see Episode.__deepcopy__).
+    episode: Episode | None = None
+    suite_name: SuiteName | None = None
 
     @property
     def completed(self) -> bool:
@@ -137,6 +146,13 @@ class Evaluation:
     @property
     def graded(self) -> bool:
         return self.grade is not None
+
+    @property
+    def environment_type(self) -> type[Environment]:
+        """The model a replacement environment is validated against: the episode's."""
+        if self.episode is not None and self.episode.environment_type is not None:
+            return self.episode.environment_type
+        return type(self.environment)
 
     @property
     def agent_output(self) -> str | None:
