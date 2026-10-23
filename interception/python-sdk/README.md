@@ -1,6 +1,6 @@
 # midojo-sdk
 
-Build [MiDojo](https://github.com/asago-ai/midojo) interception layers in Python. An interception layer stands between an agent and its tools during an evaluation: it reads and updates the evaluation's environment on the MiDojo control plane, and attempts to record every call the agent makes.
+Build [MiDojo](https://github.com/asago-ai/midojo) interception layers in Python. An interception layer stands between an agent and its tools during an evaluation: it reads and updates the evaluation's simulated environment, and attempts to record every call the agent makes, by default on the MiDojo control plane.
 
 ```sh
 pip install "midojo-sdk[mcp]"        # fake MCP servers
@@ -34,12 +34,21 @@ if __name__ == "__main__":
     mcp.run(transport="http", port=8082)
 ```
 
-- `await ctx.env(field)` and `await ctx.env_update(field, value)` read and write a field of the evaluation's environment
+- `await ctx.env(field)` reads a field of the evaluation's environment, and `await ctx.read()` the whole environment with its revision
+- `await ctx.env_update(field, value)` sets one field in one atomic step, so a concurrent change to another field isn't lost. Pass `expected_revision=` the revision `ctx.read()` returned to apply it only if nothing changed the environment since: it returns `False` otherwise
 - `await ctx.forward(tool, args)` calls the tool on the upstream MCP server and returns its text
 
 The SDK attempts to record each call with its arguments and the result the agent saw. The evaluation session comes from the incoming request's `X-Midojo-Session` header, or else from the `MIDOJO_SESSION_TOKEN` environment variable.
 
-`await mcp.mirror_upstream()` exposes every upstream tool the server doesn't define itself; the upstream is `upstream_url`, or `upstream_transport` for anything else a fastmcp `Client` connects to. Each downstream session gets one upstream connection, opened on its first call and closed when the session ends. A mirrored tool is listed exactly as the upstream lists it (name, description, input and output schemas, annotations, `_meta`), and a call gets the upstream's result as sent: content blocks, structured content, error flag, and a JSON-RPC error as the same JSON-RPC error. `mcp.block(*names)` and `@mcp.deny(name)` refuse calls: the tool never runs and the agent gets an error result, "Tool execution was blocked" or the reason the denial check returned. Each call has a disposition: `forwarded` (mirrored), `simulated` (a tool defined with `@mcp.tool()`), `blocked` or `denied`. Pass a `recorder` (a `midojo_sdk.recorder.CallRecorder`) to receive it; the control plane's `/agent` API records only the `blocked` flag it implies.
+`await mcp.mirror_upstream()` exposes every upstream tool the server doesn't define itself; the upstream is `upstream_url`, or `upstream_transport` for anything else a fastmcp `Client` connects to. Each downstream session gets one upstream connection, opened on its first call and closed when the session ends. A mirrored tool is listed exactly as the upstream lists it (name, description, input and output schemas, annotations, `_meta`), and a call gets the upstream's result as sent: content blocks, structured content, error flag, and a JSON-RPC error as the same JSON-RPC error. `mcp.block(*names)` and `@mcp.deny(name)` refuse calls: the tool never runs and the agent gets an error result, "Tool execution was blocked" or the reason the denial check returned. Each call has a disposition: `forwarded` (mirrored), `simulated` (a tool defined with `@mcp.tool()`), `blocked` or `denied`. The control plane's `/agent` API records only the `blocked` flag a disposition implies.
+
+## Recorder and WorldState
+
+`midojo_sdk.recorder` defines the two seams an interception layer talks to. A `Recorder` starts and finishes the calls of one evaluation, each with its disposition. A `WorldState` reads the evaluation's simulated environment (`read()`: its revision and fields) and changes it (`change(values, expected_revision=None)`: one atomic step, or `None` when `expected_revision` is stale). `midojo_sdk.client.AgentControlPlaneClient` implements both over HTTP for one session; `midojo.control_plane.inprocess.InProcessAgentClient` implements both in the control plane's own process, with no HTTP.
+
+`MidojoMCP(name, recorder=..., world=...)` records through `recorder` and gives simulated tools `world`; without them it uses the control plane at `control_plane_url` for the request's session. Forwarding (`mirror_upstream`) needs only a recorder: a server built with a recorder and no `control_plane_url` has no environment, and `ctx.env` raises. Both implementations raise `midojo_sdk.recorder.ControlPlaneRejectedError` when the control plane refuses an event, with its `kind` (a `RejectionKind`, such as `call_conflict` or `session_closed`) and `late_fact`; over HTTP, any other failure is an `httpx` error. Each recorder sends an event once: wrap one in `RetryingRecorder(recorder, retryable=midojo_sdk.client.transient)` to resend after a transport error or a 5xx, as `MidojoMCP` does with the control plane's.
+
+A record is what the agent asked for and saw, not proof of an effect; the environment is what simulated tools did; what a forwarded call did to a real system is neither, and a runtime observes it. Nothing makes them one transaction: a record, an environment change and a real tool's effect each commit, or fail, on their own.
 
 ## LangChain agents
 
@@ -75,7 +84,7 @@ Calls to these tools are recorded on the control plane, and the agent's other to
 
 ## Records
 
-Each record carries a `call_id`: the LangChain tool call's ID, namespaced as `langchain:<UUID>:<id>`, or a fresh UUID for a fake MCP server tool, a call without an ID, or an ID the middleware has already used. A record that fails with a transport error or a 5xx is resent with the same `call_id`, up to 3 sends in all, so the control plane records it at most once. A 4xx, including a 409, is raised without a resend. The [interception README](https://github.com/asago-ai/midojo/blob/main/interception/README.md#record-ids-and-retries) describes the guarantee.
+Each record carries a `call_id`: the LangChain tool call's ID, namespaced as `langchain:<UUID>:<id>`, or a fresh UUID for a fake MCP server tool, a call without an ID, or an ID the middleware has already used. A record that fails with a transport error or a 5xx is resent with the same `call_id`, up to 3 sends in all, so the control plane records it at most once (`RetryingRecorder` for a fake MCP server; the client's `record_function_call` and `start_function_call` for the LangChain middleware). A 4xx, including a 409, is raised without a resend. The [interception README](https://github.com/asago-ai/midojo/blob/main/interception/README.md#record-ids-and-retries) describes the guarantee.
 
 A call that runs a tool (a fake MCP server tool, or a hooked or reported LangChain tool) is started on the control plane before the tool runs and finished after, with the same `call_id`. When the start fails, the tool doesn't run; when the finish fails, the call stays recorded as unfinished. A blocked call never runs, so it's recorded once. See [Started and unfinished calls](https://github.com/asago-ai/midojo/blob/main/interception/README.md#started-and-unfinished-calls).
 
