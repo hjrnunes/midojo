@@ -1694,7 +1694,7 @@ mcp = [
 
 [package.metadata]
 requires-dist = [
-    { name = "fastmcp", marker = "extra == 'mcp'", specifier = ">=3,<4" },
+    { name = "fastmcp", marker = "extra == 'mcp'", specifier = ">=3.2.4,<3.3" },
     { name = "httpx", specifier = ">=0.28" },
     { name = "langchain", marker = "extra == 'langchain'", specifier = ">=1.4" },
 ]

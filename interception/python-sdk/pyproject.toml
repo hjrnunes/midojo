@@ -12,7 +12,10 @@ dependencies = [
 [project.optional-dependencies]
 mcp = [
     # 4.0 removed fastmcp.tools.tool, which mcp.py imports ToolResult from.
-    "fastmcp>=3,<4",
+    # MidojoMCP also wraps FastMCP's private low-level server (_mcp_server:
+    # request_handlers and run), which a minor release may change, so a new
+    # minor is a deliberate upgrade; tests/test_fastmcp_compat.py names the hooks.
+    "fastmcp>=3.2.4,<3.3",
 ]
 langchain = [
     "langchain>=1.4",
