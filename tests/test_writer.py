@@ -282,3 +282,25 @@ async def test_a_cancelled_closure_wait_resumes_with_the_same_deadline(suite):
     assert time.time() >= deadline
     assert evaluation.stage is Stage.COLLECTING
     assert [call.complete for call in evaluation.function_calls] == [False]
+
+
+@pytest.mark.asyncio
+async def test_a_finish_after_the_deadline_of_a_cancelled_closure_is_late(suite):
+    """No one ends the closure wait (its close was cancelled): the deadline still applies to what arrives."""
+    control = ControlPlane({"weather": suite}, config=AppConfig(closure_wait_seconds=0.2))
+    run_id, eval_id, token = _new(control)
+    control.start_call(BySession(token), _start("admitted"))
+    closing = asyncio.create_task(control.close(run_id, eval_id))
+    await asyncio.sleep(0.05)
+    closing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+    await asyncio.sleep(0.3)
+
+    with pytest.raises(RejectedError) as refused:
+        control.finish_call(BySession(token), _finish("admitted"))
+    assert (refused.value.kind, refused.value.late) == (Rejection.CLOSING, True)
+    evaluation = control.evaluation(ById(run_id, eval_id))
+    assert evaluation.stage is Stage.COLLECTING
+    assert [call.complete for call in evaluation.function_calls] == [False]
+    assert [fact.event for fact in evaluation.late_facts] == ["finish_call"]

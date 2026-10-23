@@ -145,7 +145,7 @@ class ControlPlane:
 
     def evaluation(self, target: Target) -> Evaluation:
         """A copy of the target's evaluation, as of now."""
-        result = self.apply(target, lifecycle.Read())
+        result = self.apply(target, lifecycle.Read(_now()))
         assert isinstance(result, Evaluation)
         return result
 

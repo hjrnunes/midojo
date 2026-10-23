@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import dataclasses
 import uuid
+from datetime import datetime
 
 import pytest
 
@@ -37,6 +38,8 @@ from midojo.runtimes.openshell import OpenShellObservations
 from midojo.types import CheckValidity, Environment, GradeValidity
 
 AT = "2026-01-01T00:00:00+00:00"
+# AT as epoch seconds: closure deadlines are compared with the time an event arrived.
+T = datetime.fromisoformat(AT).timestamp()
 TOKEN = "hash-of-token"
 AGENT = AgentSession(TOKEN, now=100.0)
 
@@ -78,7 +81,7 @@ def _apply(evaluation: Evaluation, *events, authority: lifecycle.Authority = HOS
     return evaluation
 
 
-def _closing(evaluation: Evaluation, deadline: float = 150.0) -> Evaluation:
+def _closing(evaluation: Evaluation, deadline: float = T + 50) -> Evaluation:
     return _apply(evaluation, BeginClosure(AT, deadline))
 
 
@@ -108,8 +111,8 @@ ALL_EVENTS = [
     ReplyTurn(0, "r", AT),
     ReplaceEnvironment(_Env(counter=5), AT),
     RecordObservations("openshell", OpenShellObservations(), AT),
-    BeginClosure(AT, 150.0),
-    EndClosureWait(now=160.0),
+    BeginClosure(AT, T + 50),
+    EndClosureWait(now=T + 60),
     Seal("out", AT),
     RecordGrade(_grade()),
 ]
@@ -284,19 +287,19 @@ def test_turns_run_one_at_a_time_and_take_one_reply():
 def test_closure_moves_through_its_stages_in_order():
     evaluation = _evaluation()
     assert [s.stage for s in _staged()] == [Stage.OPEN, Stage.CLOSING, Stage.COLLECTING, Stage.SEALED]
-    closing = _closing(evaluation, deadline=150.0)
+    closing = _closing(evaluation, deadline=T + 50)
     # Beginning closure again keeps the first deadline.
-    assert _closing(closing, deadline=999.0).closure_deadline == 150.0
+    assert _closing(closing, deadline=T + 999).closure_deadline == T + 50
     assert transition(evaluation, HOST, Seal("o", AT)) == transition(closing, HOST, Seal("o", AT))
     assert isinstance(transition(closing, HOST, Seal("o", AT)), Rejected)
 
 
 def test_the_closure_wait_ends_when_admitted_calls_finish_or_the_deadline_passes():
-    closing = _closing(_apply(_evaluation(), _start("a")), deadline=150.0)
-    pending = transition(closing, HOST, EndClosureWait(now=149.0))
+    closing = _closing(_apply(_evaluation(), _start("a")), deadline=T + 50)
+    pending = transition(closing, HOST, EndClosureWait(now=T + 49))
     assert isinstance(pending, Rejected) and pending.kind is Rejection.CLOSURE_PENDING
-    assert _apply(closing, EndClosureWait(now=150.0)).stage is Stage.COLLECTING
-    assert _apply(closing, _finish("a"), EndClosureWait(now=100.0)).stage is Stage.COLLECTING
+    assert _apply(closing, EndClosureWait(now=T + 50)).stage is Stage.COLLECTING
+    assert _apply(closing, _finish("a"), EndClosureWait(now=T)).stage is Stage.COLLECTING
 
 
 def test_closing_admits_finishes_of_admitted_calls_and_no_new_call():
@@ -310,6 +313,37 @@ def test_closing_admits_finishes_of_admitted_calls_and_no_new_call():
         assert [fact.event for fact in late.evaluation.late_facts] == [name]
     # The environment stays writable for calls finishing during the wait.
     assert _apply(closing, ReplaceEnvironment(_Env(counter=2), AT), authority=AGENT).environment == _Env(counter=2)
+
+
+@pytest.mark.parametrize(
+    ("event", "name"),
+    [(_finish("a"), "finish_call"), (ReplaceEnvironment(_Env(counter=2), AT), "replace_environment")],
+    ids=["finish", "environment"],
+)
+def test_a_write_after_the_closure_deadline_is_late_and_moves_closure_on(event, name):
+    """The stage may still say closing (no one ended the wait), but the event arrived after the deadline."""
+    closing = _closing(_apply(_evaluation(), _start("a")), deadline=T - 1)
+    for authority in [HOST, AGENT]:
+        late = transition(closing, authority, event)
+        assert isinstance(late, Late) and late.rejected.kind is Rejection.CLOSING
+        assert late.evaluation.stage is Stage.COLLECTING
+        assert [fact.event for fact in late.evaluation.late_facts] == [name]
+        assert late.evaluation.late_facts[0].stage is Stage.COLLECTING
+        assert late.evaluation.function_calls[0].complete is False
+        assert late.evaluation.environment == closing.environment
+
+
+def test_a_write_just_before_the_closure_deadline_is_admitted():
+    closing = _closing(_apply(_evaluation(), _start("a")), deadline=T + 1)
+    assert _apply(closing, _finish("a"), authority=AGENT).function_calls[0].complete is True
+
+
+def test_any_event_after_the_closure_deadline_moves_closure_on():
+    closing = _closing(_evaluation(), deadline=T - 1)
+    assert _accept(closing, Read(AT)).evaluation.stage is Stage.COLLECTING
+    assert _accept(closing, Read()).evaluation.stage is Stage.CLOSING
+    # The seal no longer waits for a closure wait that is over.
+    assert _apply(closing, Seal("out", AT)).stage is Stage.SEALED
 
 
 def test_collecting_takes_observations_and_no_call_or_environment():

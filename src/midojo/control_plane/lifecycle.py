@@ -29,8 +29,9 @@ The rules kept here:
   only once the previous one has its reply, and a turn gets one reply;
 * staged closure: ``open`` admits everything; ``closing`` admits no new call
   but lets admitted calls finish until none is unfinished or the closure wait
-  ends; ``collecting`` takes the final observations; ``sealed`` fixes the
-  snapshot that grading reads;
+  ends, judged by each event's arrival time against the deadline;
+  ``collecting`` takes the final observations; ``sealed`` fixes the snapshot
+  that grading reads;
 * late facts: a write that closure refuses is recorded as a late fact, never
   applied, and marks the evidence it carries ``incomplete``;
 * the grade: recorded once, from the snapshot, and never replaced.
@@ -47,6 +48,7 @@ import json
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel
@@ -166,7 +168,9 @@ Authority = AgentSession | Host
 
 @dataclass(frozen=True)
 class Read:
-    """Admit a read: the result is the current value."""
+    """Admit a read: the result is the current value, as of ``at`` when it's given (see ``_on_time``)."""
+
+    at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -284,6 +288,7 @@ CLOSING_DETAIL = "Evaluation is closing"
 def transition(evaluation: Evaluation, authority: Authority, event: Event) -> Outcome:
     if (rejected := _admit(evaluation, authority, event)) is not None:
         return rejected
+    evaluation = _on_time(evaluation, event)
     match event:
         case Read():
             return Accepted(evaluation, evaluation)
@@ -338,6 +343,22 @@ def _admit(evaluation: Evaluation, authority: Authority, event: Event) -> Reject
 
 def _replace(evaluation: Evaluation, **changes: Any) -> Evaluation:
     return dataclasses.replace(evaluation, **changes)
+
+
+def _on_time(evaluation: Evaluation, event: Event) -> Evaluation:
+    """The evaluation as of the event's arrival: a closure wait whose deadline has passed is over.
+
+    Nothing else has to end the wait for the deadline to hold: an event that
+    arrives after it finds the evaluation collecting, so a late finish or
+    environment write is refused and recorded as a late fact.
+    """
+    at = getattr(event, "at", None)
+    deadline = evaluation.closure_deadline
+    if evaluation.stage is not Stage.CLOSING or at is None or deadline is None:
+        return evaluation
+    if datetime.fromisoformat(at).timestamp() < deadline:
+        return evaluation
+    return _replace(evaluation, stage=Stage.COLLECTING)
 
 
 def _open_session(evaluation: Evaluation, event: OpenSession) -> Outcome:
