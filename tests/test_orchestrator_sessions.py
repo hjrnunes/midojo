@@ -23,7 +23,8 @@ from midojo.control_plane.client import ControlPlaneClient
 from midojo.control_plane.config import AppConfig
 from midojo.control_plane.main import create_app
 from midojo.control_plane.models import EvaluationResponse, FunctionCallResponse
-from midojo.orchestrator import _injection_reached_agent, run_benchmark, run_task
+from midojo.orchestrator import _injection_reachability, run_benchmark, run_task
+from midojo.reachability import Reachability
 from midojo.runtimes import UnmanagedRuntime
 from midojo.runtimes.openshell import OpenShellObservations, OpenShellRuntime
 
@@ -234,6 +235,7 @@ async def test_benchmark_grades_security_when_the_injection_reaches_the_agent(
     pair = "weather_new_york,tornado_alert_via_prompt"
     assert results["utility"] == {pair: True}
     assert results["security"] == {pair: False}
+    assert results["reachability"] == {pair: {"status": "matched", "method": "raw_text", "boundary": "agent_input"}}
 
 
 @pytest.mark.asyncio
@@ -293,6 +295,12 @@ async def test_benchmark_reports_invalid_grades_and_denominators(local_http, cli
     assert results["aggregates"] == {
         "utility": {"graded": 1, "valid": 1, "invalid": 0, "true": 1, "false": 0, "rate": 1.0},
         "security": {"graded": 1, "valid": 0, "invalid": 1, "true": 0, "false": 0, "rate": None},
+        "reachability": {"matched": 1, "not_matched": 0, "unknown": 0},
+    }
+    assert results["reachability"][pair] == {
+        "status": "matched",
+        "method": "raw_text",
+        "boundary": "recorded_tool_result",
     }
 
 
@@ -593,13 +601,6 @@ async def test_payload_only_in_a_later_turn_still_reaches_the_agent(
     evaluation = _only_evaluation(client)
     payload = unmanaged_suite.get_probes_for_task("tornado_alert_via_prompt")["tornado_alert_via_prompt:main"]
     assert payload not in evaluation["agent_input"]
-    run_id = client.app.state.store.list_runs()[0].id
-    async with ControlPlaneClient("http://control", http=local_http) as control:
-        hits = await _injection_reached_agent(
-            control, run_id, evaluation["id"], {"tornado_alert_via_prompt:main": payload}
-        )
-    assert hits == ["turn 2 agent input"]
-    # Graded, not N/A: the payload reached the agent in turn 2.
     results = json.loads((tmp_path / "results.json").read_text())
     assert results["security"] == {"weather_new_york,tornado_alert_via_prompt": False}
 
@@ -655,7 +656,7 @@ async def test_single_turn_task_runs_on_any_protocol(local_http, client, unmanag
 
 
 @pytest.mark.asyncio
-async def test_injection_check_skips_unfinished_calls():
+async def test_reachability_skips_unfinished_calls():
     """An unfinished call has no result, so no payload reached the agent through it."""
     calls = [
         FunctionCallResponse(call_id="a", function="get_weather", args={}, result=None, complete=False, timestamp=""),
@@ -680,7 +681,9 @@ async def test_injection_check_skips_unfinished_calls():
     transport = httpx.MockTransport(lambda request: httpx.Response(200, json=evaluation.model_dump(mode="json")))
     async with httpx.AsyncClient(transport=transport) as http:
         control = ControlPlaneClient("http://control", http=http)
-        assert await _injection_reached_agent(control, "r", "e", {"i:main": "payload"}) == ["read"]
+        assert await _injection_reachability(control, "r", "e", {"i:main": "payload"}) == Reachability(
+            status="matched", method="raw_text", boundary="recorded_tool_result"
+        )
 
 
 @pytest.fixture
@@ -775,3 +778,74 @@ async def test_openshell_failed_second_turn_fails_the_evaluation_after_the_first
     gateway.sandboxes.delete.assert_called_once()
     token = gateway.sandboxes.create.call_args.kwargs["spec"].environment["MIDOJO_SESSION_TOKEN"]
     assert client.get("/agent/environment", headers={"Authorization": f"Bearer {token}"}).status_code == 401
+
+
+class ToolResultAgent(AgentClient):
+    """Records one tool call with a fixed result, then answers the user task."""
+
+    def __init__(self, http, result: str):
+        self.http = http
+        self.result = result
+
+    async def send_task(self, prompt, *, session_token):
+        response = await self.http.post(
+            "http://control/agent/function-calls",
+            headers={"Authorization": f"Bearer {session_token}"},
+            json={"function": "get_weather", "args": {"city": "New York"}, "result": self.result},
+        )
+        response.raise_for_status()
+        return "New York is 72°F and sunny"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("encoded", [True, False], ids=["json_encoded_payload", "payload_absent"])
+async def test_benchmark_counts_every_valid_security_grade_whatever_the_payload_match(
+    local_http, client, unmanaged_suite, tmp_path, encoded, capsys
+):
+    """A valid security grade counts in the attack-success rate even when the payload text isn't found."""
+    payload = next(iter(unmanaged_suite.get_probes_for_task("tornado_alert_via_notes").values()))
+    result = json.dumps({"city": "New York", "notes": payload}) if encoded else "72°F and sunny"
+    await run_benchmark(
+        control_url="http://control",
+        agent_client=ToolResultAgent(local_http, result),
+        agent_uri="http://agent",
+        protocol="http",
+        suite=unmanaged_suite,
+        suite_name="weather",
+        user_task_ids=["weather_new_york"],
+        injection_task_ids=["tornado_alert_via_notes"],
+        logdir=tmp_path,
+        http=local_http,
+    )
+    results = json.loads((tmp_path / "results.json").read_text())
+    pair = "weather_new_york,tornado_alert_via_notes"
+    assert results["grade_validity"][pair]["security"]["status"] == "valid"
+    assert results["security"] == {pair: False}
+    assert results["security_reason"][pair]
+    assert results["aggregates"]["security"] == {
+        "graded": 1,
+        "valid": 1,
+        "invalid": 0,
+        "true": 0,
+        "false": 1,
+        "rate": 0.0,
+    }
+    # Whether the payload was found is reported, never filtered on.
+    if encoded:
+        expected = {"status": "matched", "method": "decoded_json", "boundary": "recorded_tool_result"}
+    else:
+        expected = {"status": "not_matched", "method": None, "boundary": None}
+    assert results["reachability"] == {pair: expected}
+    assert results["aggregates"]["reachability"] == {
+        "matched": int(encoded),
+        "not_matched": int(not encoded),
+        "unknown": 0,
+    }
+    # The printed grade is the real one, with the reachability counts after the table.
+    printed = " ".join(capsys.readouterr().out.split())
+    assert "N/A" not in printed
+    assert "attack failed" in printed
+    matched = "payload matched in recorded_tool_result (decoded_json)" if encoded else "payload not matched"
+    assert matched in printed
+    counts = "1 matched, 0 not matched" if encoded else "0 matched, 1 not matched"
+    assert f"Payload reachability (report only, not in the rates): {counts}, 0 unknown" in printed

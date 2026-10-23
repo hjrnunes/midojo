@@ -6,7 +6,6 @@ import importlib
 import json
 import math
 import os
-from collections import Counter
 from pathlib import Path
 from typing import NamedTuple
 
@@ -29,6 +28,8 @@ from midojo.agent_client import (
 from midojo.control_plane.client import ControlPlaneClient
 from midojo.control_plane.config import CONTROL_TOKEN_ENV
 from midojo.control_plane.models import GradeResponse
+from midojo.reachability import UNKNOWN as UNKNOWN_REACHABILITY
+from midojo.reachability import Reachability, count, reachability
 from midojo.runtimes import AgentRuntime
 from midojo.runtimes.openshell import OpenShellRuntime
 from midojo.suites import get_suite, list_suites
@@ -153,6 +154,7 @@ def _rate_cell(results: dict[TaskPair, bool | None]) -> str:
 def _print_results_table(
     utility_results: dict[TaskPair, bool | None],
     security_results: dict[TaskPair, bool | None],
+    reachability_results: dict[TaskPair, Reachability],
     has_injections: bool,
     results_file: Path,
 ) -> None:
@@ -166,8 +168,7 @@ def _print_results_table(
 
     for pair, util in utility_results.items():
         if has_injections:
-            sec_cell = _security(security_results[pair]) if pair in security_results else Text("N/A", style="dim")
-            table.add_row(pair.user_task_id, pair.injection_task_id, _utility(util), sec_cell)
+            table.add_row(pair.user_task_id, pair.injection_task_id, _utility(util), _security(security_results[pair]))
         else:
             table.add_row(pair.user_task_id, _utility(util))
 
@@ -181,6 +182,12 @@ def _print_results_table(
         table.add_row("", Text(util_avg, style="bold"))
 
     console.print(table)
+    if has_injections:
+        counts = count(reachability_results.values())
+        console.print(
+            f"\nPayload reachability (report only, not in the rates): {counts['matched']} matched, "
+            f"{counts['not_matched']} not matched, {counts['unknown']} unknown"
+        )
     console.print(f"\nResults saved to [cyan]{results_file}[/cyan]")
 
 
@@ -189,34 +196,34 @@ def _turn_label(label: str, idx: int, count: int) -> str:
     return f"turn {idx + 1} {label}" if count > 1 else label
 
 
-async def _injection_reached_agent(
+def _reachability_detail(report: Reachability) -> str:
+    if report.status == "matched":
+        return f"payload matched in {report.boundary} ({report.method})"
+    if report.status == "not_matched":
+        return "payload not matched"
+    return "payload match unknown"
+
+
+async def _injection_reachability(
     control: ControlPlaneClient, run_id: str, eval_id: str, injections: dict[str, str]
-) -> list[str]:
-    """Return channels through which an injection payload reached the agent.
+) -> Reachability:
+    """Search the evaluation's agent input and recorded tool results for the injection payloads.
 
-    Checks every turn's user message and the function call results (tool output).
+    Report-only: unknown when the evaluation record can't be fetched or parsed.
     """
-    evaluation = await control.evaluation(run_id, eval_id)
-    payloads = [v for v in injections.values() if v]
-    if not payloads:
-        return []
-
-    def _normalize(text: str) -> str:
-        return " ".join(text.split()).lower()
-
-    normalized_payloads = [_normalize(p) for p in payloads]
-    hits: list[str] = []
-    messages = [turn.message for turn in evaluation.turns] or [evaluation.agent_input or ""]
-    for idx, message in enumerate(messages):
-        if message and any(p in _normalize(message) for p in normalized_payloads):
-            hits.append(_turn_label("agent input", idx, len(messages)))
-    for call in evaluation.function_calls:
-        if call.result is None:  # an unfinished call: the agent saw no result
-            continue
-        result = _normalize(call.result)
-        if any(p in result for p in normalized_payloads):
-            hits.append(call.function)
-    return hits
+    try:
+        evaluation = await control.evaluation(run_id, eval_id)
+    except (httpx.HTTPError, ValueError):
+        # ValueError covers a body that isn't JSON (JSONDecodeError, UnicodeDecodeError)
+        # and one that doesn't match EvaluationResponse (pydantic's ValidationError).
+        return UNKNOWN_REACHABILITY
+    return reachability(
+        injections.values(),
+        evaluation.agent_input,
+        # an unfinished call has no result: the agent saw nothing from it
+        [call.result for call in evaluation.function_calls if call.result is not None],
+        evaluation.evidence_status.get("function_calls"),
+    )
 
 
 def _check_turns_supported(
@@ -328,6 +335,7 @@ async def _run_benchmark(
     security_reasons: dict[TaskPair, str | None] = {}
     grade_validity: dict[TaskPair, dict] = {}
     evidence_status: dict[TaskPair, dict[str, str]] = {}
+    reachability_results: dict[TaskPair, Reachability] = {}
 
     it_ids_to_run: list[str | None] = [*injection_tasks_to_run] if injection_tasks_to_run else [None]
     started: str | None = None
@@ -364,20 +372,16 @@ async def _run_benchmark(
                     _print_agent_text(_turn_label("agent output", idx, len(result.turns)), reply)
                 console.print("    ", _utility(grade.utility))
                 if it_id:
-                    hit_channels = await _injection_reached_agent(control, run_id, eval_id, injections)
-                    if hit_channels:
-                        security_results[TaskPair(ut_id, it_id)] = grade.security
-                        security_reasons[TaskPair(ut_id, it_id)] = grade.security_reason
-                        counts = Counter(hit_channels)
-                        parts = [f"{ch} x{n}" if n > 1 else ch for ch, n in counts.items()]
-                        via = ", ".join(parts)
-                        detail = f"injection in {via}"
-                        if grade.security is not False and grade.security_reason:
-                            # attack succeeded, or couldn't be graded — name the criterion that decided it
-                            detail += f" · {grade.security_reason}"
-                        console.print("    ", _security(grade.security), Text(f"  ({detail})", style="dim"))
-                    else:
-                        console.print("    ", Text("N/A (payload not in any result)", style="dim"))
+                    # Every injection evaluation counts in the attack-success rate. Whether the
+                    # payload text was found is reported alongside and never filters it out.
+                    security_results[pair] = grade.security
+                    security_reasons[pair] = grade.security_reason
+                    reachability_results[pair] = await _injection_reachability(control, run_id, eval_id, injections)
+                    detail = _reachability_detail(reachability_results[pair])
+                    if grade.security is not False and grade.security_reason:
+                        # attack succeeded, or couldn't be graded — name the criterion that decided it
+                        detail += f" · {grade.security_reason}"
+                    console.print("    ", _security(grade.security), Text(f"  ({detail})", style="dim"))
     finally:
         with console.status(f"[dim]stopping the {runtime.name} runtime…[/dim]", spinner="dots"):
             await asyncio.to_thread(runtime.end_run)
@@ -399,19 +403,27 @@ async def _run_benchmark(
                 "suite_name": suite_name,
                 "utility": by_pair(utility_results),
                 "utility_reason": by_pair(utility_reasons),
-                # null where the injection didn't reach the agent (not graded), or the grade is invalid
+                # null without an injection task, or where the grade is invalid
                 "security": by_pair(security_results),
                 "security_reason": by_pair(security_reasons),
                 "grade_validity": by_pair(grade_validity),
                 "evidence_status": by_pair(evidence_status),
-                # Rates leave invalid grades out of the denominator.
-                "aggregates": {"utility": _aggregate(utility_results), "security": _aggregate(security_results)},
+                # Whether the payload text was found; report-only, null without an injection task.
+                "reachability": by_pair({k: v.model_dump(mode="json") for k, v in reachability_results.items()}),
+                # Rates leave invalid grades out of the denominator; reachability never enters them.
+                "aggregates": {
+                    "utility": _aggregate(utility_results),
+                    "security": _aggregate(security_results),
+                    "reachability": count(reachability_results.values()),
+                },
             },
             f,
             indent=2,
         )
 
-    _print_results_table(utility_results, security_results, bool(injection_tasks_to_run), results_file)
+    _print_results_table(
+        utility_results, security_results, reachability_results, bool(injection_tasks_to_run), results_file
+    )
 
 
 async def run_benchmark(
