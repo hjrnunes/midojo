@@ -138,6 +138,60 @@ def test_a_transition_is_deterministic_and_never_changes_its_inputs(event, autho
         assert event == event_before
 
 
+def test_an_accepted_event_changed_afterwards_changes_nothing_returned():
+    environment, observed = _Env(counter=1), OpenShellObservations(network_calls_blocked=["a"])
+    start = StartCall(CreateFunctionCallStart(call_id="c1", function="a", args={"x": [1]}), AT)
+    evaluation = _apply(
+        _evaluation(), start, ReplaceEnvironment(environment, AT), RecordObservations("openshell", observed, AT)
+    )
+    environment.counter = 99
+    observed.network_calls_blocked.append("b")
+    start.req.args["x"].append(2)
+    assert evaluation.environment == _Env(counter=1)
+    assert evaluation.observations["openshell"] == OpenShellObservations(network_calls_blocked=["a"])
+    assert evaluation.function_calls[0].args == {"x": [1]}
+
+
+def test_a_source_evaluation_changed_afterwards_changes_nothing_returned():
+    environment, pre_environment = _Env(counter=1), _Env(counter=0)
+    source = _apply(_evaluation(environment=environment, pre_environment=pre_environment), _start("a", x=[1]))
+    returned = _apply(source, _finish("b"))
+    environment.counter = 99
+    pre_environment.counter = 98
+    source.function_calls[0].args["x"].append(2)
+    assert returned.environment == _Env(counter=1)
+    assert returned.pre_environment == _Env(counter=0)
+    assert returned.function_calls[0].args == {"x": [1]}
+    # And the other way round: changing what was returned leaves the source alone.
+    source_before = copy.deepcopy(source)
+    returned.function_calls[0].args["x"].append(3)
+    returned.environment.counter = 5  # type: ignore[attr-defined]
+    assert source == source_before
+
+
+def test_the_snapshot_cannot_be_changed_through_the_sealed_evaluation_or_its_source():
+    environment = _Env(counter=1)
+    observed = OpenShellObservations(network_calls_blocked=["a"])
+    collecting = _collecting(
+        _apply(
+            _evaluation(environment=environment),
+            _start("a", x=[1]),
+            RecordObservations("openshell", observed, AT),
+        )
+    )
+    sealed = _apply(collecting, Seal("out", AT))
+    snapshot = sealed.snapshot
+    assert snapshot is not None
+    expected = copy.deepcopy(snapshot)
+    environment.counter = 99
+    observed.network_calls_blocked.append("b")
+    for value in [collecting, sealed]:
+        value.function_calls[0].args["x"].append(2)
+        value.environment.counter = 97  # type: ignore[attr-defined]
+        value.observations["openshell"].network_calls_blocked.append("c")  # type: ignore[attr-defined]
+    assert snapshot == expected
+
+
 def test_rejections_are_domain_kinds_not_status_codes():
     rejected = transition(_sealed(_evaluation()), HOST, RecordGrade(_grade()))
     assert isinstance(rejected, Accepted)
@@ -222,7 +276,7 @@ def test_a_call_without_call_id_gets_the_assigned_one_and_is_not_deduplicated():
 def test_a_replay_returns_the_stored_record_and_changes_nothing():
     evaluation = _apply(_evaluation(), _finish(x=1))
     outcome = _accept(evaluation, _finish(x=1))
-    assert outcome.evaluation is evaluation
+    assert outcome.evaluation == evaluation
     assert outcome.result == (evaluation.function_calls[0], False)
 
 
@@ -392,8 +446,8 @@ def test_after_the_seal_every_write_is_a_late_fact_that_leaves_the_snapshot_alon
     late = transition(sealed, HOST, event)
     assert isinstance(late, Late)
     assert late.rejected.kind is kind
-    assert late.evaluation.snapshot is sealed.snapshot
-    assert late.evaluation.grade is sealed.grade
+    assert late.evaluation.snapshot == sealed.snapshot
+    assert late.evaluation.grade == sealed.grade
     [fact] = late.evaluation.late_facts
     assert (fact.stage, fact.by, fact.evidence) == (Stage.SEALED, "host", evidence)
     assert late.evaluation.evidence_status == {key: "incomplete" for key in evidence}
@@ -437,7 +491,7 @@ def test_a_late_fact_is_recorded_once_per_distinct_write():
     once = transition(sealed, AGENT, _finish("late"))
     assert isinstance(once, Late)
     twice = transition(once.evaluation, AGENT, _finish("late"))
-    assert isinstance(twice, Late) and twice.evaluation is once.evaluation
+    assert isinstance(twice, Late) and twice.evaluation == once.evaluation
     other = transition(once.evaluation, AGENT, _finish("late", result="other"))
     assert isinstance(other, Late) and len(other.evaluation.late_facts) == 2
 
@@ -446,8 +500,8 @@ def test_replays_after_the_seal_are_not_late_facts():
     sealed = _sealed(_apply(_evaluation(), _start("a"), _finish("b")), output="out")
     for event in [_start("a"), _start("b"), _finish("b")]:
         outcome = _accept(sealed, event, AGENT)
-        assert outcome.evaluation is sealed and outcome.result[1] is False
-    assert _accept(sealed, Seal("out", AT)).result is sealed.snapshot
+        assert outcome.evaluation == sealed and outcome.result[1] is False
+    assert _accept(sealed, Seal("out", AT)).result == sealed.snapshot
 
 
 def test_late_facts_before_the_seal_mark_the_snapshot_incomplete():
@@ -465,7 +519,7 @@ def test_the_grade_is_recorded_once():
     graded = _apply(sealed, RecordGrade(_grade()))
     other = _grade().model_copy(update={"utility": False})
     again = _accept(graded, RecordGrade(other))
-    assert again.evaluation is graded
+    assert again.evaluation == graded
     assert again.evaluation.grade == _grade()
 
 

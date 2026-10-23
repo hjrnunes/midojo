@@ -9,7 +9,8 @@ evaluation's current value. It returns:
   fact, so the evaluation shows its evidence is incomplete;
 * :class:`Rejected`: the event is refused and leaves nothing behind.
 
-It never changes its arguments: every change is a new value. It reads nothing
+It never changes its arguments, and what it returns shares no object with them:
+it decides on deep copies, and the seal gives the snapshot its own copies too. It reads nothing
 but its arguments either: events carry plain values (a time, an assigned call
 ID, an already validated environment), never a clock, a store or a suite. A
 rejection is a domain :class:`Rejection` kind; only the HTTP edge picks a status
@@ -42,6 +43,7 @@ it holds the evaluation's lock across look-up, transition and commit.
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import enum
 import json
@@ -288,6 +290,9 @@ CLOSING_DETAIL = "Evaluation is closing"
 def transition(evaluation: Evaluation, authority: Authority, event: Event) -> Outcome:
     if (rejected := _admit(evaluation, authority, event)) is not None:
         return rejected
+    # The rules work on copies: what a transition returns shares nothing with its arguments, so a
+    # caller changing the event or the source evaluation afterwards can't change the outcome.
+    evaluation, event = copy.deepcopy(evaluation), copy.deepcopy(event)
     evaluation = _on_time(evaluation, event)
     match event:
         case Read():
@@ -595,15 +600,25 @@ def _seal(evaluation: Evaluation, authority: Authority, event: Seal) -> Outcome:
         return _late(evaluation, authority, "seal", event.at, ("agent_output",), payload)
     if evaluation.stage is not Stage.COLLECTING:
         return Rejected(Rejection.CLOSURE_PENDING, "Closure has not finished waiting for admitted calls")
+    # The snapshot keeps its own copies, so nothing reached through the sealed evaluation changes it.
+    pre_environment, environment, function_calls, turns, observations = copy.deepcopy(
+        (
+            evaluation.pre_environment,
+            evaluation.environment,
+            evaluation.function_calls,
+            evaluation.turns,
+            dict(evaluation.observations),
+        )
+    )
     snapshot = Snapshot(
         user_task_id=evaluation.user_task_id,
         injection_task_id=evaluation.injection_task_id,
         agent_output=event.agent_output,
-        pre_environment=evaluation.pre_environment,
-        environment=evaluation.environment,
-        function_calls=evaluation.function_calls,
-        turns=evaluation.turns,
-        observations=evaluation.observations,
+        pre_environment=pre_environment,
+        environment=environment,
+        function_calls=function_calls,
+        turns=turns,
+        observations=observations,
         evidence_status={**evidence_status(evaluation.observations), **late_evidence(evaluation.late_facts)},
         sealed_at=event.at,
     )
