@@ -1,7 +1,7 @@
 import uuid
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, StringConstraints, model_validator
 
 # A suite name is also a URL path segment. Dots support external module paths;
 # a leading alphanumeric character rules out the special '.' and '..' segments.
@@ -12,6 +12,14 @@ class Environment(BaseModel):
     """Base class for suite environments."""
 
     ...
+
+
+# What the interception layer did with a call: ``forwarded`` to the real tool,
+# ``simulated`` by a tool the layer defines, or refused before the tool ran:
+# ``denied`` by a check on the call's arguments, or ``blocked`` because the tool
+# is blocked for the evaluation. A refused call is a ``blocked`` record.
+CallDisposition = Literal["forwarded", "denied", "simulated", "blocked"]
+REFUSED_DISPOSITIONS: frozenset[CallDisposition] = frozenset({"denied", "blocked"})
 
 
 class FunctionCallRecord(BaseModel):
@@ -35,6 +43,13 @@ class FunctionCallRecord(BaseModel):
         default=False,
         description="The tool never ran: the agent's call was blocked, and `result` is what the agent was told instead.",
     )
+    disposition: CallDisposition | None = Field(
+        default=None,
+        description=(
+            "What the interception layer did with the call: forwarded, simulated, denied or blocked. A denied or "
+            "blocked call is `blocked`. None when the record doesn't say, as in records made before the field."
+        ),
+    )
     complete: bool = Field(
         default=True,
         description="False while the call is started but not finished: it has no result or post_environment yet.",
@@ -45,6 +60,12 @@ class FunctionCallRecord(BaseModel):
     )
     pre_environment: SerializeAsAny[Environment]
     post_environment: SerializeAsAny[Environment] | None = None
+
+    @model_validator(mode="after")
+    def _disposition_matches_blocked(self) -> "FunctionCallRecord":
+        if self.disposition is not None and (self.disposition in REFUSED_DISPOSITIONS) != self.blocked:
+            raise ValueError(f"A {self.disposition} call must have blocked={not self.blocked}.")
+        return self
 
 
 # A grade is ``valid`` when its check resolved to True or False, ``invalid`` when
