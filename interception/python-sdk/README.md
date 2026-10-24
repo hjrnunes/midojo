@@ -44,13 +44,15 @@ The SDK attempts to record each call with its arguments and the result the agent
 
 ## Injection plans
 
-Pass a frozen `InjectionPlan` as `MidojoMCP(..., plan=plan)`. `append` is the one default because an unqualified content selector can preserve the upstream result without guessing a field. The interceptor supports exact content-block and structured-content selectors, and `mirror_upstream()` validates targeted tool names before serving calls.
+Pass an exact frozen `InjectionPlan` as `MidojoMCP(..., plan=plan)`. For an episode plan containing host template channels, select the MCP-owned part with `episode.plan.for_channels(Channel.TOOL_OUTPUT)`. `append` is the one default because an unqualified content selector can preserve the upstream result without guessing a field. Unqualified content-block `replace` replaces the first text block and leaves `structuredContent` unchanged. MidojoMCP supports exact content-block and structured-content selectors on mirrored results, and `mirror_upstream()` validates targeted tool names before serving calls. A non-empty plan requires an upstream; registering a simulated tool is rejected when a named or all-tools instruction would match it.
 
-Unsupported placements raise `CapabilityError` with every gap. Strict selector and size mismatches leave the result unchanged; `fallback_append` is explicit. `mcp.injection_outcomes` reports every result with the recorded call's `call_id`.
+Unsupported placements raise `CapabilityError` with every gap. Strict selector and size mismatches leave the result unchanged; `fallback_append` is explicit. `mcp.injection_outcomes` reports every result with its evaluation/session `scope` and recorded `call_id`. A returned result with `isError=True` still receives the selected payload; an exception or cancellation instead reports `no_result`.
 
-Matching calls are numbered per evaluation under a lock after their recorded start succeeds and before forwarding. Concurrent calls therefore use interceptor-admission order, not completion order. Blocked and denied calls are never admitted; an upstream error or cancellation consumes the admitted occurrence and reports an unmatched outcome. A cancelled call remains unfinished in the recorder.
+Matching calls are numbered per evaluation under a lock after `start_call` returns and before forwarding. Concurrent calls therefore use interceptor-admission order, not arrival, recorded-start, or completion order: two recorder starts can be stored in one order and return in another. Blocked and denied calls are never admitted; an upstream exception or cancellation consumes the admitted occurrence and reports `no_result`. A cancelled call remains unfinished in the recorder.
 
 When `recorder=` is injected, a non-empty plan also requires `evaluation_id=`. That binds the interceptor and all its counters to one evaluation; build a separate `MidojoMCP` for another evaluation. Without an injected recorder, the incoming evaluation session is the scope.
+
+There is no session-end hook that both identifies the scope and leaves outcomes available for inspection. A long-lived MidojoMCP serving many session-backed evaluations therefore retains each seen scope's counters and outcomes until process exit. Prefer one interceptor per evaluation where the deployment permits it.
 
 Automated generator output should go through `instruction_from_generator_for_plan(output, episode.plan)`. It accepts only tools, structured-content field paths, and modes listed in that plan's `generator_permissions`.
 
