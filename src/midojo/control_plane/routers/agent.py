@@ -140,11 +140,13 @@ async def report_capture_failure(
 ) -> CaptureFailureResponse:
     """Report a call record the interception layer couldn't deliver, after its resends.
 
-    The evaluation's ``function_calls`` evidence becomes incomplete, so a check
-    that depends on a call's absence grades unknown; no record is added or
-    changed. 201 when kept; 200 with the stored report when the same
-    ``call_id``, function and phase were already reported; 401 after the seal
-    (recorded as a late fact, which marks ``function_calls`` incomplete too).
+    Before the seal, the evaluation's ``function_calls`` evidence becomes
+    incomplete, so a check that depends on a call's absence grades unknown; no
+    record is added or changed. 201 when kept; 200 with the stored report when
+    the same ``call_id``, function and phase were already reported (whatever
+    the reason), even after the seal; 401 for a new report after the seal,
+    recorded as a late fact that marks ``function_calls`` incomplete in the
+    evaluation's evidence status but leaves the grade unchanged.
     """
     failure, created = control.report_capture_failure(
         BySession(session_token), call_id=req.call_id, function=req.function, phase=req.phase, reason=req.reason

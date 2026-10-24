@@ -101,6 +101,18 @@ def test_the_route_refuses_a_report_after_the_seal_as_a_late_fact(client):
     assert body["evidence_status"]["function_calls"] == "incomplete"
 
 
+def test_the_route_replays_a_report_kept_before_the_seal_after_it(client):
+    run_id, eval_id, token = new_evaluation(client)
+    auth = {"Authorization": f"Bearer {token}"}
+    kept = client.post("/agent/capture-failures", json=REPORT, headers=auth)
+    client.post(f"/runs/{run_id}/evaluations/{eval_id}/complete", json={"agent_output": "done"})
+
+    replayed = client.post("/agent/capture-failures", json={**REPORT, "reason": "resent"}, headers=auth)
+
+    assert (replayed.status_code, replayed.json()) == (200, kept.json())
+    assert evaluation(client, run_id, eval_id)["late_facts"] == []
+
+
 @pytest.mark.parametrize(
     "report",
     [

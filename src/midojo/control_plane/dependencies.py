@@ -201,7 +201,10 @@ START_FUNCTION_CALL_RESPONSES: dict[int | str, dict] = {
 
 REPORT_CAPTURE_FAILURE_RESPONSES: dict[int | str, dict] = {
     status.HTTP_200_OK: {
-        "description": "Replay: the same call_id, function and phase were already reported. Nothing is kept."
+        "description": (
+            "Replay: the same call_id, function and phase were already reported, whatever the reason, even "
+            "after the seal. Nothing is kept."
+        )
     },
     status.HTTP_201_CREATED: {
         "description": "The report is kept, and the evaluation's function_calls evidence is marked incomplete."

@@ -6,8 +6,9 @@ import pytest
 
 from midojo.control_plane.config import AppConfig
 from midojo.control_plane.lifecycle import RejectedError, Rejection
-from midojo.control_plane.models import CreateFunctionCallRecord
+from midojo.control_plane.models import CapturePhase, CreateFunctionCallRecord, CreateFunctionCallStart
 from midojo.control_plane.service import ById, BySession, ControlPlane
+from midojo.control_plane.state import Stage
 from midojo.episode import Episode
 from midojo.observations import EvidenceStatus
 from midojo.types import Environment, FunctionCallRecord
@@ -186,7 +187,7 @@ def test_a_recorded_call_decides_on_incomplete_function_calls():
     assert ToolCalled("process_refund").assess(_ctx(refund, function_calls="incomplete")).passed is True
 
 
-def test_a_report_is_kept_while_closing_and_from_the_host():
+def test_a_report_is_kept_while_collecting_and_from_the_host():
     control = ControlPlane({}, config=AppConfig(closure_wait_seconds=0))
     opened = control.open_evaluation(_episode())
     asyncio.run(control.close(None, opened.id))
@@ -195,6 +196,91 @@ def test_a_report_is_kept_while_closing_and_from_the_host():
     )
     assert (created, failure.by, failure.stage) == (True, "host", "collecting")
     assert _grade(control, opened.id).security is None
+
+
+@pytest.mark.asyncio
+async def test_a_report_is_kept_while_closing_waits_for_an_admitted_call():
+    control = ControlPlane({}, config=AppConfig(closure_wait_seconds=5))
+    opened = control.open_evaluation(_episode())
+    session = BySession(opened.session_token)
+    control.start_call(session, CreateFunctionCallStart(call_id="c1", function="lookup_order", args={"id": 7}))
+    closing = asyncio.create_task(control.close(None, opened.id))
+    while control.evaluation(ById(None, opened.id)).stage is not Stage.CLOSING:
+        await asyncio.sleep(0)
+
+    failure, created = control.report_capture_failure(
+        session, call_id="c2", function="process_refund", phase="finish", reason="lost"
+    )
+    control.finish_call(session, _record("c1", "lookup_order", id=7))
+    closed = await asyncio.wait_for(closing, 4)
+
+    assert (created, failure.by, failure.stage) == (True, "agent", "closing")
+    assert closed.stage is Stage.COLLECTING
+    await control.complete(None, opened.id, "done")
+    grade = control.grade(None, opened.id)
+    assert (grade.security, grade.evidence_status["function_calls"]) == (None, "incomplete")
+
+
+# --- a report is identified by its call_id, function and phase ---
+
+
+def test_a_report_from_another_sender_or_with_another_reason_is_the_same_report():
+    control = ControlPlane({})
+    opened = control.open_evaluation(_episode())
+    first, _ = control.report_capture_failure(
+        BySession(opened.session_token), call_id="c1", function="f", phase="start", reason="ConnectError"
+    )
+
+    again, created = control.report_capture_failure(
+        ById(None, opened.id), call_id="c1", function="f", phase="start", reason="ReadTimeout"
+    )
+
+    assert (again, created) == (first, False)
+    assert control.evaluation(ById(None, opened.id)).capture_failures == (first,)
+
+
+def test_another_phase_or_function_is_another_report():
+    control = ControlPlane({})
+    opened = control.open_evaluation(_episode())
+    session = BySession(opened.session_token)
+    reports: list[tuple[str, CapturePhase]] = [("f", "start"), ("f", "finish"), ("g", "start")]
+    for function, phase in reports:
+        _, created = control.report_capture_failure(session, call_id="c1", function=function, phase=phase)
+        assert created
+    assert len(control.evaluation(ById(None, opened.id)).capture_failures) == 3
+
+
+def test_a_report_resent_after_the_seal_is_a_replay_not_a_late_fact():
+    control = ControlPlane({})
+    opened = control.open_evaluation(_episode())
+    session = BySession(opened.session_token)
+    kept, _ = control.report_capture_failure(session, call_id="c1", function="f", phase="finish", reason="lost")
+    _grade(control, opened.id)
+
+    replayed, created = control.report_capture_failure(
+        session, call_id="c1", function="f", phase="finish", reason="lost again"
+    )
+
+    assert (replayed, created) == (kept, False)
+    assert control.evaluation(ById(None, opened.id)).late_facts == ()
+
+
+def test_a_new_report_after_the_seal_is_one_late_fact_whatever_its_reason_or_sender():
+    control = ControlPlane({})
+    opened = control.open_evaluation(_episode())
+    _grade(control, opened.id)
+
+    for target, reason in [(BySession(opened.session_token), "ConnectError"), (ById(None, opened.id), "ReadTimeout")]:
+        with pytest.raises(RejectedError) as refused:
+            control.report_capture_failure(target, call_id="c1", function="f", phase="finish", reason=reason)
+        assert refused.value.late
+
+    [fact] = control.evaluation(ById(None, opened.id)).late_facts
+    assert (fact.event, fact.by, fact.payload["reason"]) == ("report_capture_failure", "agent", "ConnectError")
+    # Another phase is another lost record, and another late fact.
+    with pytest.raises(RejectedError):
+        control.report_capture_failure(ById(None, opened.id), call_id="c1", function="f", phase="start")
+    assert len(control.evaluation(ById(None, opened.id)).late_facts) == 2
 
 
 def test_a_late_call_refused_by_closure_also_makes_an_absence_unknown():

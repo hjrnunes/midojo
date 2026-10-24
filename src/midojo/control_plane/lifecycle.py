@@ -50,9 +50,12 @@ The rules kept here:
 * late facts: a write that closure refuses is recorded as a late fact, never
   applied, and marks the evidence it carries ``incomplete``;
 * capture failures: a call record the interception layer reports it couldn't
-  deliver is kept (once per ``call_id``, function and phase) until the seal,
-  and marks ``function_calls`` ``incomplete``; it never adds or changes a
-  record. After the seal, a report is a late fact like any other write;
+  deliver is kept until the seal, and marks ``function_calls`` ``incomplete``
+  in the snapshot; it never adds or changes a record. A report is identified
+  by its ``call_id``, function and phase alone (not its reason or sender): a
+  report of a kept one is a replay at any stage, even after the seal. A new
+  report after the seal is a late fact, kept once per identity, that marks
+  only the evaluation's evidence status, never the snapshot or the grade;
 * the grade: recorded once, from the snapshot, and never replaced.
 
 The single writer (:mod:`midojo.control_plane.service`) applies transitions:
@@ -639,14 +642,18 @@ def _finish_call(evaluation: Evaluation, authority: Authority, event: FinishCall
 
 
 def _report_capture_failure(evaluation: Evaluation, authority: Authority, event: ReportCaptureFailure) -> Outcome:
+    # One lost record is one report, whatever its reason (another attempt's error, say) and whoever sent it.
+    identity = (event.call_id, event.function, event.phase)
+    for known in evaluation.capture_failures:
+        if (known.call_id, known.function, known.phase) == identity:
+            return Accepted(evaluation, (known, False))
     if evaluation.stage is Stage.SEALED:
         payload = {"call_id": event.call_id, "function": event.function, "phase": event.phase, "reason": event.reason}
-        return _late(evaluation, authority, "report_capture_failure", event.at, _CALL_EVIDENCE, payload, event.call_id)
+        late = _late(evaluation, authority, "report_capture_failure", event.at, _CALL_EVIDENCE, payload, event.call_id)
+        if any(_capture_identity(fact) == identity for fact in evaluation.late_facts):
+            return Late(evaluation, late.rejected)
+        return late
     by = _by(authority)
-    # A resent report (another attempt's reason, say) is the same lost record: it's kept once.
-    for known in evaluation.capture_failures:
-        if (known.call_id, known.function, known.phase, known.by) == (event.call_id, event.function, event.phase, by):
-            return Accepted(evaluation, (known, False))
     failure = CaptureFailure(
         call_id=event.call_id,
         function=event.function,
@@ -658,6 +665,13 @@ def _report_capture_failure(evaluation: Evaluation, authority: Authority, event:
     )
     next_value = _replace(evaluation, capture_failures=(*evaluation.capture_failures, failure))
     return Accepted(next_value, (failure, True))
+
+
+def _capture_identity(fact: LateFact) -> tuple[Any, Any, Any] | None:
+    """The ``call_id``, function and phase of a late capture failure report, or None for another late fact."""
+    if fact.event != "report_capture_failure":
+        return None
+    return (fact.payload.get("call_id"), fact.payload.get("function"), fact.payload.get("phase"))
 
 
 # --- turns ---

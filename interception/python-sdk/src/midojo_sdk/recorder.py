@@ -178,11 +178,13 @@ class CaptureReporter(Protocol):
     async def report_capture_failure(self, *, call_id: str, function: str, phase: CapturePhase, reason: str) -> None:
         """Report that the ``phase`` record of the call ``call_id`` never reached the control plane.
 
-        The control plane keeps one report per ``call_id``, function and
-        phase, and marks the evaluation's ``function_calls`` incomplete. It
+        The control plane keeps one report per ``call_id``, function and phase
+        (whatever its reason), and marks the evaluation's ``function_calls``
+        incomplete; a report kept before the seal is what grading sees. It
         raises :class:`ControlPlaneRejectedError` when the control plane
-        refuses it: after the seal, with ``late_fact`` True, it's still kept,
-        as a late fact.
+        refuses it: a new report after the seal, with ``late_fact`` True, is
+        still kept as a late fact, which marks the evaluation's evidence status
+        but not its grade.
         """
         ...
 
