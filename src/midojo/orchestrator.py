@@ -8,11 +8,10 @@ import json
 import math
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 import click
 import httpx
-from midojo_sdk.injection import Channel
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -32,6 +31,7 @@ from midojo.control_plane.config import CONTROL_TOKEN_ENV
 from midojo.control_plane.lifecycle import RejectedError
 from midojo.control_plane.models import GradeResponse
 from midojo.episode import Episode
+from midojo.episode_context import EpisodeContext, EpisodeStep, open_episode
 from midojo.reachability import UNKNOWN as UNKNOWN_REACHABILITY
 from midojo.reachability import Reachability, count, reachability
 from midojo.runtimes import AgentRuntime
@@ -41,7 +41,7 @@ from midojo.tool_endpoint import bare_host, tool_url
 from midojo.yaml_task_suite import YAMLTaskSuite
 
 if TYPE_CHECKING:
-    from midojo.interception_host import HostInterception, HostInterceptor
+    from midojo.interception_host import HostInterception
 
 console = Console()
 
@@ -86,6 +86,8 @@ class TaskResult(NamedTuple):
     agent_output: str
     grade: GradeResponse
     turns: list[Exchange]
+    # The sealed snapshot the grade is of.
+    snapshot_id: str | None = None
 
 
 _UNKNOWN = Text("❓ unknown (grade invalid)", style="bold yellow")
@@ -264,13 +266,16 @@ async def run_task(
     runtime: AgentRuntime,
     interception: HostInterception | None = None,
 ) -> TaskResult:
-    """Run one evaluation of a suite's ``episode``, with the runtime set up around the agent's execution.
+    """Run one evaluation of a suite's ``episode`` in an episode context, and grade it on the control plane.
 
-    The control plane compiles the same episode from the run's suite, and its
-    turns are the ones sent. Each turn is started in the control plane, sent to
-    the agent and its reply recorded, all in one conversation. Then the
-    evaluation is closed (calls already admitted may finish), the runtime's
-    final observations recorded, and the evaluation sealed and graded.
+    The context (:func:`midojo.episode_context.open_episode`) opens the
+    evaluation in the run (the control plane compiles the same episode from the
+    run's suite, and its turns are the ones sent), binds interception and sets
+    the runtime up. Each turn is started, sent to the agent and its reply
+    recorded, all in one conversation. Then the context closes the evaluation
+    (calls already admitted may finish), records the runtime's final
+    observations, tears the runtime down and seals, and the control plane
+    grades the snapshot.
 
     Without ``interception``, the runtime and the agent get the evaluation's
     session, for an interception layer in the agent. With it (host mode), the
@@ -283,71 +288,53 @@ async def run_task(
     user_task_id, injection_task_id = episode.user_task_id, episode.injection_task_id
     if user_task_id is None:
         raise ValueError("run_task runs a suite's episode: compile one with suite.episode()")
-    injections = dict(episode.injections)
-    mode: dict[str, Any] = {"interception": "host"} if interception is not None else {}
-    evaluation = await control.create_evaluation(run_id, user_task_id, injection_task_id, injections, **mode)
-    eval_id, messages, session_token = evaluation.id, evaluation.turns, evaluation.session_token
     pair = f"{user_task_id} x {injection_task_id}" if injection_task_id else user_task_id
-    interceptor: HostInterceptor | None = None
+    steps: dict[EpisodeStep, str] = {
+        "interceptor": "starting the interceptor",
+        "setup": f"setting up the {runtime.name} runtime",
+        "close": "waiting for unfinished tool calls",
+        "observe": "collecting runtime observations",
+        "teardown": f"tearing down the {runtime.name} runtime",
+    }
 
-    try:
-        try:
-            # What the agent may hold: the session, or in host mode only the interceptor's endpoint.
-            access: dict[str, Any] = {"session_token": session_token}
-            if interception is not None:
-                with console.status(f"[dim]{pair} · starting the interceptor…[/dim]", spinner="dots"):
-                    interceptor = interception.interceptor(
-                        control.recorder(session_token),
-                        evaluation_id=eval_id,
-                        plan=episode.plan.for_channels(Channel.TOOL_OUTPUT),
-                    )
-                    access = {"tool_endpoint": await interceptor.start()}
-            with console.status(f"[dim]{pair} · setting up the {runtime.name} runtime…[/dim]", spinner="dots"):
-                await asyncio.to_thread(
-                    runtime.setup,
-                    injections,
-                    **access,
-                    eval_id=eval_id,
-                    user_task_id=user_task_id,
-                    injection_task_id=injection_task_id,
-                )
-            conversation = agent_client.start_conversation(turn_count=len(messages), **access)
-            turns: list[Exchange] = []
-            try:
-                for idx, message in enumerate(messages):
-                    running = "running the agent" if len(messages) == 1 else f"running turn {idx + 1}/{len(messages)}"
-                    with console.status(f"[dim]{pair} · {running}…[/dim]", spinner="dots"):
-                        turn = await control.start_turn(run_id, eval_id, message)
-                        reply = await conversation.send(message)
-                        await control.record_turn_reply(run_id, eval_id, turn.index, reply)
-                    turns.append(Exchange(message, reply))
-            finally:
-                await conversation.aclose()
-            # Staged closure: no new call is admitted, calls already admitted may still finish, and the
-            # final observations are collected after that, before the seal.
-            with console.status(f"[dim]{pair} · waiting for unfinished tool calls…[/dim]", spinner="dots"):
-                await control.close_evaluation(run_id, eval_id)
-            with console.status(f"[dim]{pair} · collecting runtime observations…[/dim]", spinner="dots"):
-                observations = await asyncio.to_thread(runtime.observe)
-            for source, observed in observations.items():
-                await control.record_observations(run_id, eval_id, source, observed)
-        finally:
-            with console.status(f"[dim]{pair} · tearing down the {runtime.name} runtime…[/dim]", spinner="dots"):
-                await asyncio.to_thread(runtime.teardown)
+    def progress(step: EpisodeStep) -> contextlib.AbstractContextManager[object]:
+        if step not in steps:
+            return contextlib.nullcontext()
+        return console.status(f"[dim]{pair} · {steps[step]}…[/dim]", spinner="dots")
 
+    async with open_episode(
+        episode, runtime=runtime, interception=interception, control=control, run_id=run_id, progress=progress
+    ) as ep:
+        turns = await _converse(ep, agent_client, pair)
         agent_output = turns[-1].reply
-        await control.complete_evaluation(run_id, eval_id, agent_output)
-        grade = await control.grade_evaluation(run_id, eval_id)
-        return TaskResult(eval_id=eval_id, prompt=turns[0].message, agent_output=agent_output, grade=grade, turns=turns)
-    except BaseException:
-        with contextlib.suppress(*_CONTROL_ERRORS):
-            await control.revoke_session(run_id, eval_id)
-        raise
+        snapshot = await ep.seal(agent_output)
+        # Graded while the interceptor is still up: a call the target makes after the seal is a late fact.
+        grade = await control.grade_evaluation(run_id, ep.evaluation_id)
+    return TaskResult(
+        eval_id=ep.evaluation_id,
+        prompt=turns[0].message,
+        agent_output=agent_output,
+        grade=grade,
+        turns=turns,
+        snapshot_id=snapshot.snapshot_id,
+    )
+
+
+async def _converse(ep: EpisodeContext, agent_client: AgentClient, pair: str) -> list[Exchange]:
+    """Send the episode's turns to the agent, in one conversation, recording each reply."""
+    messages = ep.turns
+    assert messages is not None  # A suite's episode always has its user task's turns.
+    conversation = agent_client.start_conversation(turn_count=len(messages), **ep.binding.access)
+    turns: list[Exchange] = []
+    try:
+        for idx, message in enumerate(messages):
+            running = "running the agent" if len(messages) == 1 else f"running turn {idx + 1}/{len(messages)}"
+            with console.status(f"[dim]{pair} · {running}…[/dim]", spinner="dots"):
+                reply = await ep.turn(message, conversation.send)
+            turns.append(Exchange(message, reply))
     finally:
-        # Live until the evaluation is sealed: a call the target makes after closure, however late, is refused
-        # and kept as a late fact, rather than lost to a refused connection.
-        if interceptor is not None:
-            await interceptor.stop()
+        await conversation.aclose()
+    return turns
 
 
 async def _run_benchmark(

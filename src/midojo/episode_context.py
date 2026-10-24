@@ -347,7 +347,7 @@ class EpisodeContext:
         try:
             await self.control.revoke_session(self.run_id, self.evaluation_id)
         except Exception:
-            logger.warning("Couldn't revoke the session of evaluation %s", self._evaluation_id, exc_info=True)
+            logger.info("Couldn't revoke the session of evaluation %s", self._evaluation_id, exc_info=True)
 
 
 def open_episode(
