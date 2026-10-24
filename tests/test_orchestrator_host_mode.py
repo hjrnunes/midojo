@@ -197,6 +197,40 @@ def test_a_responses_protocol_needs_no_mcp_server_url_in_host_mode(cli_benchmark
         ([*PI, "--interception", "host"], "requires --upstream-mcp-url"),
         ([*OPENSHELL, "--interception", "host", *UPSTREAM, "--interceptor-bind", "0.0.0.0"], "--interceptor-port"),
         ([*OPENSHELL, "--interception", "host", *UPSTREAM, "--interceptor-port", "8765"], "host's loopback"),
+        *[
+            (
+                [
+                    *OPENSHELL,
+                    "--interception",
+                    "host",
+                    *UPSTREAM,
+                    "--interceptor-port",
+                    "8765",
+                    "--interceptor-bind",
+                    h,
+                ],
+                "host's loopback",
+            )
+            for h in ("127.0.0.2", "::1", "localhost", "::ffff:127.0.0.1")
+        ],
+        *[
+            (
+                [
+                    *OPENSHELL,
+                    "--interception",
+                    "host",
+                    *UPSTREAM,
+                    "--interceptor-port",
+                    "8765",
+                    "--interceptor-bind",
+                    "0.0.0.0",
+                    "--interceptor-advertise-host",
+                    h,
+                ],
+                "can't reach an interceptor advertised at",
+            )
+            for h in ("127.0.0.1", "127.1.2.3", "::1", "[::1]", "0.0.0.0", "::", "localhost", "LocalHost")
+        ],
         ([*PI, "--interceptor-port", "8765"], "apply only to --interception host"),
         ([*PI, "--interceptor-advertise-host", "h"], "apply only to --interception host"),
     ],

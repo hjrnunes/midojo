@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import importlib
+import ipaddress
 import json
 import math
 import os
@@ -750,6 +751,28 @@ def main(
     )
 
 
+def _ip(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """``host`` as an IP address (an IPv4-mapped IPv6 one as its IPv4 address), or None for a name."""
+    try:
+        ip = ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        return None
+    return ip.ipv4_mapped or ip if isinstance(ip, ipaddress.IPv6Address) else ip
+
+
+def _is_loopback(host: str) -> bool:
+    """Whether ``host`` is this machine's loopback: ``localhost`` or an address in 127.0.0.0/8 or ::1."""
+    name = host.lower().rstrip(".")
+    ip = _ip(host)
+    return name == "localhost" or name.endswith(".localhost") or (ip is not None and ip.is_loopback)
+
+
+def _is_unspecified(host: str) -> bool:
+    """Whether ``host`` is an unspecified address (0.0.0.0, ::): one to listen on, not to connect to."""
+    ip = _ip(host)
+    return host == "" or (ip is not None and ip.is_unspecified)
+
+
 def _host_interception(
     upstream_mcp_url: str | None, *, bind: str, port: int, advertise: str | None, openshell: bool
 ) -> HostInterception:
@@ -764,12 +787,18 @@ def _host_interception(
                 "--interception host with the openshell runtime requires --interceptor-port: the sandbox's network "
                 "policy must allow a fixed port."
             )
-        if bind in {"127.0.0.1", "localhost", "::1"}:
+        if _is_loopback(bind):
             raise click.UsageError(
                 "An OpenShell sandbox can't reach an interceptor on the host's loopback: pass --interceptor-bind "
                 "with an address the sandbox reaches (e.g. 0.0.0.0)."
             )
         advertise = advertise or SANDBOX_HOST
+        if _is_loopback(advertise) or _is_unspecified(advertise):
+            raise click.UsageError(
+                f"An OpenShell sandbox can't reach an interceptor advertised at {advertise}: its loopback is the "
+                f"sandbox's own, and an unspecified address names no host. Pass --interceptor-advertise-host with "
+                f"a host the sandbox reaches, or leave it out for {SANDBOX_HOST}."
+            )
     return HostInterception(upstream=upstream_mcp_url, bind_host=bind, port=port, advertise_host=advertise)
 
 
