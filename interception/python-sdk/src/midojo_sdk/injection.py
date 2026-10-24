@@ -314,6 +314,15 @@ def instruction_from_generator(
     )
 
 
+def instruction_from_generator_for_plan(
+    output: Mapping[str, Any], plan: InjectionPlan, *, probe_key: str | None = None
+) -> InjectionInstruction:
+    """Build from generator output constrained by an episode's plan permissions."""
+    if type(plan) is not InjectionPlan:
+        raise TypeError("plan must be an InjectionPlan")
+    return instruction_from_generator(output, plan.generator_permissions, probe_key=probe_key)
+
+
 def _path(value: Any, what: str) -> FieldPath:
     if isinstance(value, str) or not isinstance(value, Sequence):
         raise TypeError(f"{what} must be a sequence")

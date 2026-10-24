@@ -52,6 +52,8 @@ Matching calls are numbered per evaluation under a lock after their recorded sta
 
 When `recorder=` is injected, a non-empty plan also requires `evaluation_id=`. That binds the interceptor and all its counters to one evaluation; build a separate `MidojoMCP` for another evaluation. Without an injected recorder, the incoming evaluation session is the scope.
 
+Automated generator output should go through `instruction_from_generator_for_plan(output, episode.plan)`. It accepts only tools, structured-content field paths, and modes listed in that plan's `generator_permissions`.
+
 ## Recorder and WorldState
 
 `midojo_sdk.recorder` defines the two seams an interception layer talks to. A `Recorder` starts and finishes the calls of one evaluation, each with its disposition. A `WorldState` reads the evaluation's simulated environment (`read()`: its revision and fields) and changes it (`change(values, expected_revision=None)`: one atomic step, or `None` when `expected_revision` is stale). `midojo_sdk.client.AgentControlPlaneClient` implements both over HTTP for one session; `midojo.control_plane.inprocess.InProcessAgentClient` implements both in the control plane's own process, with no HTTP.

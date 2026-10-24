@@ -24,9 +24,11 @@ from midojo_sdk.injection import (
     OutcomeStatus,
     SelectorSurface,
     instruction_from_generator,
+    instruction_from_generator_for_plan,
 )
 from midojo_sdk.mcp import MidojoMCP
 
+from midojo.episode import Episode
 from tests.scripted_mcp import ScriptedMCP
 from tests.test_mcp_fidelity import CapturingRecorder
 
@@ -136,6 +138,24 @@ def test_plan_is_frozen_and_generator_output_is_bounded():
         output = {"payload": "x", "tool": "search", "field": ["items", 0, "summary"], "mode": "replace"} | changed
         with pytest.raises(GeneratorInstructionError):
             instruction_from_generator(output, permissions)
+
+
+def test_generator_output_is_constrained_by_the_episode_plan_permissions():
+    permissions = GeneratorPermissions(
+        tools=frozenset({"search"}),
+        fields=frozenset({("items", 0, "summary")}),
+        modes=frozenset({InjectionMode.REPLACE}),
+    )
+    episode = Episode(plan=InjectionPlan(generator_permissions=permissions))
+    valid = {"payload": "x", "tool": "search", "field": ["items", 0, "summary"], "mode": "replace"}
+    made = instruction_from_generator_for_plan(valid, episode.plan, probe_key="task:probe")
+    assert (made.target.tool, made.target.structured_content_path, made.probe_key) == (
+        "search",
+        ("items", 0, "summary"),
+        "task:probe",
+    )
+    with pytest.raises(GeneratorInstructionError, match="not permitted"):
+        instruction_from_generator_for_plan(valid | {"tool": "other"}, episode.plan)
 
 
 def test_selector_fields_must_belong_to_the_selected_surface():
