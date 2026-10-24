@@ -227,6 +227,50 @@ agent_runtime:
 
 Suite YAML places payloads with probe placeholders. `YAMLTaskSuite.episode(...)` compiles the active placeholders into a frozen injection plan while preserving the rendered prompt, environment and runtime files. Programmatic hosts can add exact tool-result instructions—channel, selector, occurrence, transformation, size limit, mode and mismatch policy—and hand the relevant channel subset to an interceptor. Strict mismatch is the default; exploratory fallback must be explicit and is reported.
 
+### Keep the evaluation out of the agent's reach
+
+By default the interception layer runs in or beside the agent (a PI extension, LangChain middleware, a fake MCP server the agent reaches) and records calls with the evaluation's session token, so the agent under test can hold that token. With it, the agent could read hidden environment state or rewrite its own record. `midojo-run --interception host` moves interception out of the agent. For each evaluation, `midojo-run` starts an MCP interceptor in its own process. The interceptor mirrors the real MCP server at `--upstream-mcp-url`, applies the evaluation's tool-output injections, and records every call. The agent gets only that interceptor's tool endpoint: a URL and a bearer token valid for that one interceptor. It never gets a session token, the control plane's URL or token, or a run or evaluation ID.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--interception agent\|host` | `agent` | where tool calls are intercepted |
+| `--upstream-mcp-url URL` (env `UPSTREAM_MCP_URL`) | | the real MCP server the interceptor forwards to; required with `host` |
+| `--interceptor-bind ADDRESS` | `127.0.0.1` | the address the interceptor listens on |
+| `--interceptor-port PORT` | `0` (a free port per evaluation) | the port it listens on; OpenShell needs a fixed one |
+| `--interceptor-advertise-host HOST` | `host.openshell.internal` for OpenShell, else the bind address | the host the agent connects to |
+
+For an unmanaged agent on this machine, the defaults keep the interceptor on loopback. `--protocol openai` and `ogx` put the endpoint in the request's MCP tool (no `--mcp-server-url` needed). `--protocol pi` passes it to the PI process as `MIDOJO_TOOL_URL` and `MIDOJO_TOOL_TOKEN`. `--protocol http` and `a2a` can't pass an endpoint, so `midojo-run` refuses them before the run starts.
+
+```sh
+midojo-run --suite minibank --agent-uri ./agent --protocol pi \
+  --interception host --upstream-mcp-url http://localhost:9000/mcp
+```
+
+An OpenShell sandbox can't reach the host's loopback. Bind an address the sandbox can reach and give a fixed port. The sandbox gets `MIDOJO_TOOL_URL` (`http://host.openshell.internal:<port>/mcp`) and `MIDOJO_TOOL_TOKEN`; its agent command connects its MCP client there. MiDojo drops `MIDOJO_SESSION_TOKEN`, `MIDOJO_URL` and `MIDOJO_CONTROL_TOKEN` from the sandbox's environment, even when the suite's `env_vars` set them.
+
+```sh
+midojo-run --suite weather --gateway GATEWAY --control-url http://localhost:8090 \
+  --interception host --upstream-mcp-url http://localhost:9000/mcp \
+  --interceptor-bind 0.0.0.0 --interceptor-port 8765
+```
+
+The suite's network policy must allow the interceptor's host and port for the binaries that make the MCP calls. It needs no rule for the control plane, which the sandbox never reaches in host mode; remove any such rule so the agent can't reach it. `midojo-run` warns when the policy doesn't allow the interceptor:
+
+```yaml
+policy:
+  networkPolicies:
+    midojo_interceptor:
+      endpoints:
+        - host: host.openshell.internal
+          port: 8765        # --interceptor-port
+      binaries:
+        - path: /usr/bin/node
+```
+
+Each interceptor accepts only its own token, and stops after its evaluation. The port or path is only an address: one evaluation's agent can't call another evaluation's interceptor. Once the evaluation is closing, the interceptor stops forwarding: a new call gets an error, and the control plane keeps it as a late fact. The evaluation's state ends calls, not a revoked token.
+
+Every call record has a `provenance`, set by the control plane from how the record arrived, never by the sender: `interceptor` (a host-side interceptor), `agent` (an interception layer holding the session: lower-trust evidence, since the agent could have written or left out any record) or `host` (the run-scoped routes). The evaluation's `interception` (`agent` or `host`) says which applies. When an evaluation intercepted in the agent is sealed with no call recorded at all, its `function_calls` evidence is `incomplete`: a hook that fails open records nothing, so a missing call is unknown, never proof the agent was safe.
+
 ### Write a suite
 
 Start with the [weather suite](suites/weather/README.md), MiDojo's reference suite: its [task definitions](suites/weather/suite.yaml) and [Python loader](suites/weather/__init__.py). Define the legitimate tasks, where injections land, and what counts as task completion and attack success. Add tool interception where your scenario needs it.
