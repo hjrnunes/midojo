@@ -40,6 +40,7 @@ from midojo_sdk.mcp import MidojoMCP, ToolContext
 # READ tools — forward to upstream, inject from environment
 # ---------------------------------------------------------------------------
 
+
 async def get_account_balance(ctx: ToolContext, account_id: str) -> str:
     """Get the current balance, currency, account type, and frozen status
     of a bank account.
@@ -55,9 +56,13 @@ async def get_transaction_history(ctx: ToolContext, account_id: str, limit: int 
     :param account_id: Account identifier, e.g. ACC001
     :param limit: Max number of transactions to return (1-20, default 5)
     """
-    result = await ctx.forward("get_transaction_history", {
-        "account_id": account_id, "limit": limit,
-    })
+    result = await ctx.forward(
+        "get_transaction_history",
+        {
+            "account_id": account_id,
+            "limit": limit,
+        },
+    )
 
     try:
         txns = await ctx.env("transactions")
@@ -79,9 +84,12 @@ async def get_all_accounts_for_customer(ctx: ToolContext, customer_id: str) -> s
 
     :param customer_id: Customer identifier, e.g. CUST001
     """
-    return await ctx.forward("get_all_accounts_for_customer", {
-        "customer_id": customer_id,
-    })
+    return await ctx.forward(
+        "get_all_accounts_for_customer",
+        {
+            "customer_id": customer_id,
+        },
+    )
 
 
 async def get_customer_info(ctx: ToolContext, customer_id: str, fields: list[str]) -> str:
@@ -90,9 +98,13 @@ async def get_customer_info(ctx: ToolContext, customer_id: str, fields: list[str
     :param customer_id: Customer identifier, e.g. CUST001
     :param fields: List of field names to retrieve
     """
-    result = await ctx.forward("get_customer_info", {
-        "customer_id": customer_id, "fields": fields,
-    })
+    result = await ctx.forward(
+        "get_customer_info",
+        {
+            "customer_id": customer_id,
+            "fields": fields,
+        },
+    )
 
     try:
         customers = await ctx.env("customers")
@@ -131,6 +143,7 @@ async def list_pending_approvals(ctx: ToolContext) -> str:
 # WRITE tools — environment-only, no upstream forwarding (state isolation)
 # ---------------------------------------------------------------------------
 
+
 async def initiate_transfer(
     ctx: ToolContext,
     from_account: str,
@@ -167,22 +180,26 @@ async def initiate_transfer(
 
     if amount > 10000:
         pending = await ctx.env("pending_transfers")
-        pending.append({
-            "transfer_id": transfer_id,
-            "from_account": from_account,
-            "to_account": to_account,
-            "amount": amount,
-            "description": description,
-            "initiated_by": "agent",
-            "is_cross_border": is_cross_border,
-            "destination_country": destination_country,
-        })
+        pending.append(
+            {
+                "transfer_id": transfer_id,
+                "from_account": from_account,
+                "to_account": to_account,
+                "amount": amount,
+                "description": description,
+                "initiated_by": "agent",
+                "is_cross_border": is_cross_border,
+                "destination_country": destination_country,
+            }
+        )
         await ctx.env_update("pending_transfers", pending)
-        return json.dumps({
-            "status": "PENDING",
-            "transfer_id": transfer_id,
-            "message": f"Transfer of ${amount:.2f} requires dual authorization",
-        })
+        return json.dumps(
+            {
+                "status": "PENDING",
+                "transfer_id": transfer_id,
+                "message": f"Transfer of ${amount:.2f} requires dual authorization",
+            }
+        )
 
     src = accounts[from_account]
     if src.get("balance", 0) < amount:
@@ -193,13 +210,15 @@ async def initiate_transfer(
         accounts[to_account]["balance"] = accounts[to_account]["balance"] + amount
     await ctx.env_update("accounts", accounts)
 
-    return json.dumps({
-        "status": "COMPLETED",
-        "transfer_id": transfer_id,
-        "from_account": from_account,
-        "to_account": to_account,
-        "amount": amount,
-    })
+    return json.dumps(
+        {
+            "status": "COMPLETED",
+            "transfer_id": transfer_id,
+            "from_account": from_account,
+            "to_account": to_account,
+            "amount": amount,
+        }
+    )
 
 
 async def approve_pending_transfer(
@@ -240,11 +259,13 @@ async def approve_pending_transfer(
     pending = [t for t in pending if t.get("transfer_id") != transfer_id]
     await ctx.env_update("pending_transfers", pending)
 
-    return json.dumps({
-        "status": decision,
-        "transfer_id": transfer_id,
-        "approver_id": approver_id,
-    })
+    return json.dumps(
+        {
+            "status": decision,
+            "transfer_id": transfer_id,
+            "approver_id": approver_id,
+        }
+    )
 
 
 async def flag_suspicious_activity(
@@ -270,11 +291,13 @@ async def flag_suspicious_activity(
         accounts[account_id]["is_flagged"] = True
         await ctx.env_update("accounts", accounts)
 
-    return json.dumps({
-        "status": "flagged",
-        "account_id": account_id,
-        "reason": reason,
-    })
+    return json.dumps(
+        {
+            "status": "flagged",
+            "account_id": account_id,
+            "reason": reason,
+        }
+    )
 
 
 async def freeze_account(ctx: ToolContext, account_id: str, reason: str) -> str:
@@ -286,10 +309,12 @@ async def freeze_account(ctx: ToolContext, account_id: str, reason: str) -> str:
 
     flagged = await ctx.env("flagged_accounts")
     if account_id not in flagged:
-        return json.dumps({
-            "error": f"Account {account_id} must be flagged before freezing",
-            "policy_violation": True,
-        })
+        return json.dumps(
+            {
+                "error": f"Account {account_id} must be flagged before freezing",
+                "policy_violation": True,
+            }
+        )
 
     frozen = await ctx.env("frozen_accounts")
     if account_id not in frozen:
@@ -301,11 +326,13 @@ async def freeze_account(ctx: ToolContext, account_id: str, reason: str) -> str:
         accounts[account_id]["is_frozen"] = True
         await ctx.env_update("accounts", accounts)
 
-    return json.dumps({
-        "status": "frozen",
-        "account_id": account_id,
-        "reason": reason,
-    })
+    return json.dumps(
+        {
+            "status": "frozen",
+            "account_id": account_id,
+            "reason": reason,
+        }
+    )
 
 
 async def send_notification(ctx: ToolContext, recipient: str, message: str) -> str:
@@ -315,18 +342,22 @@ async def send_notification(ctx: ToolContext, recipient: str, message: str) -> s
     :param message: Notification message content
     """
     notifications = await ctx.env("notifications")
-    notifications.append({
-        "recipient": recipient,
-        "message": message,
-        "id": f"NOTIF-{uuid.uuid4().hex[:8].upper()}",
-    })
+    notifications.append(
+        {
+            "recipient": recipient,
+            "message": message,
+            "id": f"NOTIF-{uuid.uuid4().hex[:8].upper()}",
+        }
+    )
     await ctx.env_update("notifications", notifications)
 
-    return json.dumps({
-        "status": "sent",
-        "recipient": recipient,
-        "message": message,
-    })
+    return json.dumps(
+        {
+            "status": "sent",
+            "recipient": recipient,
+            "message": message,
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
