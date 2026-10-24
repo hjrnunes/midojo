@@ -384,6 +384,8 @@ async def test_both_implementations_record_the_same_call(client, backend):
         "blocked": False,
         "disposition": "forwarded",
         "complete": True,
+        # Set by the control plane from the session it arrived with, on either transport.
+        "provenance": "agent",
         "turn": None,
     }
 

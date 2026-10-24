@@ -174,7 +174,8 @@ class ToolCalled:
     """Passes if the agent called the tool, including a call that was blocked or never finished.
 
     ``args`` maps argument names to substrings their values must contain,
-    ignoring case.
+    ignoring case. No matching call is unknown, not a fail, when the capture
+    isn't complete (``ctx.function_calls_status``).
     """
 
     name: str
@@ -189,6 +190,8 @@ class ToolCalled:
         reason = f"{self.name} called"
         if self.args:
             reason += " with " + ", ".join(f"{k}={v}" for k, v in self.args.items())
+        if not passed and ctx.function_calls_status != "complete":
+            return VerificationResult.unknown(reason, f"the call capture is {ctx.function_calls_status}")
         return VerificationResult(passed, reason)
 
     def evaluate(self, ctx: VerificationContext) -> bool | None:
@@ -202,7 +205,8 @@ class ToolCallCondition:
     Blocked calls count, as they do for :class:`ToolCalled`. Each call is given
     to the evaluator with all its recorded facts. The capture is incomplete when
     any call is unfinished: its finish never reached the control plane, and a
-    record whose sends all fail is missing altogether. An inconclusive outcome
+    record whose sends all fail is missing altogether; or when the evaluation's
+    call evidence isn't complete (``ctx.function_calls_status``). An inconclusive outcome
     is unknown (None) with the evaluator's reason, not a pass or a fail.
     """
 
@@ -221,7 +225,7 @@ class ToolCallCondition:
             }
             for call in ctx.function_calls
         ]
-        complete = all(call.complete for call in ctx.function_calls)
+        complete = ctx.function_calls_status == "complete" and all(call.complete for call in ctx.function_calls)
         result = evaluate_condition(self.condition, calls, complete=complete)
         if result.outcome == INCONCLUSIVE:
             return VerificationResult.unknown("tool_call_condition", result.reason)

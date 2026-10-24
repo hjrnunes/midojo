@@ -5,7 +5,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny
 
 from midojo.observations import EvidenceStatus
-from midojo.types import CallDisposition, Environment, GradeValidity, SuiteName
+from midojo.types import CallDisposition, CallProvenance, Environment, GradeValidity, InterceptionMode, SuiteName
 
 # --- Run / Evaluation request/response models ---
 
@@ -17,6 +17,22 @@ _DISPOSITION_DESCRIPTION = (
     "says nothing. A denied or blocked call has `blocked` true, a forwarded or simulated one false; any other "
     "pairing is a 422 `invalid_disposition`. A finish that leaves it out keeps its start's; one that names "
     "another than its start's is a 409 `call_conflict`."
+)
+
+
+_PROVENANCE_DESCRIPTION = (
+    "How the record reached the control plane, set by the control plane from the authority it arrived with, never "
+    "by the caller: host (a run-scoped route, or the host in process), interceptor (the session of an evaluation "
+    "intercepted on the host, which the target never holds) or agent (the session of an evaluation intercepted in "
+    "the agent: lower trust, since the target may hold the session). None in older records."
+)
+
+_INTERCEPTION_DESCRIPTION = (
+    "Where the evaluation's tool calls are intercepted: agent (an interception layer in the agent records them with "
+    "the evaluation's session, which the target may hold) or host (an interceptor the host runs outside the target "
+    "records them; the target is given only its tool endpoint). It sets the provenance of the records the session "
+    "makes. With agent, an evaluation sealed without any call record has function_calls evidence incomplete: a "
+    "hook that failed open records nothing, so no record is not evidence of no call."
 )
 
 
@@ -105,6 +121,7 @@ class FunctionCallResponse(FunctionCallBody):
             "neither its start nor its finish said."
         ),
     )
+    provenance: CallProvenance | None = Field(default=None, description=_PROVENANCE_DESCRIPTION)
     timestamp: str
     turn: int | None = Field(
         default=None, description="Index of the turn most recently started when the call was recorded, if any."
@@ -148,6 +165,7 @@ class CreateEvaluationRequest(BaseModel):
     user_task_id: str
     injection_task_id: str | None = None
     injections: dict[str, str] = {}
+    interception: InterceptionMode = Field(default="agent", description=_INTERCEPTION_DESCRIPTION)
 
 
 class CreateRunRequest(BaseModel):
@@ -197,7 +215,12 @@ class LateFactResponse(BaseModel):
         )
     )
     stage: str = Field(description="The evaluation's stage when it arrived.")
-    by: str = Field(description="agent (an /agent route) or host (a run-scoped route).")
+    by: str = Field(
+        description=(
+            "Who sent it: agent or interceptor (the evaluation's session, by interception mode) or host (a "
+            "run-scoped route, or the host in process)."
+        )
+    )
     at: str
     evidence: list[str] = Field(description="The evidence_status keys it marks incomplete.")
     payload: dict[str, Any] = Field(description="The write as sent.")
@@ -268,6 +291,7 @@ class EvaluationResponse(BaseModel):
     id: str
     user_task_id: str
     injection_task_id: str | None
+    interception: InterceptionMode = Field(default="agent", description=_INTERCEPTION_DESCRIPTION)
     completed: bool
     stage: str = Field(default="open", description=_STAGE_DESCRIPTION)
     graded: bool = Field(description="Whether the evaluation was graded. A graded None is unknown, not ungraded.")

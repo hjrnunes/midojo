@@ -21,7 +21,7 @@ from pydantic import BaseModel
 
 from midojo.episode import Episode
 from midojo.observations import EvidenceStatus
-from midojo.types import Environment, FunctionCallRecord, SuiteName
+from midojo.types import Environment, FunctionCallRecord, InterceptionMode, SuiteName
 
 from .models import GradeResponse
 
@@ -143,6 +143,9 @@ class Evaluation:
     # Whether call records carry environment snapshots: the environment observed when each call started and
     # finished, which shows what changed during the call, not what the call caused.
     environment_history: bool = False
+    # Where the tool calls are intercepted, chosen by the host at creation: it sets the provenance of the
+    # records the session makes, and whether a capture without records is complete (see lifecycle._seal).
+    interception: InterceptionMode = "agent"
 
     @property
     def completed(self) -> bool:

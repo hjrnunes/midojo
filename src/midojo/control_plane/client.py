@@ -15,6 +15,7 @@ from midojo.control_plane.models import (
     GradeResponse,
     TurnResponse,
 )
+from midojo.types import InterceptionMode
 
 
 class ControlClient(Protocol):
@@ -38,6 +39,7 @@ class ControlClient(Protocol):
         user_task_id: str,
         injection_task_id: str | None,
         injections: dict[str, str],
+        interception: InterceptionMode = "agent",
     ) -> CreateEvaluationResponse: ...
 
     async def start_turn(self, run_id: str, eval_id: str, message: str) -> TurnResponse: ...
@@ -89,6 +91,7 @@ class ControlPlaneClient:
         user_task_id: str,
         injection_task_id: str | None,
         injections: dict[str, str],
+        interception: InterceptionMode = "agent",
     ) -> CreateEvaluationResponse:
         response = await self._http.post(
             f"{self._base_url}/runs/{run_id}/evaluations",
@@ -97,6 +100,7 @@ class ControlPlaneClient:
                 "user_task_id": user_task_id,
                 "injection_task_id": injection_task_id,
                 "injections": injections,
+                "interception": interception,
             },
         )
         response.raise_for_status()

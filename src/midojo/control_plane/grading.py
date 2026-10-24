@@ -14,7 +14,8 @@ def grade_snapshot(episode: Episode, snapshot: Snapshot) -> GradeResponse:
     """Grade ``snapshot`` with ``episode``'s checks. Reads nothing else, and changes nothing in ``snapshot``.
 
     The evidence status is the episode's, with every key the snapshot marks (a
-    late fact recorded before the seal) taken from the snapshot.
+    late fact recorded before the seal, or a call capture the seal found
+    incomplete) taken from the snapshot; the checks read the call capture's.
     """
     snapshot = detached(snapshot)
     result = episode.grade(
@@ -24,6 +25,7 @@ def grade_snapshot(episode: Episode, snapshot: Snapshot) -> GradeResponse:
         function_calls=list(snapshot.function_calls),
         observations=dict(snapshot.observations),
         turns=[ConversationTurn(message=turn.message, reply=turn.reply) for turn in snapshot.turns],
+        function_calls_status=snapshot.evidence_status.get("function_calls", "complete"),
     )
     graded = GradeResponse.model_validate(result)
     return graded.model_copy(update={"evidence_status": {**graded.evidence_status, **snapshot.evidence_status}})

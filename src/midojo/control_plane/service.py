@@ -43,7 +43,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from midojo.episode import Episode, UnknownTaskError
-from midojo.types import Environment, FunctionCallRecord, SuiteName
+from midojo.types import Environment, FunctionCallRecord, InterceptionMode, SuiteName
 from midojo.yaml_task_suite import YAMLTaskSuite
 
 from . import lifecycle
@@ -195,13 +195,14 @@ class ControlPlane:
         user_task_id: str,
         injection_task_id: str | None = None,
         injections: Mapping[str, str] | None = None,
+        interception: InterceptionMode = "agent",
     ) -> CreateEvaluationResponse:
         """Compile the run's suite pair into an episode and open it. The response is the only place the token appears."""
         try:
             episode = self.suite(run_id).episode(user_task_id, injection_task_id, detached(dict(injections or {})))
         except UnknownTaskError as exc:
             raise _reject(Rejection.UNKNOWN_TASK, exc.detail) from None
-        opened = self.open_evaluation(episode, run_id=run_id)
+        opened = self.open_evaluation(episode, run_id=run_id, interception=interception)
         assert opened.turns is not None  # A suite's episode always has its user task's turns.
         return CreateEvaluationResponse(
             id=opened.id,
@@ -211,7 +212,9 @@ class ControlPlane:
             session_expires_at=opened.session_expires_at,
         )
 
-    def open_evaluation(self, episode: Episode, *, run_id: str | None = None) -> OpenedEvaluation:
+    def open_evaluation(
+        self, episode: Episode, *, run_id: str | None = None, interception: InterceptionMode = "agent"
+    ) -> OpenedEvaluation:
         """Create an evaluation of ``episode`` and open its session.
 
         Needs no registered suite or run: without ``run_id``, the evaluation is
@@ -220,6 +223,11 @@ class ControlPlane:
         ``user_task_id`` (the run's routes report every evaluation by it), or
         this raises ValueError. The episode's suite and task IDs are kept as
         provenance; grading uses its checks.
+
+        ``interception`` is where its tool calls are intercepted: ``agent`` (by
+        an interception layer given the session) or ``host`` (by an interceptor
+        the host runs outside the target, the only holder of the session). It
+        labels each record the session makes (``FunctionCallRecord.provenance``).
         """
         run = self.run(run_id) if run_id is not None else None
         if run is not None and episode.user_task_id is None:
@@ -238,6 +246,7 @@ class ControlPlane:
             episode=episode,
             suite_name=episode.suite_name if episode.suite_name is not None else (run.suite_name if run else None),
             environment_history=self.config.environment_history,
+            interception=interception,
         )
         self.store.insert_evaluation(evaluation)
         token = secrets.token_urlsafe(32)

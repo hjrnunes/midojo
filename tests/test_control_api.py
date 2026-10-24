@@ -1100,7 +1100,12 @@ def test_not_graded_is_distinct_from_graded_unknown(client):
     assert graded["security"] is None
     assert graded["grade_validity"]["utility"] == {"status": "valid", "reasons": []}
     assert graded["grade_validity"]["security"]["status"] == "invalid"
-    assert graded["evidence_status"] == {"openshell.ocsf": "complete", "openshell.workdir": "failed"}
+    # No call was recorded, and the calls were intercepted in the agent: the capture is incomplete too.
+    assert graded["evidence_status"] == {
+        "openshell.ocsf": "complete",
+        "openshell.workdir": "failed",
+        "function_calls": "incomplete",
+    }
     assert graded["security_reason"]
 
     after = client.get(url).json()

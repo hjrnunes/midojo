@@ -33,7 +33,7 @@ from midojo_sdk.injection import InjectionPlan
 from pydantic import BaseModel, TypeAdapter
 
 from midojo.env_inference import infer_environment_type
-from midojo.observations import evidence_status
+from midojo.observations import EvidenceStatus, evidence_status
 from midojo.runtimes import AgentRuntime, build_runtime
 from midojo.runtimes.openshell import OBSERVATIONS_SOURCE, OpenShellObservations
 from midojo.suite_definition import AgentRuntimeDefinition
@@ -230,6 +230,7 @@ class Episode:
         function_calls: list[FunctionCallRecord],
         observations: Mapping[str, BaseModel] | None = None,
         turns: list[ConversationTurn] | None = None,
+        function_calls_status: EvidenceStatus = "complete",
     ) -> dict[str, Any]:
         """Grade one run of the episode with checks parsed fresh from its specs.
 
@@ -238,7 +239,9 @@ class Episode:
         such a grade ``invalid`` and lists the unknown checks. Each grade has a
         reason, whatever its outcome. Without a check, the grade is False, its
         reason None, and its validity ``not_applicable``. ``evidence_status`` is
-        how completely each evidence source was collected.
+        how completely each evidence source was collected. ``function_calls_status``
+        is how completely the calls were captured: a check that finds no matching
+        call is unknown when it isn't ``complete``.
         """
         observations = dict(observations or {})
         if self._on_openshell() and OBSERVATIONS_SOURCE not in observations:
@@ -250,6 +253,7 @@ class Episode:
             function_calls=function_calls,
             observations=observations,
             turns=turns or [],
+            function_calls_status=function_calls_status,
         )
         # One traversal per check grades it and names the criterion that decided it.
         utility, utility_reason, utility_validity = _assess(self._check("utility"), ctx)

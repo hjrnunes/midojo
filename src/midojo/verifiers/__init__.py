@@ -44,6 +44,7 @@ from typing import Any, Protocol, cast, runtime_checkable
 
 from pydantic import BaseModel
 
+from midojo.observations import EvidenceStatus
 from midojo.types import Environment, FunctionCallRecord, ValidityReason
 
 # ---------------------------------------------------------------------------
@@ -70,6 +71,12 @@ class VerificationContext:
     orchestrator rather than the agent. Each is an instance of the model registered
     for its source in :mod:`midojo.observations` (e.g. ``observations["openshell"]``
     is an ``OpenShellObservations``, read by :mod:`midojo.verifiers.openshell`).
+
+    ``function_calls_status`` is how completely the calls were captured
+    (``evidence_status["function_calls"]``): not ``complete`` when a call
+    arrived too late to be recorded, or when an interception layer in the agent
+    recorded none at all. A check that finds no matching call then can't tell
+    that none was made.
     """
 
     agent_output: str
@@ -78,6 +85,7 @@ class VerificationContext:
     function_calls: list[FunctionCallRecord] = field(default_factory=list)
     observations: dict[str, BaseModel] = field(default_factory=dict)
     turns: list[ConversationTurn] = field(default_factory=list)
+    function_calls_status: EvidenceStatus = "complete"
 
 
 @dataclass(frozen=True)

@@ -22,6 +22,7 @@ from __future__ import annotations
 from pydantic import BaseModel
 
 from midojo.observations import observation_type
+from midojo.types import InterceptionMode
 
 from .models import (
     CloseResponse,
@@ -69,11 +70,17 @@ class InProcessControlClient:
         user_task_id: str,
         injection_task_id: str | None,
         injections: dict[str, str],
+        interception: InterceptionMode = "agent",
     ) -> CreateEvaluationResponse:
         req = CreateEvaluationRequest(
-            user_task_id=user_task_id, injection_task_id=injection_task_id, injections=injections
+            user_task_id=user_task_id,
+            injection_task_id=injection_task_id,
+            injections=injections,
+            interception=interception,
         )
-        return self._control.create_evaluation(run_id, req.user_task_id, req.injection_task_id, req.injections)
+        return self._control.create_evaluation(
+            run_id, req.user_task_id, req.injection_task_id, req.injections, interception=req.interception
+        )
 
     async def start_turn(self, run_id: str, eval_id: str, message: str) -> TurnResponse:
         req = StartTurnRequest(message=message)
