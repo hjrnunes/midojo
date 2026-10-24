@@ -1,6 +1,7 @@
 """A call record that never reaches the control plane is evidence: function_calls is incomplete, not silent."""
 
 import asyncio
+from datetime import UTC, datetime
 
 import pytest
 
@@ -199,14 +200,24 @@ def test_a_report_is_kept_while_collecting_and_from_the_host():
 
 
 @pytest.mark.asyncio
-async def test_a_report_is_kept_while_closing_waits_for_an_admitted_call():
+async def test_a_report_is_kept_while_closing_waits_for_an_admitted_call(monkeypatch):
+    # A stopped clock: the closure deadline never passes, so only finishing c1 ends the wait.
+    now = 1_700_000_000.0
+    monkeypatch.setattr("midojo.control_plane.service.time.time", lambda: now)
+    monkeypatch.setattr("midojo.control_plane.service._now", lambda: datetime.fromtimestamp(now, UTC).isoformat())
     control = ControlPlane({}, config=AppConfig(closure_wait_seconds=5))
     opened = control.open_evaluation(_episode())
     session = BySession(opened.session_token)
     control.start_call(session, CreateFunctionCallStart(call_id="c1", function="lookup_order", args={"id": 7}))
     closing = asyncio.create_task(control.close(None, opened.id))
-    while control.evaluation(ById(None, opened.id)).stage is not Stage.CLOSING:
+    for _ in range(100):
+        stage = control.evaluation(ById(None, opened.id)).stage
+        if stage is Stage.CLOSING:
+            break
+        assert stage is not Stage.COLLECTING, "the closure wait ended before c1 finished"
         await asyncio.sleep(0)
+    else:
+        pytest.fail("the evaluation never started closing")
 
     failure, created = control.report_capture_failure(
         session, call_id="c2", function="process_refund", phase="finish", reason="lost"
@@ -270,10 +281,15 @@ def test_a_new_report_after_the_seal_is_one_late_fact_whatever_its_reason_or_sen
     opened = control.open_evaluation(_episode())
     _grade(control, opened.id)
 
-    for target, reason in [(BySession(opened.session_token), "ConnectError"), (ById(None, opened.id), "ReadTimeout")]:
+    senders = [
+        (BySession(opened.session_token), "ConnectError", Rejection.SESSION_CLOSED),
+        (ById(None, opened.id), "ReadTimeout", Rejection.SEALED),
+    ]
+    for target, reason, kind in senders:
         with pytest.raises(RejectedError) as refused:
             control.report_capture_failure(target, call_id="c1", function="f", phase="finish", reason=reason)
-        assert refused.value.late
+        # The repeat is refused like the first report, though it adds no late fact.
+        assert (refused.value.kind, refused.value.late) == (kind, True)
 
     [fact] = control.evaluation(ById(None, opened.id)).late_facts
     assert (fact.event, fact.by, fact.payload["reason"]) == ("report_capture_failure", "agent", "ConnectError")
