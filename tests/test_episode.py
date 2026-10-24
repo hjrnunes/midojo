@@ -9,6 +9,14 @@ import datetime
 
 import pytest
 from fastapi.testclient import TestClient
+from midojo_sdk.injection import (
+    Channel,
+    InjectionInstruction,
+    InjectionMode,
+    InjectionPlan,
+    InjectionTarget,
+    SelectorSurface,
+)
 
 from midojo.control_plane.lifecycle import RejectedError, Rejection
 from midojo.control_plane.main import create_app
@@ -31,7 +39,22 @@ def _episode(**changes) -> Episode:
         "utility": {"env_field_equals": {"field": "counter", "value": 1}},
         "environment": {"counter": 0, "notes": [{"text": "seed"}]},
     }
-    return Episode(**{**fields, **changes})
+    values = {**fields, **changes}
+    injections = values.pop("injections")
+    plan = InjectionPlan(
+        tuple(
+            InjectionInstruction(
+                channel=Channel.ENVIRONMENT_STATE,
+                payload=payload,
+                target=InjectionTarget(surface=SelectorSurface.TEMPLATE, template_key=key),
+                mode=InjectionMode.REPLACE,
+                probe_key=key,
+            )
+            for key, payload in injections.items()
+        ),
+        probe_payloads=tuple(injections.items()),
+    )
+    return Episode(plan=plan, **values)
 
 
 def _openshell(**settings) -> OpenShellRuntimeDefinition:

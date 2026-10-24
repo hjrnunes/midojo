@@ -8,13 +8,21 @@ from pathlib import Path
 from typing import Any, cast
 
 import yaml
+from midojo_sdk.injection import (
+    Channel,
+    InjectionInstruction,
+    InjectionMode,
+    InjectionPlan,
+    InjectionTarget,
+    SelectorSurface,
+)
 from pydantic import BaseModel, ValidationError
 
 from midojo.attacks import resolve_source, wrap_payload
 from midojo.control_plane.config import CONTROL_TOKEN_ENV
 from midojo.env_inference import infer_environment_type
 from midojo.episode import Episode, UnknownTaskError, freeze
-from midojo.probes import substitute_probes, substitute_probes_deep
+from midojo.probes import PROBE_PLACEHOLDER_RE, substitute_probes, substitute_probes_deep
 from midojo.runtimes import AgentRuntime, build_runtime
 from midojo.suite_definition import OpenShellRuntimeDefinition, ProbeDefinition, SuiteDefinition
 from midojo.types import Environment, FunctionCallRecord, SuiteName
@@ -100,6 +108,30 @@ class InjectionTask:
     spec: Mapping[str, Any] | None = None
 
 
+def _template_instructions(
+    value: Any, channel: Channel, active: Mapping[str, str], path: tuple[str | int, ...] = ()
+) -> list[InjectionInstruction]:
+    """Describe every active placeholder occurrence without using provenance to select it."""
+    instructions: list[InjectionInstruction] = []
+    if isinstance(value, str):
+        keys = (f"{match.group(1)}:{match.group(2)}" for match in PROBE_PLACEHOLDER_RE.finditer(value))
+        for key in keys:
+            if key in active:
+                target = InjectionTarget(surface=SelectorSurface.TEMPLATE, template_path=path, template_key=key)
+                instructions.append(
+                    InjectionInstruction(
+                        channel=channel, payload=active[key], target=target, mode=InjectionMode.REPLACE, probe_key=key
+                    )
+                )
+    elif isinstance(value, Mapping):
+        for key, item in value.items():
+            instructions.extend(_template_instructions(item, channel, active, (*path, key)))
+    elif isinstance(value, list | tuple):
+        for index, item in enumerate(value):
+            instructions.extend(_template_instructions(item, channel, active, (*path, index)))
+    return instructions
+
+
 class YAMLTaskSuite:
     """Reads a suite definition from a single suite.yaml file.
 
@@ -150,10 +182,15 @@ class YAMLTaskSuite:
             raise UnknownTaskError(f"Unknown injection task: {injection_task_id}")
         active = dict(injections or {})
         injection_task = self.injection_tasks[injection_task_id] if injection_task_id is not None else None
+        instructions = _template_instructions(self.definition.environment, Channel.ENVIRONMENT_STATE, active)
+        instructions += _template_instructions(self.user_tasks[user_task_id].turns, Channel.USER_PROMPT, active)
+        files = getattr(self.definition.agent_runtime, "files", {})
+        instructions += _template_instructions(files, Channel.RUNTIME_FILE, active)
+        plan = InjectionPlan(tuple(instructions), probe_payloads=tuple(active.items()))
         return Episode(
             runtime=self.definition.agent_runtime,
             turns=self.inject_user_task_turns(user_task_id, active),
-            injections=active,
+            plan=plan,
             security=injection_task.spec if injection_task is not None else None,
             utility=self.user_tasks[user_task_id].spec,
             environment=cast(dict[str, Any], substitute_probes_deep(self.definition.environment, active)),

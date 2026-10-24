@@ -225,6 +225,8 @@ agent_runtime:
 
 ### Write a suite
 
+Each compiled episode owns a frozen injection plan. Instructions name the channel, exact record, occurrence, transformation, size limit, mode, and mismatch policy. Strict mismatch is the default; explicit exploratory fallback is reported.
+
 Start with the [weather suite](suites/weather/README.md), MiDojo's reference suite: its [task definitions](suites/weather/suite.yaml) and [Python loader](suites/weather/__init__.py). Define the legitimate tasks, where injections land, and what counts as task completion and attack success. Add tool interception where your scenario needs it.
 
 A user task sends the agent one `prompt`. To hold a short conversation instead, give it `turns`, a list of messages sent in order within one evaluation: for example, a request to read a file carrying a planted instruction, then a harmless follow-up that gives the agent a second chance to act on it. Probe placeholders work in every turn.

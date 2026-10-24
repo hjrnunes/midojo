@@ -42,6 +42,14 @@ The SDK attempts to record each call with its arguments and the result the agent
 
 `await mcp.mirror_upstream()` exposes every upstream tool the server doesn't define itself; the upstream is `upstream_url`, or `upstream_transport` for anything else a fastmcp `Client` connects to. Each downstream session gets one upstream connection, opened on its first call and closed when the session ends. A mirrored tool is listed exactly as the upstream lists it (name, description, input and output schemas, annotations, `_meta`), and a call gets the upstream's result as sent: content blocks, structured content, error flag, and a JSON-RPC error as the same JSON-RPC error. `mcp.block(*names)` and `@mcp.deny(name)` refuse calls: the tool never runs and the agent gets an error result, "Tool execution was blocked" or the reason the denial check returned. Each call has a disposition: `forwarded` (mirrored), `simulated` (a tool defined with `@mcp.tool()`), `blocked` or `denied`. The control plane records each call's disposition, with the `blocked` flag it implies (see [the control plane API](../README.md#control-plane-api)).
 
+## Injection plans
+
+Pass a frozen `InjectionPlan` as `MidojoMCP(..., plan=plan)`. `append` is the one default because an unqualified content selector can preserve the upstream result without guessing a field. The interceptor supports exact content-block and structured-content selectors, and `mirror_upstream()` validates targeted tool names before serving calls.
+
+Unsupported placements raise `CapabilityError` with every gap. Strict selector and size mismatches leave the result unchanged; `fallback_append` is explicit. `mcp.injection_outcomes` reports every result.
+
+Matching calls are numbered per evaluation under a lock before forwarding. Concurrent calls therefore use interceptor-admission order, not completion order.
+
 ## Recorder and WorldState
 
 `midojo_sdk.recorder` defines the two seams an interception layer talks to. A `Recorder` starts and finishes the calls of one evaluation, each with its disposition. A `WorldState` reads the evaluation's simulated environment (`read()`: its revision and fields) and changes it (`change(values, expected_revision=None)`: one atomic step, or `None` when `expected_revision` is stale). `midojo_sdk.client.AgentControlPlaneClient` implements both over HTTP for one session; `midojo.control_plane.inprocess.InProcessAgentClient` implements both in the control plane's own process, with no HTTP.
