@@ -9,11 +9,13 @@ plane), and mirror a real MCP server's tools through a forwarding layer.
 from __future__ import annotations
 
 import contextlib
+import copy
 import functools
 import inspect
+import json
 import logging
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Sequence
 from contextvars import ContextVar
 from typing import Any
 
@@ -31,10 +33,25 @@ from pydantic import PrivateAttr
 
 from midojo_sdk.client import AgentControlPlaneClient, transient
 from midojo_sdk.context import ToolContext
+from midojo_sdk.injection import (
+    CapabilityError,
+    CapabilityGap,
+    Channel,
+    InjectionInstruction,
+    InjectionMode,
+    InjectionOutcome,
+    InjectionPlan,
+    InterceptorCapability,
+    MismatchPolicy,
+    OutcomeStatus,
+    SelectorSurface,
+    Transformation,
+    capability_gaps,
+)
 from midojo_sdk.recorder import Disposition, Recorder, RetryingRecorder, WorldState
 from midojo_sdk.session import SESSION_HEADER, session_token
 
-__all__ = ["BLOCKED_REASON", "MidojoMCP", "ToolContext", "UpstreamClient"]
+__all__ = ["BLOCKED_REASON", "MIDOJO_MCP_CAPABILITY", "MidojoMCP", "ToolContext", "UpstreamClient"]
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +66,18 @@ Denial = Callable[[dict[str, Any]], str | None]
 # forwarding layer hands an upstream JSON-RPC error to its tools/call handler
 # here, and the handler raises it as the same JSON-RPC error.
 _protocol_errors: ContextVar[list[McpError] | None] = ContextVar("midojo_protocol_errors", default=None)
+
+MIDOJO_MCP_CAPABILITY = InterceptorCapability(
+    channels=frozenset({Channel.TOOL_OUTPUT}),
+    selector_surfaces=frozenset({SelectorSurface.CONTENT_BLOCK, SelectorSurface.STRUCTURED_CONTENT}),
+    content_block_types=frozenset({"text"}),
+    modes=frozenset(InjectionMode),
+    transformations=frozenset(Transformation),
+    mismatch_policies=frozenset(MismatchPolicy),
+)
+"""Placements the MCP forwarding interceptor implements for mirrored tool results without degradation."""
+
+type _AdmittedInstruction = tuple[str, int, InjectionInstruction, int, int]
 
 
 class UpstreamClient:
@@ -220,6 +249,8 @@ class MidojoMCP:
         upstream_transport: Any = None,
         recorder: Recorder | None = None,
         world: WorldState | None = None,
+        plan: InjectionPlan = InjectionPlan(),
+        evaluation_id: str | None = None,
     ) -> None:
         if control_plane_url is None and recorder is None:
             raise ValueError("MidojoMCP needs a control_plane_url or a recorder.")
@@ -233,10 +264,43 @@ class MidojoMCP:
         )
         self._recorder = recorder
         self._world = world
+        if type(plan) is not InjectionPlan:
+            raise TypeError("plan must be an InjectionPlan")
+        self._plan = plan
+        if evaluation_id is not None and (type(evaluation_id) is not str or not evaluation_id):
+            raise ValueError("evaluation_id must be a non-empty str or None.")
+        if recorder is None and evaluation_id is not None:
+            raise ValueError("evaluation_id is only used with an injected recorder.")
+        if recorder is not None and self._plan and evaluation_id is None:
+            raise ValueError("A non-empty plan with an injected recorder needs an evaluation_id.")
+        self._evaluation_id = evaluation_id
+        self._validate_plan()
+        if self._plan and self._upstream is None:
+            raise CapabilityError(
+                tuple(CapabilityGap(index, "delivery", "mirrored_upstream") for index, _ in enumerate(self._plan))
+            )
+        self._plan_lock = anyio.Lock()
+        self._occurrences: dict[object, list[int]] = {}
+        self._admissions: dict[object, int] = {}
+        self._outcomes: list[InjectionOutcome] = []
         self._blocked: set[str] = set()
         self._denials: dict[str, Denial] = {}
         self._pass_protocol_errors()
         self._connect_upstream_per_session()
+
+    @property
+    def injection_capability(self) -> InterceptorCapability:
+        """The exact plan vocabulary this interceptor supports on mirrored results."""
+        return MIDOJO_MCP_CAPABILITY
+
+    @property
+    def injection_outcomes(self) -> tuple[InjectionOutcome, ...]:
+        """Reported outcomes, ordered by call admission then instruction."""
+        return tuple(sorted(self._outcomes, key=lambda item: (item.admission_order, item.instruction_index)))
+
+    def _validate_plan(self, *, tools: Collection[str] | None = None) -> None:
+        if gaps := capability_gaps(self._plan, self.injection_capability, tools=tools):
+            raise CapabilityError(gaps)
 
     def _pass_protocol_errors(self) -> None:
         """Answer a tools/call with the JSON-RPC error a forwarded call got from the upstream."""
@@ -304,6 +368,13 @@ class MidojoMCP:
 
     def tool(self):
         def decorator(fn):
+            gaps = tuple(
+                CapabilityGap(index, "delivery", f"simulated_tool:{fn.__name__}")
+                for index, instruction in enumerate(self._plan)
+                if instruction.target.tool in (None, fn.__name__)
+            )
+            if gaps:
+                raise CapabilityError(gaps)
             sig = inspect.signature(fn, eval_str=True)
             params = list(sig.parameters.values())
             if not params or params[0].annotation is not ToolContext:
@@ -384,6 +455,60 @@ class MidojoMCP:
         )
         raise ToolError(reason)
 
+    def _evaluation_scope(self) -> str:
+        """The bound evaluation or the incoming session: one counter scope."""
+        if self._recorder is not None:
+            assert self._evaluation_id is not None  # A non-empty plan requires it.
+            return self._evaluation_id
+        incoming = get_http_headers().get(SESSION_HEADER.lower())
+        return session_token(incoming)
+
+    async def _admit_injections(self, scope: str, call_id: str, name: str) -> list[_AdmittedInstruction]:
+        """Number matches under a lock before forwarding; that is admission order."""
+        admitted: list[_AdmittedInstruction] = []
+        async with self._plan_lock:
+            counts = self._occurrences.setdefault(scope, [0] * len(self._plan))
+            order = self._admissions.get(scope, 0) + 1
+            self._admissions[scope] = order
+            for index, instruction in enumerate(self._plan):
+                if instruction.target.tool not in (None, name):
+                    continue
+                counts[index] += 1
+                occurrence = counts[index]
+                if instruction.occurrence.selects(occurrence):
+                    admitted.append((scope, index, instruction, occurrence, order))
+                else:
+                    self._outcomes.append(
+                        _outcome(
+                            scope,
+                            index,
+                            instruction,
+                            call_id,
+                            name,
+                            occurrence,
+                            order,
+                            OutcomeStatus.SKIPPED_OCCURRENCE,
+                            "occurrence rule did not select this call",
+                        )
+                    )
+        return admitted
+
+    def _report_no_result(self, call_id: str, name: str, admitted: Sequence[_AdmittedInstruction]) -> None:
+        for scope, index, instruction, occurrence, order in admitted:
+            self._outcomes.append(
+                _outcome(
+                    scope,
+                    index,
+                    instruction,
+                    call_id,
+                    name,
+                    occurrence,
+                    order,
+                    OutcomeStatus.NO_RESULT,
+                    "upstream produced no tool result",
+                )
+            )
+
     async def mirror_upstream(self) -> list[str]:
         """Expose every upstream tool not already defined here, forwarded and recorded; return their names.
 
@@ -398,8 +523,10 @@ class MidojoMCP:
         if self._upstream is None:
             raise RuntimeError("Cannot mirror: no upstream is configured.")
         defined = {tool.name for tool in await self._fastmcp.list_tools()}
+        definitions = await self._upstream.list_tools()
+        self._validate_plan(tools={definition.name for definition in definitions if definition.name not in defined})
         mirrored = []
-        for definition in await self._upstream.list_tools():
+        for definition in definitions:
             if definition.name in defined:
                 continue
             tool = _ForwardingTool(
@@ -422,9 +549,11 @@ class MidojoMCP:
         await self._refuse(recorder, name, arguments)
         call_id = str(uuid.uuid4())
         await recorder.start_call(call_id=call_id, function=name, args=arguments, disposition="forwarded")
+        admitted = await self._admit_injections(self._evaluation_scope(), call_id, name) if self._plan else []
         try:
             result = await self._upstream.call_tool_mcp(name, arguments)
         except McpError as e:
+            self._report_no_result(call_id, name, admitted)
             message = e.error.message
             await recorder.finish_call(
                 call_id=call_id, function=name, args=arguments, result=message, error=message, disposition="forwarded"
@@ -434,10 +563,19 @@ class MidojoMCP:
                 errors.append(e)
             raise
         except Exception as e:
+            self._report_no_result(call_id, name, admitted)
             await recorder.finish_call(
                 call_id=call_id, function=name, args=arguments, result=str(e), error=str(e), disposition="forwarded"
             )
             raise
+        except BaseException:
+            # Cancellation leaves the started disposition record unfinished,
+            # but this admitted call still consumed its occurrence.
+            self._report_no_result(call_id, name, admitted)
+            raise
+        for scope, index, instruction, occurrence, order in admitted:
+            result, status, detail = _inject_result(result, instruction)
+            self._outcomes.append(_outcome(scope, index, instruction, call_id, name, occurrence, order, status, detail))
         seen = _text(result.content)
         await recorder.finish_call(
             call_id=call_id,
@@ -465,4 +603,113 @@ def _text(content: Sequence[ContentBlock]) -> str:
     return "\n".join(
         block.text if isinstance(block, TextContent) else block.model_dump_json(by_alias=True, exclude_none=True)
         for block in content
+    )
+
+
+def _transform(instruction: InjectionInstruction) -> str:
+    if instruction.transformation is Transformation.JSON_STRING:
+        return json.dumps(instruction.payload)
+    return instruction.payload
+
+
+def _inject_path(value: Any, path: tuple[str | int, ...], payload: str, mode: InjectionMode) -> bool:
+    current = value
+    for part in path[:-1]:
+        if isinstance(part, str) and isinstance(current, dict) and part in current:
+            current = current[part]
+        elif isinstance(part, int) and isinstance(current, list) and part < len(current):
+            current = current[part]
+        else:
+            return False
+    return _inject_leaf(current, path[-1], payload, mode)
+
+
+def _inject_leaf(current: Any, part: str | int, payload: str, mode: InjectionMode) -> bool:
+    if isinstance(part, str) and isinstance(current, dict) and isinstance(current.get(part), str):
+        old = current[part]
+        current[part] = payload if mode is InjectionMode.REPLACE else old + payload
+        return True
+    elif isinstance(part, int) and isinstance(current, list) and part < len(current) and isinstance(current[part], str):
+        old = current[part]
+        current[part] = payload if mode is InjectionMode.REPLACE else old + payload
+        return True
+    return False
+
+
+def _inject_exact(result: CallToolResult, instruction: InjectionInstruction, payload: str) -> CallToolResult | None:
+    target = instruction.target
+    if target.surface is SelectorSurface.STRUCTURED_CONTENT:
+        structured = copy.deepcopy(result.structuredContent)
+        if not _inject_path(structured, target.structured_content_path, payload, instruction.mode):
+            return None
+        return result.model_copy(update={"structuredContent": structured})
+    return _inject_content(result, instruction, payload)
+
+
+def _inject_content(result: CallToolResult, instruction: InjectionInstruction, payload: str) -> CallToolResult | None:
+    target = instruction.target
+    content = list(result.content)
+    if target.content_block_index is None and target.content_block_type is None:
+        block = TextContent(type="text", text=payload)
+        content = [block] if instruction.mode is InjectionMode.REPLACE else [*content, block]
+        return result.model_copy(update={"content": content})
+    return _inject_selected_block(result, instruction, payload, content)
+
+
+def _inject_selected_block(
+    result: CallToolResult, instruction: InjectionInstruction, payload: str, content: list[ContentBlock]
+) -> CallToolResult | None:
+    target = instruction.target
+    indexes = range(len(content)) if target.content_block_index is None else (target.content_block_index,)
+    for index in indexes:
+        if index >= len(content):
+            continue
+        block = content[index]
+        if target.content_block_type is not None and block.type != target.content_block_type:
+            continue
+        if not isinstance(block, TextContent):
+            continue
+        text = payload if instruction.mode is InjectionMode.REPLACE else block.text + payload
+        content[index] = block.model_copy(update={"text": text})
+        return result.model_copy(update={"content": content})
+    return None
+
+
+def _inject_result(
+    result: CallToolResult, instruction: InjectionInstruction
+) -> tuple[CallToolResult, OutcomeStatus, str]:
+    payload = _transform(instruction)
+    if instruction.size_limit is not None and len(payload.encode()) > instruction.size_limit:
+        return result, OutcomeStatus.TOO_LARGE, "transformed payload exceeds size_limit"
+    updated = _inject_exact(result, instruction, payload)
+    if updated is not None:
+        return updated, OutcomeStatus.APPLIED, "exact selector matched"
+    if instruction.mismatch_policy is MismatchPolicy.FALLBACK_APPEND:
+        content = [*result.content, TextContent(type="text", text=payload)]
+        updated = result.model_copy(update={"content": content})
+        return updated, OutcomeStatus.FALLBACK, "selector missed; appended a text block"
+    return result, OutcomeStatus.UNMATCHED, "selector missed; result unchanged"
+
+
+def _outcome(
+    scope: str,
+    index: int,
+    instruction: InjectionInstruction,
+    call_id: str,
+    tool: str,
+    occurrence: int,
+    admission_order: int,
+    status: OutcomeStatus,
+    detail: str,
+) -> InjectionOutcome:
+    return InjectionOutcome(
+        instruction_index=index,
+        probe_key=instruction.probe_key,
+        scope=scope,
+        call_id=call_id,
+        tool=tool,
+        occurrence=occurrence,
+        admission_order=admission_order,
+        status=status,
+        detail=detail,
     )

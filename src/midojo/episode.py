@@ -1,6 +1,6 @@
 """Episodes: the description of what to run, apart from any record of running it.
 
-An :class:`Episode` is a frozen value: the turns to send, the active injections,
+An :class:`Episode` is a frozen value: the turns to send, the injection plan,
 the checks that grade it, the initial state of the simulated tools, and the
 runtime it needs, as a definition (never a live runtime object). An evaluation
 is the record of one run of an episode.
@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, cast
 
+from midojo_sdk.injection import InjectionPlan
 from pydantic import BaseModel, TypeAdapter
 
 from midojo.env_inference import infer_environment_type
@@ -117,8 +118,10 @@ class Episode:
     """What to run: immutable once built.
 
     ``turns`` are the user's messages, sent one at a time in one evaluation, or
-    None when the host drives the conversation. ``injections`` maps each active
-    probe (``"<task>:<probe>"``) to its payload. ``security`` and ``utility``
+    None when the host drives the conversation. ``plan`` holds exact immutable
+    placements. Host template channels are rendered from its validated
+    substitution map; tool channels are carried for an external interceptor.
+    ``injections`` is the derived legacy substitution view. ``security`` and ``utility``
     are the checks as authored (a suite's ``security:``/``utility:`` blocks,
     e.g. ``{"output_contains": "pwned"}``); either may be absent. Each grading
     parses a fresh :class:`~midojo.verifier.Check` from them. ``environment``
@@ -134,7 +137,7 @@ class Episode:
 
     Every input is copied into frozen data at construction (see :func:`freeze`),
     so changing it afterwards changes nothing here, and none of the data the
-    episode owns can be changed. Turns, injection probes and payloads, and the
+    episode owns can be changed. Turns, plan strings, and the
     provenance IDs must be exactly ``str``; anything else raises TypeError.
     ``environment_type`` must be an :class:`~midojo.types.Environment` subclass
     (a class, not an instance); like the verifier registry the checks resolve
@@ -145,7 +148,7 @@ class Episode:
         default_factory=lambda: MappingProxyType({"type": "unmanaged"})
     )
     turns: Sequence[str] | None = None
-    injections: Mapping[str, str] = dataclasses.field(default_factory=dict)
+    plan: InjectionPlan = dataclasses.field(default_factory=InjectionPlan)
     security: Mapping[str, Any] | None = None
     utility: Mapping[str, Any] | None = None
     environment: Mapping[str, Any] | None = None
@@ -162,10 +165,8 @@ class Episode:
                 raise ValueError("turns must hold at least one message, or be None when the host drives them")
             turns = tuple(_exact_str(message, "a turn") for message in self.turns)
             object.__setattr__(self, "turns", turns)
-        injections = freeze(dict(self.injections))
-        for payload in injections.values():
-            _exact_str(payload, "an injection payload")
-        object.__setattr__(self, "injections", injections)
+        if type(self.plan) is not InjectionPlan:
+            raise TypeError("plan must be an InjectionPlan")
         for name in ("suite_name", "user_task_id", "injection_task_id"):
             if (value := getattr(self, name)) is not None:
                 _exact_str(value, name)
@@ -189,6 +190,11 @@ class Episode:
         # No episode-owned data can change, so a copy is the episode itself. The trusted code it
         # references (the environment type, the verifier implementations) is shared on purpose.
         return self
+
+    @property
+    def injections(self) -> Mapping[str, str]:
+        """Legacy placeholder mapping derived from ``plan``; new callers use the plan."""
+        return self.plan.substitution_payloads
 
     def runtime_definition(self) -> AgentRuntimeDefinition:
         """A fresh copy of the runtime definition the episode needs."""

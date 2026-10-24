@@ -223,6 +223,8 @@ agent_runtime:
 
 `midojo-run --agent-timeout SECONDS` overrides the suite's value for one run. For an unmanaged agent, `--agent-timeout` sets the client's timeout instead, which is 120 seconds by default.
 
+Suite YAML places payloads with probe placeholders. `YAMLTaskSuite.episode(...)` compiles the active placeholders into a frozen injection plan while preserving the rendered prompt, environment and runtime files. Programmatic hosts can add exact tool-result instructions—channel, selector, occurrence, transformation, size limit, mode and mismatch policy—and hand the relevant channel subset to an interceptor. Strict mismatch is the default; exploratory fallback must be explicit and is reported.
+
 ### Write a suite
 
 Start with the [weather suite](suites/weather/README.md), MiDojo's reference suite: its [task definitions](suites/weather/suite.yaml) and [Python loader](suites/weather/__init__.py). Define the legitimate tasks, where injections land, and what counts as task completion and attack success. Add tool interception where your scenario needs it.
