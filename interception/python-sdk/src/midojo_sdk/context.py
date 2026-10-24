@@ -52,7 +52,16 @@ class ToolContext:
         only if nothing changed the environment since, and returns False
         otherwise (read again and recompute).
         """
-        changed = await self._require_world().change({field: value}, expected_revision=expected_revision)
+        return await self.change({field: value}, expected_revision=expected_revision)
+
+    async def change(self, values: dict[str, Any], *, expected_revision: int | None = None) -> bool:
+        """Set several fields in one atomic step: all of them change, or none.
+
+        ``expected_revision`` works as in :meth:`env_update`: with the revision
+        a read returned, the change applies only if nothing changed the
+        environment since, and returns False otherwise.
+        """
+        changed = await self._require_world().change(values, expected_revision=expected_revision)
         return changed is not None
 
     async def forward(self, tool_name: str, args: dict[str, Any]) -> str:

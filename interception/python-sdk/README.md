@@ -36,6 +36,7 @@ if __name__ == "__main__":
 
 - `await ctx.env(field)` reads a field of the evaluation's environment, and `await ctx.read()` the whole environment with its revision
 - `await ctx.env_update(field, value)` sets one field in one atomic step, so a concurrent change to another field isn't lost. Pass `expected_revision=` the revision `ctx.read()` returned to apply it only if nothing changed the environment since: it returns `False` otherwise
+- `await ctx.change({field: value, ...}, expected_revision=...)` sets several fields in one atomic step: all of them change, or none. A tool that reads the environment, computes new values and writes them back passes the revision it read, and reads again when it gets `False` (see `suites/minibank/a2a_agent/fake_mcp.py`)
 - `await ctx.forward(tool, args)` calls the tool on the upstream MCP server and returns its text
 
 The SDK attempts to record each call with its arguments and the result the agent saw. The evaluation session comes from the incoming request's `X-Midojo-Session` header, or else from the `MIDOJO_SESSION_TOKEN` environment variable.
