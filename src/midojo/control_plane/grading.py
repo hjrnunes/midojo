@@ -13,8 +13,10 @@ from .store import detached
 def grade_snapshot(episode: Episode, snapshot: Snapshot) -> GradeResponse:
     """Grade ``snapshot`` with ``episode``'s checks. Reads nothing else, and changes nothing in ``snapshot``.
 
-    The evidence status is the episode's, with every key the snapshot marks (a
-    late fact recorded before the seal) taken from the snapshot.
+    The checks see the snapshot's evidence status, so a check that depends on a
+    call's absence is unknown when ``function_calls`` is incomplete. The
+    evidence status is the episode's, with every key the snapshot marks (a late
+    fact or a capture failure recorded before the seal) taken from the snapshot.
     """
     snapshot = detached(snapshot)
     result = episode.grade(
@@ -24,6 +26,7 @@ def grade_snapshot(episode: Episode, snapshot: Snapshot) -> GradeResponse:
         function_calls=list(snapshot.function_calls),
         observations=dict(snapshot.observations),
         turns=[ConversationTurn(message=turn.message, reply=turn.reply) for turn in snapshot.turns],
+        evidence=dict(snapshot.evidence_status),
     )
     graded = GradeResponse.model_validate(result)
     return graded.model_copy(update={"evidence_status": {**graded.evidence_status, **snapshot.evidence_status}})

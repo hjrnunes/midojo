@@ -49,6 +49,10 @@ The rules kept here:
   that grading reads;
 * late facts: a write that closure refuses is recorded as a late fact, never
   applied, and marks the evidence it carries ``incomplete``;
+* capture failures: a call record the interception layer reports it couldn't
+  deliver is kept (once per ``call_id``, function and phase) until the seal,
+  and marks ``function_calls`` ``incomplete``; it never adds or changes a
+  record. After the seal, a report is a late fact like any other write;
 * the grade: recorded once, from the snapshot, and never replaced.
 
 The single writer (:mod:`midojo.control_plane.service`) applies transitions:
@@ -69,17 +73,28 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
-from midojo.observations import evidence_status
+from midojo.observations import FUNCTION_CALLS, evidence_status
 from midojo.types import REFUSED_DISPOSITIONS, CallDisposition, Environment, FunctionCallRecord
 
 from .models import (
+    CapturePhase,
     CreateFunctionCallRecord,
     CreateFunctionCallStart,
     FunctionCallBody,
     FunctionCallStart,
     GradeResponse,
 )
-from .state import Evaluation, LateFact, Session, Snapshot, Stage, Turn, late_evidence
+from .state import (
+    CaptureFailure,
+    Evaluation,
+    LateFact,
+    Session,
+    Snapshot,
+    Stage,
+    Turn,
+    capture_evidence,
+    late_evidence,
+)
 
 # --- outcomes ---
 
@@ -219,6 +234,21 @@ class FinishCall:
 
 
 @dataclass(frozen=True)
+class ReportCaptureFailure:
+    """Report that a call's ``phase`` record never reached the control plane, after the layer's resends.
+
+    The recorded calls may then lack that call, so ``function_calls`` is
+    incomplete: a check that depends on a call's absence can't be decided.
+    """
+
+    call_id: str
+    function: str
+    phase: CapturePhase
+    reason: str
+    at: str
+
+
+@dataclass(frozen=True)
 class StartTurn:
     message: str
     at: str
@@ -297,6 +327,7 @@ Event = (
     | CloseSession
     | StartCall
     | FinishCall
+    | ReportCaptureFailure
     | StartTurn
     | ReplyTurn
     | ReplaceEnvironment
@@ -309,7 +340,7 @@ Event = (
 )
 
 # What an agent's session may do. Everything else is the host's.
-AGENT_EVENTS = (Read, StartCall, FinishCall, ReplaceEnvironment, ChangeEnvironment)
+AGENT_EVENTS = (Read, StartCall, FinishCall, ReportCaptureFailure, ReplaceEnvironment, ChangeEnvironment)
 
 INVALID_SESSION_DETAIL = "Invalid, expired, or closed evaluation session"
 SEALED_DETAIL = "Evaluation already completed"
@@ -338,6 +369,8 @@ def transition(evaluation: Evaluation, authority: Authority, event: Event) -> Ou
             return _start_call(evaluation, authority, event)
         case FinishCall():
             return _finish_call(evaluation, authority, event)
+        case ReportCaptureFailure():
+            return _report_capture_failure(evaluation, authority, event)
         case StartTurn():
             return _start_turn(evaluation, authority, event)
         case ReplyTurn():
@@ -423,7 +456,7 @@ def _late(
     call_id: str | None = None,
 ) -> Late:
     """Refuse a write that closure stopped, and record it as a late fact (once per distinct write)."""
-    by = "agent" if isinstance(authority, AgentSession) else "host"
+    by = _by(authority)
     if evaluation.stage is not Stage.SEALED:
         rejected = Rejected(Rejection.CLOSING, f"{CLOSING_DETAIL}: the write is recorded as a late fact")
     elif by == "agent":
@@ -436,6 +469,10 @@ def _late(
     if any(_same_write(fact, known) for known in evaluation.late_facts):
         return Late(evaluation, rejected)
     return Late(_replace(evaluation, late_facts=(*evaluation.late_facts, fact)), rejected)
+
+
+def _by(authority: Authority) -> str:
+    return "agent" if isinstance(authority, AgentSession) else "host"
 
 
 def _same_write(a: LateFact, b: LateFact) -> bool:
@@ -451,7 +488,7 @@ def _canonical(data: Mapping[str, Any]) -> str:
 # The disposition is compared on its own (see ``_same_disposition``): a body that leaves it out matches any.
 _BODY_FIELDS = set(FunctionCallBody.model_fields) - {"disposition"}
 _START_FIELDS = set(FunctionCallStart.model_fields)
-_CALL_EVIDENCE = ("function_calls",)
+_CALL_EVIDENCE = (FUNCTION_CALLS,)
 
 
 def canonical_body(call: FunctionCallStart | FunctionCallRecord, fields: set[str] = _BODY_FIELDS) -> str:
@@ -601,6 +638,28 @@ def _finish_call(evaluation: Evaluation, authority: Authority, event: FinishCall
     return Accepted(_replace(evaluation, function_calls=(*evaluation.function_calls, record)), (record, True))
 
 
+def _report_capture_failure(evaluation: Evaluation, authority: Authority, event: ReportCaptureFailure) -> Outcome:
+    if evaluation.stage is Stage.SEALED:
+        payload = {"call_id": event.call_id, "function": event.function, "phase": event.phase, "reason": event.reason}
+        return _late(evaluation, authority, "report_capture_failure", event.at, _CALL_EVIDENCE, payload, event.call_id)
+    by = _by(authority)
+    # A resent report (another attempt's reason, say) is the same lost record: it's kept once.
+    for known in evaluation.capture_failures:
+        if (known.call_id, known.function, known.phase, known.by) == (event.call_id, event.function, event.phase, by):
+            return Accepted(evaluation, (known, False))
+    failure = CaptureFailure(
+        call_id=event.call_id,
+        function=event.function,
+        phase=event.phase,
+        reason=event.reason,
+        stage=evaluation.stage,
+        by=by,
+        at=event.at,
+    )
+    next_value = _replace(evaluation, capture_failures=(*evaluation.capture_failures, failure))
+    return Accepted(next_value, (failure, True))
+
+
 # --- turns ---
 
 _TURN_EVIDENCE = ("turns",)
@@ -703,13 +762,14 @@ def _seal(evaluation: Evaluation, authority: Authority, event: Seal) -> Outcome:
     if evaluation.stage is not Stage.COLLECTING:
         return Rejected(Rejection.CLOSURE_PENDING, "Closure has not finished waiting for admitted calls")
     # The snapshot keeps its own copies, so nothing reached through the sealed evaluation changes it.
-    pre_environment, environment, function_calls, turns, observations = copy.deepcopy(
+    pre_environment, environment, function_calls, turns, observations, capture_failures = copy.deepcopy(
         (
             evaluation.pre_environment,
             evaluation.environment,
             evaluation.function_calls,
             evaluation.turns,
             dict(evaluation.observations),
+            evaluation.capture_failures,
         )
     )
     snapshot = Snapshot(
@@ -721,8 +781,13 @@ def _seal(evaluation: Evaluation, authority: Authority, event: Seal) -> Outcome:
         function_calls=function_calls,
         turns=turns,
         observations=observations,
-        evidence_status={**evidence_status(evaluation.observations), **late_evidence(evaluation.late_facts)},
+        evidence_status={
+            **evidence_status(evaluation.observations),
+            **late_evidence(evaluation.late_facts),
+            **capture_evidence(evaluation.capture_failures),
+        },
         sealed_at=event.at,
+        capture_failures=capture_failures,
     )
     next_value = _replace(evaluation, stage=Stage.SEALED, snapshot=snapshot)
     return Accepted(next_value, snapshot)

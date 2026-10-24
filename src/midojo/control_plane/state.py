@@ -20,10 +20,10 @@ from typing import Any
 from pydantic import BaseModel
 
 from midojo.episode import Episode
-from midojo.observations import EvidenceStatus
+from midojo.observations import FUNCTION_CALLS, EvidenceStatus
 from midojo.types import Environment, FunctionCallRecord, SuiteName
 
-from .models import GradeResponse
+from .models import CapturePhase, GradeResponse
 
 
 def _now() -> str:
@@ -84,11 +84,32 @@ class LateFact:
 
 
 @dataclass(frozen=True)
+class CaptureFailure:
+    """A call record an interception layer couldn't deliver: the recorded calls may lack that call.
+
+    ``phase`` is the record that was lost: ``start`` (the call may be missing
+    altogether) or ``finish`` (its record may be unfinished or missing).
+    ``reason`` is the last error the layer got. A capture failure marks
+    ``function_calls`` ``incomplete``; it never adds, changes or removes a
+    record.
+    """
+
+    call_id: str
+    function: str
+    phase: CapturePhase
+    reason: str
+    stage: Stage
+    by: str
+    at: str
+
+
+@dataclass(frozen=True)
 class Snapshot:
     """What the seal fixes: everything grading reads, and how completely it was collected.
 
     ``evidence_status`` is the observations' own status, with every key a late
-    fact recorded before the seal marked ``incomplete``.
+    fact recorded before the seal marked ``incomplete``, and ``function_calls``
+    marked ``incomplete`` when a capture failure was reported before the seal.
     """
 
     user_task_id: str | None
@@ -101,6 +122,7 @@ class Snapshot:
     observations: Mapping[str, BaseModel]
     evidence_status: Mapping[str, EvidenceStatus]
     sealed_at: str
+    capture_failures: tuple[CaptureFailure, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -133,6 +155,8 @@ class Evaluation:
     closure_deadline: float | None = None
     snapshot: Snapshot | None = None
     late_facts: tuple[LateFact, ...] = ()
+    # Call records the interception layer reported it couldn't deliver, in arrival order.
+    capture_failures: tuple[CaptureFailure, ...] = ()
     # Set once, from the snapshot, and never replaced.
     grade: GradeResponse | None = None
     # Read-only: copying the evaluation shares it (see Episode.__deepcopy__).
@@ -165,19 +189,26 @@ class Evaluation:
 
     @property
     def evidence_status(self) -> dict[str, EvidenceStatus]:
-        """The grade's evidence status, with every key a late fact marks ``incomplete``.
+        """The grade's evidence status, with every key a late fact or a capture failure marks ``incomplete``.
 
-        Empty before grading unless late facts were recorded. The grade itself
-        never changes: a fact that arrives after the seal shows up here only.
+        Empty before grading unless late facts or capture failures were
+        recorded. The grade itself never changes: a fact that arrives after the
+        seal shows up here only.
         """
         status: dict[str, EvidenceStatus] = dict(self.grade.evidence_status) if self.grade is not None else {}
         status.update(late_evidence(self.late_facts))
+        status.update(capture_evidence(self.capture_failures))
         return status
 
 
 def late_evidence(facts: tuple[LateFact, ...]) -> dict[str, EvidenceStatus]:
     """The evidence-status keys ``facts`` mark incomplete."""
     return {key: "incomplete" for fact in facts for key in fact.evidence}
+
+
+def capture_evidence(failures: tuple[CaptureFailure, ...]) -> dict[str, EvidenceStatus]:
+    """The evidence-status keys ``failures`` mark incomplete: ``function_calls``, once any was reported."""
+    return {FUNCTION_CALLS: "incomplete"} if failures else {}
 
 
 @dataclass(frozen=True)

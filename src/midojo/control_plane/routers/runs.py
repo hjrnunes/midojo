@@ -21,6 +21,7 @@ from ..dependencies import (
     validate_observations,
 )
 from ..models import (
+    CaptureFailureResponse,
     CloseResponse,
     CompleteRequest,
     CreateEvaluationRequest,
@@ -128,6 +129,7 @@ def evaluation_response(evaluation: Evaluation) -> EvaluationResponse:
         pre_environment=evaluation.pre_environment.model_dump(),
         environment=evaluation.environment.model_dump(),
         late_facts=[LateFactResponse.model_validate(fact) for fact in evaluation.late_facts],
+        capture_failures=[CaptureFailureResponse.model_validate(f) for f in evaluation.capture_failures],
     )
 
 
