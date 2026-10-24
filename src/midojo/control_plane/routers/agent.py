@@ -143,10 +143,12 @@ async def report_capture_failure(
     Before the seal, the evaluation's ``function_calls`` evidence becomes
     incomplete, so a check that depends on a call's absence grades unknown; no
     record is added or changed. 201 when kept; 200 with the stored report when
-    the same ``call_id``, function and phase were already reported (whatever
-    the reason), even after the seal; 401 for a new report after the seal,
-    recorded as a late fact that marks ``function_calls`` incomplete in the
-    evaluation's evidence status but leaves the grade unchanged.
+    the same ``call_id``, function and phase were kept before the seal
+    (whatever the reason), even when the repeat arrives after it; 401 for a
+    new report after the seal, recorded as a late fact that marks
+    ``function_calls`` incomplete in the evaluation's evidence status but
+    leaves the grade unchanged. Repeating a report first received after the
+    seal is refused with the same 401 and adds no other late fact.
     """
     failure, created = control.report_capture_failure(
         BySession(session_token), call_id=req.call_id, function=req.function, phase=req.phase, reason=req.reason

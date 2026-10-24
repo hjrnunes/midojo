@@ -199,7 +199,8 @@ class ReportCaptureFailureRequest(BaseModel):
         max_length=CALL_ID_MAX_LENGTH,
         description=(
             "The call_id of the record that was lost. Reporting the same call_id, function and phase again, "
-            "with any reason, returns the stored report (a 200) instead of keeping another."
+            "with any reason, returns the stored report (a 200) instead of keeping another, when it was kept "
+            "before the seal. One first received after the seal is only a late fact, and stays refused."
         ),
     )
     function: str

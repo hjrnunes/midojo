@@ -101,6 +101,22 @@ def test_the_route_refuses_a_report_after_the_seal_as_a_late_fact(client):
     assert body["evidence_status"]["function_calls"] == "incomplete"
 
 
+def test_the_route_still_refuses_a_report_first_received_after_the_seal(client):
+    run_id, eval_id, token = new_evaluation(client)
+    auth = {"Authorization": f"Bearer {token}"}
+    client.post(f"/runs/{run_id}/evaluations/{eval_id}/complete", json={"agent_output": "done"})
+    client.post("/agent/capture-failures", json=REPORT, headers=auth)
+
+    repeated = client.post("/agent/capture-failures", json={**REPORT, "reason": "resent"}, headers=auth)
+
+    assert repeated.status_code == 401
+    assert (repeated.json()["kind"], repeated.json()["late_fact"]) == ("session_closed", True)
+    body = evaluation(client, run_id, eval_id)
+    assert body["capture_failures"] == []
+    [fact] = body["late_facts"]
+    assert fact["payload"]["reason"] == REPORT["reason"]
+
+
 def test_the_route_replays_a_report_kept_before_the_seal_after_it(client):
     run_id, eval_id, token = new_evaluation(client)
     auth = {"Authorization": f"Bearer {token}"}

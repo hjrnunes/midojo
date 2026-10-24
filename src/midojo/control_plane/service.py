@@ -284,9 +284,11 @@ class ControlPlane:
         Before the seal, the report marks ``function_calls`` incomplete in the
         snapshot, so a check that depends on a call's absence grades unknown.
         ``created`` is False when the same ``call_id``, function and phase were
-        already reported, whatever the reason or sender, even after the seal. A
-        new report after the seal is refused and recorded as a late fact: it
-        marks only the evaluation's evidence status, never the grade.
+        kept before the seal, whatever the reason or sender, even when the
+        repeat arrives after it. A new report after the seal is refused and
+        recorded as a late fact: it marks only the evaluation's evidence
+        status, never the grade. Repeating one is refused the same way, and
+        adds no other late fact.
         """
         event = lifecycle.ReportCaptureFailure(call_id, function, phase, reason, _now())
         return self.apply(target, event)
