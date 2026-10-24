@@ -520,7 +520,8 @@ async def test_a_transport_failure_is_resent_then_stops_the_agent_run(app, clien
         with pytest.raises(httpx.ConnectError):
             await call_tool(midojo, [send_email], "send_email", {"to": "eve@example.com", "body": "hi"})
 
-    assert sent == ["/agent/function-calls/start"] * sdk_recorder.RECORD_ATTEMPTS
+    # After the last resend, the lost start is reported.
+    assert sent == ["/agent/function-calls/start"] * sdk_recorder.RECORD_ATTEMPTS + ["/agent/capture-failures"]
     assert emails_sent == []
     assert function_calls(client, run, evaluation) == []
 
