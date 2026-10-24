@@ -13,6 +13,11 @@ is the factory that builds a fresh runtime from it, so concurrent runs never
 share one. The orchestrator drives every runtime through the :class:`AgentRuntime`
 lifecycle. The world state the agent's tools read and write is the suite's
 ``environment``, which the control plane keeps whatever the runtime.
+
+Each evaluation's ``setup`` gets what the agent may hold: the evaluation's
+session token when an interception layer in the agent records its calls, or,
+in host mode, only the tool endpoint of the interceptor the host runs
+(:class:`~midojo.tool_endpoint.ToolEndpoint`), never both.
 """
 
 from __future__ import annotations
@@ -23,6 +28,7 @@ from pydantic import BaseModel
 
 from midojo.runtimes.openshell import OpenShellRuntime
 from midojo.suite_definition import AgentRuntimeDefinition, OpenShellRuntimeDefinition
+from midojo.tool_endpoint import ToolEndpoint
 
 
 class AgentRuntime(Protocol):
@@ -38,12 +44,17 @@ class AgentRuntime(Protocol):
         self,
         injections: dict[str, str],
         *,
-        session_token: str,
+        session_token: str | None = None,
+        tool_endpoint: ToolEndpoint | None = None,
         eval_id: str,
         user_task_id: str,
         injection_task_id: str | None,
     ) -> None:
-        """Prepare the agent for one evaluation, with the active injections in place."""
+        """Prepare the agent for one evaluation, with the active injections in place.
+
+        The agent is given ``session_token`` (in-agent interception) or
+        ``tool_endpoint`` (host mode), whichever is set.
+        """
         ...
 
     def observe(self) -> dict[str, BaseModel]:
@@ -63,8 +74,8 @@ class UnmanagedRuntime:
     """An agent that MiDojo neither starts nor observes.
 
     ``midojo-run`` reaches it at ``--agent-uri`` over ``--protocol``, and each task
-    carries the evaluation session (see :mod:`midojo.agent_client`). Every
-    lifecycle step is a no-op.
+    carries the evaluation session, or in host mode the tool endpoint (see
+    :mod:`midojo.agent_client`). Every lifecycle step is a no-op.
     """
 
     name = "unmanaged"
@@ -76,7 +87,8 @@ class UnmanagedRuntime:
         self,
         injections: dict[str, str],
         *,
-        session_token: str,
+        session_token: str | None = None,
+        tool_endpoint: ToolEndpoint | None = None,
         eval_id: str,
         user_task_id: str,
         injection_task_id: str | None,

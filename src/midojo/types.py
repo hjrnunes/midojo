@@ -21,6 +21,21 @@ class Environment(BaseModel):
 CallDisposition = Literal["forwarded", "denied", "simulated", "blocked"]
 REFUSED_DISPOSITIONS: frozenset[CallDisposition] = frozenset({"denied", "blocked"})
 
+# Where an evaluation's tool calls are intercepted, chosen by the host when it
+# opens the evaluation: ``agent``, by an interception layer inside or beside the
+# target that holds the evaluation's session (an in-agent SDK: PI, LangChain,
+# a fake MCP server the target reaches); or ``host``, by an interceptor the host
+# runs outside the target, which alone holds the session.
+InterceptionMode = Literal["agent", "host"]
+
+# How a call record reached the control plane, set by the control plane from the
+# authority the call arrived with, never by the caller: ``host`` from the host
+# itself (the run-scoped routes, or in process by ID); ``interceptor`` with the
+# session of an evaluation intercepted on the host; ``agent`` with the session of
+# an evaluation intercepted in the agent. ``agent`` evidence is lower trust: the
+# target may hold the session, so it could have written, or left out, any record.
+CallProvenance = Literal["host", "interceptor", "agent"]
+
 
 class FunctionCallRecord(BaseModel):
     """A recorded function call: what the agent asked for and what it saw.
@@ -62,6 +77,13 @@ class FunctionCallRecord(BaseModel):
     complete: bool = Field(
         default=True,
         description="False while the call is started but not finished: it has no result yet.",
+    )
+    provenance: CallProvenance | None = Field(
+        default=None,
+        description=(
+            "How the record reached the control plane, set by the control plane: host, interceptor (a host-side "
+            "interceptor) or agent (an in-agent SDK holding the session: lower trust). None in older records."
+        ),
     )
     timestamp: str
     turn: int | None = Field(

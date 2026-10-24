@@ -1,7 +1,9 @@
+import json
 import os
 import re
 import subprocess
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -20,6 +22,7 @@ from midojo.runtimes.openshell import (
 )
 from midojo.runtimes.openshell.logs import parse_ocsf_lines
 from midojo.suite_definition import OpenShellRuntimeDefinition
+from midojo.tool_endpoint import ToolEndpoint
 
 POLICY = {"networkPolicies": {"api": {"endpoints": [{"host": "api.example.com", "port": 443}]}}}
 
@@ -131,10 +134,13 @@ class _FakeSandboxClient:
         self.logs_requests = []
         self.specs = []
         self.created_specs = self.specs
+        # Each sandbox's name and labels, as created.
+        self.created = []
         self._stub = self
 
     def create(self, *, spec, name, workspace="midojo-shell-abc123", labels=None, **kwargs):
         self.specs.append(spec)
+        self.created.append((name, dict(labels or {})))
         return SandboxRef(
             id="sb-1", name=name, workspace=workspace, status=SandboxStatusRef(phase=0, current_policy_version=0)
         )
@@ -179,6 +185,92 @@ def test_sandbox_environment_never_carries_the_control_token(monkeypatch):
         "MIDOJO_SESSION_TOKEN": "session",
         "MIDOJO_URL": "http://host.openshell.internal:8090",
     }
+
+
+def test_host_mode_sandbox_environment_has_the_tool_endpoint_and_nothing_of_the_control_plane():
+    stale = {
+        "MIDOJO_URL": "http://control",
+        "MIDOJO_SESSION_TOKEN": "stale",
+        "MIDOJO_CONTROL_TOKEN": "secret",
+        # A direct route to the real tools would bypass the interceptor and its records.
+        "UPSTREAM_MCP_URL": "http://upstream:9000/mcp",
+        "MCP_SERVER_URL": "http://upstream:9000/mcp",
+    }
+    runtime, client = _runtime_with_sandbox(env_vars={"LITELLM_MODEL": "m", **stale})
+    runtime.configure(cluster="test", interceptor_url="http://host.openshell.internal:8765/mcp")
+    endpoint = ToolEndpoint("http://host.openshell.internal:8765/mcp", "tool-token")
+    runtime.setup({}, tool_endpoint=endpoint, eval_id="e1", user_task_id="t", injection_task_id=None)
+    assert dict(client.specs[0].environment) == {
+        "LITELLM_MODEL": "m",
+        "MIDOJO_TOOL_URL": "http://host.openshell.internal:8765/mcp",
+        "MIDOJO_TOOL_TOKEN": "tool-token",
+    }
+
+
+def test_a_host_mode_sandbox_is_named_and_labelled_with_nothing_of_its_evaluation():
+    runtime, client = _runtime_with_sandbox()
+    runtime._run_labels = {"midojo.suite": "shell_suite", "midojo.run-id": "r" * 32}
+    runtime.configure(cluster="test", interceptor_url="http://host.openshell.internal:8765/mcp")
+    endpoint = ToolEndpoint("http://host.openshell.internal:8765/mcp", "tool-token")
+    for _ in range(2):
+        runtime.setup({}, tool_endpoint=endpoint, eval_id="e1", user_task_id="t", injection_task_id="attack")
+    names = [name for name, _ in client.created]
+    assert all(re.fullmatch(r"sbx-[0-9a-f]{12}", name) for name in names) and len(set(names)) == 2
+    assert [labels for _, labels in client.created] == [{"midojo.suite": "shell_suite"}] * 2
+    # The host, not the sandbox, knows which sandbox runs the evaluation.
+    assert runtime.sandbox_name == names[-1]
+
+
+def test_an_agent_mode_sandbox_keeps_its_evaluation_name_and_labels():
+    runtime, client = _runtime_with_sandbox()
+    runtime._run_labels = {"midojo.suite": "shell_suite", "midojo.run-id": "r" * 32}
+    runtime.setup({}, session_token="s", eval_id="e1", user_task_id="t", injection_task_id="attack")
+    [(name, labels)] = client.created
+    assert name == "eval-e1"
+    assert labels == {
+        "midojo.suite": "shell_suite",
+        "midojo.run-id": "r" * 32,
+        "midojo.eval-id": "e1",
+        "midojo.user-task": "t",
+        "midojo.injection-task": "attack",
+    }
+
+
+@pytest.mark.parametrize("access", [{}, {"session_token": "s", "tool_endpoint": ToolEndpoint("http://h/mcp", "t")}])
+def test_setup_needs_exactly_one_of_a_session_and_a_tool_endpoint(access):
+    runtime, _ = _runtime_with_sandbox()
+    with pytest.raises(ValueError, match="exactly one"):
+        runtime.setup({}, **access, eval_id="e1", user_task_id="t", injection_task_id=None)
+
+
+@pytest.mark.parametrize(
+    "policy,warning",
+    [
+        (None, "No sandbox network policy defined"),
+        (POLICY, "does not allow the host-side interceptor at host.openshell.internal:8765"),
+        ({"networkPolicies": {"tools": {"endpoints": [{"host": "host.openshell.internal", "port": 8765}]}}}, None),
+    ],
+)
+@pytest.mark.parametrize("host", ["host.openshell.internal", "[2001:db8::1]"])
+def test_start_run_warns_when_the_policy_does_not_allow_the_interceptor(monkeypatch, caplog, policy, warning, host):
+    # A policy names an IPv6 host without the brackets its URL needs.
+    bare = host.strip("[]")
+    policy = json.loads(json.dumps(policy).replace("host.openshell.internal", bare)) if policy else policy
+    warning = warning and warning.replace("host.openshell.internal", bare)
+    runtime = OpenShellRuntime("shell_suite", image="pi", policy=policy)
+    workspaces = MagicMock()
+    workspaces.create.side_effect = lambda name, **kw: SimpleNamespace(name=name)
+    monkeypatch.setattr(openshell_runtime.SandboxClient, "from_active_cluster", lambda **kw: MagicMock())
+    monkeypatch.setattr(openshell_runtime.WorkspaceClient, "from_sandbox_client", lambda client: workspaces)
+    runtime.configure(cluster="test", interceptor_url=f"http://{host}:8765/mcp")
+    with caplog.at_level("WARNING", logger="midojo.runtimes.openshell"):
+        runtime.start_run("a" * 32, suite_name="shell_suite")
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    if warning is None:
+        assert warnings == []
+    else:
+        [message] = warnings
+        assert warning in message and "control plane" not in message
 
 
 _AGENT_RUN = {"workspace": "midojo-shell-abc123", "workdir": "/sandbox/workdir"}
@@ -258,7 +350,7 @@ class TestLogSync:
         agent_event = "NET:OPEN [MED] DENIED /usr/bin/curl(0) -> evil.test:443 [reason:transparent_tcp_policy_denied]"
 
         def marker_from_exec():
-            script = runtime._exec.call_args.args[0][2]
+            script = cast(MagicMock, runtime._exec).call_args.args[0][2]
             host = script.split()[2]
             return f"NET:REFUSE [MED] DENIED {host} [reason:policy_dns_ineligible]"
 
@@ -270,7 +362,7 @@ class TestLogSync:
 
         runtime = self._runtime(read)
         assert runtime._sync_ocsf_messages() == ([agent_event], True)
-        assert runtime._read_ocsf_messages.call_count == 3
+        assert cast(MagicMock, runtime._read_ocsf_messages).call_count == 3
 
     def test_returns_last_read_as_unsynced_when_marker_never_arrives(self, monkeypatch):
         clock = iter(range(0, 100, 5))

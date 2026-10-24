@@ -35,6 +35,14 @@ The rules kept here:
   named dispositions must be the same, or it's a ``call_conflict`` like
   another function or args: what the layer did with a call is decided when it
   starts, so a finish never overrides it;
+* provenance: a record says how it reached the control plane, from the
+  authority it arrived with: ``host`` from the host, ``interceptor`` from the
+  session of an evaluation intercepted on the host, ``agent`` from the session
+  of one intercepted in the agent. A finish keeps its start's. Nothing the
+  caller sends sets it;
+* the call capture: an evaluation intercepted in the agent that is sealed
+  without any call record has its ``function_calls`` evidence ``incomplete``,
+  since a hook that fails open records nothing;
 * environment history: a record carries environment snapshots only when the
   evaluation was created to keep them, as what was observed when the call
   started and finished, never as what the call caused;
@@ -76,8 +84,8 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
-from midojo.observations import FUNCTION_CALLS, evidence_status
-from midojo.types import REFUSED_DISPOSITIONS, CallDisposition, Environment, FunctionCallRecord
+from midojo.observations import FUNCTION_CALLS, EvidenceStatus, evidence_status
+from midojo.types import REFUSED_DISPOSITIONS, CallDisposition, CallProvenance, Environment, FunctionCallRecord
 
 from .models import (
     CapturePhase,
@@ -459,10 +467,10 @@ def _late(
     call_id: str | None = None,
 ) -> Late:
     """Refuse a write that closure stopped, and record it as a late fact (once per distinct write)."""
-    by = _by(authority)
+    by = provenance(evaluation, authority)
     if evaluation.stage is not Stage.SEALED:
         rejected = Rejected(Rejection.CLOSING, f"{CLOSING_DETAIL}: the write is recorded as a late fact")
-    elif by == "agent":
+    elif isinstance(authority, AgentSession):
         rejected = Rejected(Rejection.SESSION_CLOSED, INVALID_SESSION_DETAIL)
     else:
         rejected = Rejected(Rejection.SEALED, SEALED_DETAIL)
@@ -472,10 +480,6 @@ def _late(
     if any(_same_write(fact, known) for known in evaluation.late_facts):
         return Late(evaluation, rejected)
     return Late(_replace(evaluation, late_facts=(*evaluation.late_facts, fact)), rejected)
-
-
-def _by(authority: Authority) -> str:
-    return "agent" if isinstance(authority, AgentSession) else "host"
 
 
 def _same_write(a: LateFact, b: LateFact) -> bool:
@@ -522,6 +526,13 @@ def _find_call(evaluation: Evaluation, call_id: str) -> int | None:
     return next((i for i, call in enumerate(evaluation.function_calls) if call.call_id == call_id), None)
 
 
+def provenance(evaluation: Evaluation, authority: Authority) -> CallProvenance:
+    """How a write from ``authority`` reached the evaluation: the host, or its session, by interception mode."""
+    if isinstance(authority, Host):
+        return "host"
+    return "interceptor" if evaluation.interception == "host" else "agent"
+
+
 def _current_turn(evaluation: Evaluation) -> int | None:
     return evaluation.turns[-1].index if evaluation.turns else None
 
@@ -559,6 +570,7 @@ def _start_call(evaluation: Evaluation, authority: Authority, event: StartCall) 
     record = FunctionCallRecord(
         **req.model_dump(),
         complete=False,
+        provenance=provenance(evaluation, authority),
         timestamp=event.at,
         # A started call belongs to the turn it started in, even if it finishes later.
         turn=_current_turn(evaluation),
@@ -633,6 +645,7 @@ def _finish_call(evaluation: Evaluation, authority: Authority, event: FinishCall
     record = FunctionCallRecord(
         **req.model_dump(exclude={"call_id"}),
         call_id=req.call_id or event.assigned_call_id,
+        provenance=provenance(evaluation, authority),
         timestamp=event.at,
         turn=_current_turn(evaluation),
         pre_environment=pre_env,
@@ -653,7 +666,7 @@ def _report_capture_failure(evaluation: Evaluation, authority: Authority, event:
         if any(_capture_identity(fact) == identity for fact in evaluation.late_facts):
             return Late(evaluation, late.rejected)
         return late
-    by = _by(authority)
+    by = provenance(evaluation, authority)
     failure = CaptureFailure(
         call_id=event.call_id,
         function=event.function,
@@ -765,6 +778,20 @@ def _end_closure_wait(evaluation: Evaluation, event: EndClosureWait) -> Outcome:
     return Accepted(next_value, next_value)
 
 
+def _capture_status(evaluation: Evaluation) -> dict[str, EvidenceStatus]:
+    """The call capture's status, when the records alone can't show it is complete.
+
+    An interceptor on the host sees every call the target makes through it, so
+    no record means no call. An interception layer in the agent may fail open:
+    when it can't reach the control plane, the tool still runs and nothing is
+    recorded. So an evaluation intercepted in the agent with no record at all
+    has an incomplete capture, never a clean one.
+    """
+    if evaluation.interception == "agent" and not evaluation.function_calls:
+        return {"function_calls": "incomplete"}
+    return {}
+
+
 def _seal(evaluation: Evaluation, authority: Authority, event: Seal) -> Outcome:
     if evaluation.stage is Stage.SEALED:
         assert evaluation.snapshot is not None
@@ -797,6 +824,7 @@ def _seal(evaluation: Evaluation, authority: Authority, event: Seal) -> Outcome:
         observations=observations,
         evidence_status={
             **evidence_status(evaluation.observations),
+            **_capture_status(evaluation),
             **late_evidence(evaluation.late_facts),
             **capture_evidence(evaluation.capture_failures),
         },

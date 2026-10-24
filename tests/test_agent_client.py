@@ -2,12 +2,24 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
-from midojo.agent_client import AgentClient, OGXResponsesClient, OpenAIResponsesAgentClient, OpenShellAgentClient
+from midojo.agent_client import (
+    AgentClient,
+    OGXResponsesClient,
+    OpenAIResponsesAgentClient,
+    OpenShellAgentClient,
+    PIAgentClient,
+    SimpleHTTPAgentClient,
+)
+from midojo.tool_endpoint import ToolEndpoint
+
+_RealAsyncClient = httpx.AsyncClient
 
 
 @pytest.mark.asyncio
@@ -291,3 +303,83 @@ async def test_clients_without_multiturn_send_one_message_per_conversation():
     assert await conversation.send("hello") == "session-a: hello"
     with pytest.raises(RuntimeError, match="_OneShotAgent sends one message per evaluation"):
         await conversation.send("again")
+
+
+ENDPOINT = ToolEndpoint("http://127.0.0.1:8765/mcp", "tool-token")
+
+
+def _mock_openai(output_text: str = "ok"):
+    """A stand-in ``openai`` module whose ``AsyncOpenAI().responses.create`` is an AsyncMock."""
+    response = MagicMock(output_text=output_text, id="resp-1")
+    instance = MagicMock()
+    instance.responses.create = AsyncMock(return_value=response)
+    instance.__aenter__ = AsyncMock(return_value=instance)
+    instance.__aexit__ = AsyncMock(return_value=None)
+    return MagicMock(AsyncOpenAI=MagicMock(return_value=instance)), instance.responses.create
+
+
+@pytest.mark.asyncio
+async def test_responses_client_in_host_mode_names_the_interceptor_and_no_session():
+    import sys
+
+    client = OpenAIResponsesAgentClient("http://localhost:8321/v1", "m", None, api_key="x")
+    assert client.supports_host_interception
+    module, create = _mock_openai()
+    with patch.dict(sys.modules, {"openai": module}):
+        conversation = client.start_conversation(tool_endpoint=ENDPOINT)
+        await conversation.send("hi")
+        await conversation.aclose()
+    [tool] = create.call_args.kwargs["tools"]
+    assert (tool["server_url"], tool["headers"]) == (ENDPOINT.url, {"Authorization": "Bearer tool-token"})
+
+
+@pytest.mark.asyncio
+async def test_responses_client_needs_a_server_url_or_a_tool_endpoint():
+    import sys
+
+    module, _ = _mock_openai()
+    with patch.dict(sys.modules, {"openai": module}), pytest.raises(ValueError, match="No MCP server URL"):
+        await OpenAIResponsesAgentClient("http://localhost:8321/v1", "m", None, api_key="x").send_task(
+            "hi", session_token="s"
+        )
+
+
+@pytest.mark.asyncio
+async def test_http_client_without_a_session_sends_no_session_header():
+    requests: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"response": "done"})
+
+    transport = httpx.MockTransport(handle)
+    with patch.object(httpx, "AsyncClient", lambda **kw: _RealAsyncClient(transport=transport, **kw)):
+        assert await SimpleHTTPAgentClient("http://agent").send_task("hi") == "done"
+    assert "x-midojo-session" not in requests[0].headers
+
+
+@pytest.mark.asyncio
+async def test_pi_subprocess_in_host_mode_gets_the_tool_endpoint_and_no_session(monkeypatch, tmp_path):
+    monkeypatch.setenv("MIDOJO_SESSION_TOKEN", "host-session")
+    monkeypatch.setenv("MIDOJO_URL", "http://control")
+    # A direct route to the real tools would bypass the interceptor and its records.
+    monkeypatch.setenv("UPSTREAM_MCP_URL", "http://upstream:9000/mcp")
+    monkeypatch.setenv("MCP_SERVER_URL", "http://upstream:9000/mcp")
+    launches = []
+
+    class Process:
+        returncode = 0
+
+        async def communicate(self):
+            return b"done", b""
+
+    async def launch(*args, **kwargs):
+        launches.append(kwargs)
+        return Process()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", launch)
+    agent = PIAgentClient(str(tmp_path), "http://control")
+    assert await agent.send_task("task", tool_endpoint=ENDPOINT) == "done"
+    env = launches[0]["env"]
+    assert (env["MIDOJO_TOOL_URL"], env["MIDOJO_TOOL_TOKEN"]) == (ENDPOINT.url, "tool-token")
+    assert {"MIDOJO_SESSION_TOKEN", "MIDOJO_URL", "UPSTREAM_MCP_URL", "MCP_SERVER_URL"}.isdisjoint(env)

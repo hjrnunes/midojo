@@ -131,7 +131,8 @@ def test_a_report_is_kept_once_and_shows_on_the_evaluation_before_the_seal():
 
 def test_a_report_after_the_seal_is_a_late_fact_that_marks_the_evidence_incomplete():
     control = ControlPlane({})
-    opened = control.open_evaluation(_episode())
+    # Intercepted on the host, so sealing with no call record is a complete capture, and the grade starts clean.
+    opened = control.open_evaluation(_episode(), interception="host")
     session = BySession(opened.session_token)
     grade = _grade(control, opened.id)
     assert (grade.security, "function_calls" in grade.evidence_status) == (True, False)

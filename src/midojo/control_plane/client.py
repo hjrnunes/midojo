@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 import httpx
 from pydantic import BaseModel
@@ -15,6 +15,10 @@ from midojo.control_plane.models import (
     GradeResponse,
     TurnResponse,
 )
+from midojo.types import InterceptionMode
+
+if TYPE_CHECKING:
+    from midojo_sdk.recorder import Recorder
 
 
 class ControlClient(Protocol):
@@ -38,6 +42,7 @@ class ControlClient(Protocol):
         user_task_id: str,
         injection_task_id: str | None,
         injections: dict[str, str],
+        interception: InterceptionMode = "agent",
     ) -> CreateEvaluationResponse: ...
 
     async def start_turn(self, run_id: str, eval_id: str, message: str) -> TurnResponse: ...
@@ -55,6 +60,15 @@ class ControlClient(Protocol):
     async def record_observations(self, run_id: str, eval_id: str, source: str, observed: BaseModel) -> None: ...
 
     async def revoke_session(self, run_id: str, eval_id: str) -> None: ...
+
+    def recorder(self, session_token: str) -> Recorder:
+        """A recorder for the evaluation ``session_token`` is bound to, for a host-side interceptor.
+
+        It records on the same control plane, with the session as its only
+        authority: the host keeps the token, and the target never sees it.
+        Needs ``midojo-sdk`` (the ``dev`` and ``suites`` extras).
+        """
+        ...
 
 
 class ControlPlaneClient:
@@ -89,6 +103,7 @@ class ControlPlaneClient:
         user_task_id: str,
         injection_task_id: str | None,
         injections: dict[str, str],
+        interception: InterceptionMode = "agent",
     ) -> CreateEvaluationResponse:
         response = await self._http.post(
             f"{self._base_url}/runs/{run_id}/evaluations",
@@ -97,6 +112,7 @@ class ControlPlaneClient:
                 "user_task_id": user_task_id,
                 "injection_task_id": injection_task_id,
                 "injections": injections,
+                "interception": interception,
             },
         )
         response.raise_for_status()
@@ -155,6 +171,15 @@ class ControlPlaneClient:
             json={"source": source, "data": observed.model_dump(mode="json")},
         )
         response.raise_for_status()
+
+    def recorder(self, session_token: str) -> Recorder:
+        """The session's recorder over HTTP, on this client's connection pool, resending after a transient failure."""
+        from midojo_sdk.client import AgentControlPlaneClient, transient
+        from midojo_sdk.recorder import RetryingRecorder
+
+        return RetryingRecorder(
+            AgentControlPlaneClient(self._base_url, session_token, http=self._http), retryable=transient
+        )
 
     async def revoke_session(self, run_id: str, eval_id: str) -> None:
         response = await self._http.delete(

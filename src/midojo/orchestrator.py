@@ -3,14 +3,16 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import importlib
+import ipaddress
 import json
 import math
 import os
 from pathlib import Path
-from typing import NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import click
 import httpx
+from midojo_sdk.injection import Channel
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -33,9 +35,13 @@ from midojo.episode import Episode
 from midojo.reachability import UNKNOWN as UNKNOWN_REACHABILITY
 from midojo.reachability import Reachability, count, reachability
 from midojo.runtimes import AgentRuntime
-from midojo.runtimes.openshell import OpenShellRuntime
+from midojo.runtimes.openshell import SANDBOX_HOST, OpenShellRuntime
 from midojo.suites import get_suite, list_suites
+from midojo.tool_endpoint import bare_host, tool_url
 from midojo.yaml_task_suite import YAMLTaskSuite
+
+if TYPE_CHECKING:
+    from midojo.interception_host import HostInterception, HostInterceptor
 
 console = Console()
 
@@ -256,36 +262,56 @@ async def run_task(
     episode: Episode,
     *,
     runtime: AgentRuntime,
+    interception: HostInterception | None = None,
 ) -> TaskResult:
     """Run one evaluation of a suite's ``episode``, with the runtime set up around the agent's execution.
 
     The control plane compiles the same episode from the run's suite, and its
     turns are the ones sent. Each turn is started in the control plane, sent to
-    the agent and its reply recorded, all in one conversation on the
-    evaluation's session. Then the evaluation is closed (calls already admitted
-    may finish), the runtime's final observations recorded, and the evaluation
-    sealed and graded.
+    the agent and its reply recorded, all in one conversation. Then the
+    evaluation is closed (calls already admitted may finish), the runtime's
+    final observations recorded, and the evaluation sealed and graded.
+
+    Without ``interception``, the runtime and the agent get the evaluation's
+    session, for an interception layer in the agent. With it (host mode), the
+    evaluation is opened for host interception, and an interceptor started for
+    it with the session's recorder and the episode's tool-output plan: the
+    runtime and the agent get only its tool endpoint. It stops once the
+    evaluation is sealed and graded, or the evaluation fails; calls it gets
+    once the evaluation is closing, and after the seal, are late facts.
     """
     user_task_id, injection_task_id = episode.user_task_id, episode.injection_task_id
     if user_task_id is None:
         raise ValueError("run_task runs a suite's episode: compile one with suite.episode()")
     injections = dict(episode.injections)
-    evaluation = await control.create_evaluation(run_id, user_task_id, injection_task_id, injections)
+    mode: dict[str, Any] = {"interception": "host"} if interception is not None else {}
+    evaluation = await control.create_evaluation(run_id, user_task_id, injection_task_id, injections, **mode)
     eval_id, messages, session_token = evaluation.id, evaluation.turns, evaluation.session_token
     pair = f"{user_task_id} x {injection_task_id}" if injection_task_id else user_task_id
+    interceptor: HostInterceptor | None = None
 
     try:
         try:
+            # What the agent may hold: the session, or in host mode only the interceptor's endpoint.
+            access: dict[str, Any] = {"session_token": session_token}
+            if interception is not None:
+                with console.status(f"[dim]{pair} · starting the interceptor…[/dim]", spinner="dots"):
+                    interceptor = interception.interceptor(
+                        control.recorder(session_token),
+                        evaluation_id=eval_id,
+                        plan=episode.plan.for_channels(Channel.TOOL_OUTPUT),
+                    )
+                    access = {"tool_endpoint": await interceptor.start()}
             with console.status(f"[dim]{pair} · setting up the {runtime.name} runtime…[/dim]", spinner="dots"):
                 await asyncio.to_thread(
                     runtime.setup,
                     injections,
-                    session_token=session_token,
+                    **access,
                     eval_id=eval_id,
                     user_task_id=user_task_id,
                     injection_task_id=injection_task_id,
                 )
-            conversation = agent_client.start_conversation(session_token=session_token, turn_count=len(messages))
+            conversation = agent_client.start_conversation(turn_count=len(messages), **access)
             turns: list[Exchange] = []
             try:
                 for idx, message in enumerate(messages):
@@ -317,6 +343,11 @@ async def run_task(
         with contextlib.suppress(*_CONTROL_ERRORS):
             await control.revoke_session(run_id, eval_id)
         raise
+    finally:
+        # Live until the evaluation is sealed: a call the target makes after closure, however late, is refused
+        # and kept as a late fact, rather than lost to a refused connection.
+        if interceptor is not None:
+            await interceptor.stop()
 
 
 async def _run_benchmark(
@@ -331,6 +362,7 @@ async def _run_benchmark(
     injection_task_ids: list[str] | None,
     logdir: Path,
     runtime: AgentRuntime,
+    interception: HostInterception | None = None,
 ) -> None:
     user_tasks_to_run = user_task_ids or list(suite.user_tasks.keys())
     injection_tasks_to_run: list[str]
@@ -343,6 +375,11 @@ async def _run_benchmark(
         injection_tasks_to_run = []
 
     _check_turns_supported(suite, user_tasks_to_run, agent_client, protocol)
+    if interception is not None and not agent_client.supports_host_interception:
+        raise click.UsageError(
+            f"--protocol {protocol} can't give the agent a tool endpoint. Host interception supports --protocol "
+            "openai, ogx and pi, and the openshell runtime."
+        )
     run_id = (await control.create_run(suite_name)).id
     _print_banner(suite_name, agent_uri, protocol, user_tasks_to_run, injection_tasks_to_run)
     console.print(f"  [dim]run[/dim] [cyan underline]{run_id}[/cyan underline]\n")
@@ -366,7 +403,9 @@ async def _run_benchmark(
         for ut_id in user_tasks_to_run:
             for it_id in it_ids_to_run:
                 episode = suite.episode(ut_id, it_id, suite.get_probes_for_task(it_id) if it_id else {})
-                result = await run_task(control, agent_client, run_id, episode, runtime=runtime)
+                result = await run_task(
+                    control, agent_client, run_id, episode, runtime=runtime, interception=interception
+                )
                 grade = result.grade
                 pair = TaskPair(ut_id, it_id or "")
                 utility_results[pair] = grade.utility
@@ -452,6 +491,7 @@ async def run_benchmark(
     http: httpx.AsyncClient | None = None,
     runtime: AgentRuntime | None = None,
     control: ControlClient | None = None,
+    interception: HostInterception | None = None,
 ) -> None:
     """Run the benchmark against the control plane at ``control_url``.
 
@@ -461,6 +501,8 @@ async def run_benchmark(
     the caller keeps it open and closes it, and ``control_url`` only names the
     evaluations in the output. ``runtime`` runs the run's evaluations, one at
     a time; by default it's a fresh one from the suite (``suite.new_runtime()``).
+    ``interception`` runs the evaluations in host mode, each with its own
+    interceptor (see :func:`run_task`); by default the agent gets the session.
     """
     if runtime is None:
         runtime = suite.new_runtime()
@@ -479,6 +521,7 @@ async def run_benchmark(
             injection_task_ids,
             logdir,
             runtime,
+            interception,
         )
 
 
@@ -552,6 +595,43 @@ async def run_benchmark(
     help="Seconds the agent may take per evaluation. Overrides the suite's timeout_seconds for openshell suites "
     "(default 300); for unmanaged agents, sets the client's timeout (default 120).",
 )
+@click.option(
+    "--interception",
+    type=click.Choice(["agent", "host"]),
+    default="agent",
+    show_default=True,
+    help="Where tool calls are intercepted. agent: an SDK in the agent records them, with the evaluation's session "
+    "(lower-trust evidence). host: midojo runs an interceptor for each evaluation in this process, and the agent "
+    "gets only its tool endpoint, never a session or the control-plane URL.",
+)
+@click.option(
+    "--upstream-mcp-url",
+    envvar="UPSTREAM_MCP_URL",
+    default=None,
+    help="The real MCP server the host-side interceptor mirrors and forwards to. Required with --interception host; "
+    "env: UPSTREAM_MCP_URL.",
+)
+@click.option(
+    "--interceptor-bind",
+    default="127.0.0.1",
+    show_default=True,
+    help="Address the host-side interceptor listens on. An OpenShell sandbox can't reach the host's loopback: bind "
+    "an address it reaches (e.g. 0.0.0.0).",
+)
+@click.option(
+    "--interceptor-port",
+    type=click.IntRange(0, 65535),
+    default=0,
+    show_default=True,
+    help="Port the host-side interceptor listens on; 0 picks a free one per evaluation. OpenShell needs a fixed "
+    "port, the one its network policy allows.",
+)
+@click.option(
+    "--interceptor-advertise-host",
+    default=None,
+    help="Host the agent connects to the interceptor at. Defaults to host.openshell.internal for OpenShell "
+    "sandboxes, and to the bind address otherwise (127.0.0.1 for a wildcard bind).",
+)
 def main(
     control_url: str,
     control_token: str | None,
@@ -568,6 +648,11 @@ def main(
     mcp_server_label: str | None,
     model_name: str | None,
     agent_timeout: float | None,
+    interception: str,
+    upstream_mcp_url: str | None,
+    interceptor_bind: str,
+    interceptor_port: int,
+    interceptor_advertise_host: str | None,
 ) -> None:
     for module in modules_to_load:
         importlib.import_module(module)
@@ -578,6 +663,20 @@ def main(
     agent_client: AgentClient
     # Unmanaged clients keep their own default timeout unless --agent-timeout is given.
     timeout_kwargs = {} if agent_timeout is None else {"timeout": agent_timeout}
+    host_mode = interception == "host"
+    host_interception = (
+        _host_interception(
+            upstream_mcp_url,
+            bind=interceptor_bind,
+            port=interceptor_port,
+            advertise=interceptor_advertise_host,
+            openshell=isinstance(runtime, OpenShellRuntime),
+        )
+        if host_mode
+        else None
+    )
+    if not host_mode and (interceptor_port or interceptor_advertise_host):
+        raise click.UsageError("The --interceptor-* options apply only to --interception host.")
 
     if isinstance(runtime, OpenShellRuntime):
         if agent_uri or protocol:
@@ -586,7 +685,13 @@ def main(
             )
         if not gateway:
             raise click.UsageError(f"Suite {suite_name!r} runs its agent in OpenShell and requires --gateway.")
-        runtime.configure(cluster=gateway, control_url=control_url)
+        if host_interception is not None:
+            # The sandbox never gets the control plane's URL in host mode, only the interceptor's.
+            assert host_interception.advertise_host is not None
+            advertised = tool_url(host_interception.advertise_host, host_interception.port)
+            runtime.configure(cluster=gateway, interceptor_url=advertised)
+        else:
+            runtime.configure(cluster=gateway, control_url=control_url)
         agent_client = OpenShellAgentClient(runtime, timeout=agent_timeout)
         agent_uri, protocol = gateway, "openshell"
     elif gateway:
@@ -602,7 +707,7 @@ def main(
     elif protocol in {"ogx", "openai"}:
         if not model_name:
             raise click.UsageError(f"--protocol {protocol} requires --model-name or MODEL_NAME.")
-        if not mcp_server_url:
+        if not mcp_server_url and not host_mode:
             raise click.UsageError(f"--protocol {protocol} requires --mcp-server-url or MCP_SERVER_URL.")
         system_message = _resolve_system_message(suite_name)
         if protocol == "ogx":
@@ -644,8 +749,63 @@ def main(
             logdir=logdir,
             control_token=control_token or None,
             runtime=runtime,
+            interception=host_interception,
         )
     )
+
+
+def _ip(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """``host`` as an IP address (an IPv4-mapped IPv6 one as its IPv4 address), or None for a name."""
+    try:
+        ip = ipaddress.ip_address(bare_host(host))
+    except ValueError:
+        return None
+    return ip.ipv4_mapped or ip if isinstance(ip, ipaddress.IPv6Address) else ip
+
+
+def _is_loopback(host: str) -> bool:
+    """Whether ``host`` is this machine's loopback: ``localhost`` or an address in 127.0.0.0/8 or ::1."""
+    name = host.lower().rstrip(".")
+    ip = _ip(host)
+    return name == "localhost" or name.endswith(".localhost") or (ip is not None and ip.is_loopback)
+
+
+def _is_unspecified(host: str) -> bool:
+    """Whether ``host`` is an unspecified address (0.0.0.0, ::): one to listen on, not to connect to."""
+    ip = _ip(host)
+    return host == "" or (ip is not None and ip.is_unspecified)
+
+
+def _host_interception(
+    upstream_mcp_url: str | None, *, bind: str, port: int, advertise: str | None, openshell: bool
+) -> HostInterception:
+    """The run's host-mode settings, from the CLI options, refusing what a target couldn't reach."""
+    from midojo.interception_host import HostInterception  # needs midojo-sdk[mcp]
+
+    if not upstream_mcp_url:
+        raise click.UsageError("--interception host requires --upstream-mcp-url or UPSTREAM_MCP_URL.")
+    # Hosts are kept without URL brackets ([2001:db8::1] is 2001:db8::1), and bracketed once in a URL.
+    bind = bare_host(bind)
+    advertise = bare_host(advertise) if advertise else None
+    if openshell:
+        if not port:
+            raise click.UsageError(
+                "--interception host with the openshell runtime requires --interceptor-port: the sandbox's network "
+                "policy must allow a fixed port."
+            )
+        if _is_loopback(bind):
+            raise click.UsageError(
+                "An OpenShell sandbox can't reach an interceptor on the host's loopback: pass --interceptor-bind "
+                "with an address the sandbox reaches (e.g. 0.0.0.0)."
+            )
+        advertise = advertise or SANDBOX_HOST
+        if _is_loopback(advertise) or _is_unspecified(advertise):
+            raise click.UsageError(
+                f"An OpenShell sandbox can't reach an interceptor advertised at {advertise}: its loopback is the "
+                f"sandbox's own, and an unspecified address names no host. Pass --interceptor-advertise-host with "
+                f"a host the sandbox reaches, or leave it out for {SANDBOX_HOST}."
+            )
+    return HostInterception(upstream=upstream_mcp_url, bind_host=bind, port=port, advertise_host=advertise)
 
 
 if __name__ == "__main__":

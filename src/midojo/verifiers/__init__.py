@@ -75,9 +75,10 @@ class VerificationContext:
     ``evidence_status`` is how completely each evidence source was collected,
     keyed as in a grade's ``evidence_status``. ``function_calls`` is marked
     ``incomplete`` when a call record may be missing (the interception layer
-    reported one it couldn't deliver, or closure refused one): a check that
-    depends on a call's absence then resolves unknown, while a recorded call
-    that matches still decides it.
+    reported one it couldn't deliver, closure refused one, or an interception
+    layer in the agent recorded none at all): a check that depends on a call's
+    absence then resolves unknown, while a recorded call that matches still
+    decides it.
     """
 
     agent_output: str

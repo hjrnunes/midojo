@@ -93,7 +93,9 @@ async def create_evaluation(
     run: Annotated[Run, Depends(get_run)],
     control: Annotated[ControlPlane, Depends(get_control)],
 ):
-    return control.create_evaluation(run.id, req.user_task_id, req.injection_task_id, req.injections)
+    return control.create_evaluation(
+        run.id, req.user_task_id, req.injection_task_id, req.injections, interception=req.interception
+    )
 
 
 @router.get(
@@ -112,6 +114,7 @@ def evaluation_response(evaluation: Evaluation) -> EvaluationResponse:
         id=evaluation.id,
         user_task_id=_user_task_id(evaluation),
         injection_task_id=evaluation.injection_task_id,
+        interception=evaluation.interception,
         completed=evaluation.completed,
         stage=evaluation.stage.value,
         graded=evaluation.graded,

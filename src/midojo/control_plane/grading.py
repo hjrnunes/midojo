@@ -16,7 +16,8 @@ def grade_snapshot(episode: Episode, snapshot: Snapshot) -> GradeResponse:
     The checks see the snapshot's evidence status, so a check that depends on a
     call's absence is unknown when ``function_calls`` is incomplete. The
     evidence status is the episode's, with every key the snapshot marks (a late
-    fact or a capture failure recorded before the seal) taken from the snapshot.
+    fact or a capture failure recorded before the seal, or a call capture the
+    seal found incomplete) taken from the snapshot.
     """
     snapshot = detached(snapshot)
     result = episode.grade(

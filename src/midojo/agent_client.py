@@ -1,3 +1,16 @@
+"""How the orchestrator reaches the agent, and what it hands the agent for each evaluation.
+
+Each conversation carries what the agent may hold for its evaluation: the
+evaluation's session token, for an interception layer in or beside the agent
+that records on the control plane (the ``X-Midojo-Session`` header, or
+``MIDOJO_SESSION_TOKEN`` and ``MIDOJO_URL`` for a PI subprocess); or, in host
+mode, only the :class:`~midojo.tool_endpoint.ToolEndpoint` of the interceptor
+the host runs. A client that can pass a tool endpoint has
+``supports_host_interception``: the Responses API clients put it in their MCP
+tool block, the PI client in the subprocess's environment, and the OpenShell
+client's sandbox already has it.
+"""
+
 from __future__ import annotations
 
 import abc
@@ -10,6 +23,7 @@ from typing import TYPE_CHECKING
 import httpx
 
 from midojo.control_plane.config import CONTROL_TOKEN_ENV
+from midojo.tool_endpoint import HOST_MODE_WITHHELD_ENV, TOOL_TOKEN_ENV, TOOL_URL_ENV, ToolEndpoint
 
 if TYPE_CHECKING:
     from midojo.runtimes.openshell import OpenShellRuntime
@@ -17,6 +31,10 @@ if TYPE_CHECKING:
 # Carries the evaluation session to agents reached over HTTP. midojo_sdk.session
 # reads it on the agent side.
 SESSION_HEADER = "X-Midojo-Session"
+
+# What a PI subprocess must never inherit from the orchestrator's environment: the
+# control token, and the variables that give or name an evaluation's access.
+_WITHHELD_ENV = frozenset({CONTROL_TOKEN_ENV, "MIDOJO_URL", "MIDOJO_SESSION_TOKEN", TOOL_URL_ENV, TOOL_TOKEN_ENV})
 
 
 class Conversation(abc.ABC):
@@ -35,31 +53,60 @@ class AgentClient(abc.ABC):
     # Whether a conversation carries the agent's context from one message to the
     # next. Clients without it get one message per evaluation.
     supports_multiturn: bool = False
+    # Whether the client can give the agent a tool endpoint instead of a session (host mode).
+    supports_host_interception: bool = False
 
     @abc.abstractmethod
-    async def send_task(self, prompt: str, *, session_token: str) -> str:
-        """Send a task prompt to the agent and return its final text output."""
+    async def send_task(
+        self, prompt: str, *, session_token: str | None = None, tool_endpoint: ToolEndpoint | None = None
+    ) -> str:
+        """Send a task prompt to the agent and return its final text output.
+
+        The agent gets ``session_token`` or, in host mode, ``tool_endpoint``.
+        """
         ...
 
-    def start_conversation(self, *, session_token: str, turn_count: int = 1) -> Conversation:
+    def start_conversation(
+        self, *, session_token: str | None = None, turn_count: int = 1, tool_endpoint: ToolEndpoint | None = None
+    ) -> Conversation:
         """Start one evaluation's conversation of ``turn_count`` messages.
 
         By default, its one message goes through ``send_task``.
         """
-        return _SingleMessageConversation(self, session_token)
+        return _SingleMessageConversation(self, session_token, tool_endpoint)
 
 
 class _SingleMessageConversation(Conversation):
-    def __init__(self, client: AgentClient, session_token: str) -> None:
+    def __init__(self, client: AgentClient, session_token: str | None, tool_endpoint: ToolEndpoint | None) -> None:
         self._client = client
         self._session_token = session_token
+        self._tool_endpoint = tool_endpoint
         self._sent = False
 
     async def send(self, message: str) -> str:
         if self._sent:
             raise RuntimeError(f"{type(self._client).__name__} sends one message per evaluation")
         self._sent = True
-        return await self._client.send_task(message, session_token=self._session_token)
+        # A tool endpoint only in host mode, so clients written before it keep their signature.
+        endpoint = {"tool_endpoint": self._tool_endpoint} if self._tool_endpoint is not None else {}
+        return await self._client.send_task(message, session_token=self._session_token, **endpoint)
+
+
+def _session_headers(session_token: str | None) -> dict[str, str]:
+    return {SESSION_HEADER: session_token} if session_token is not None else {}
+
+
+def _mcp_server(
+    url: str | None, label: str, session_token: str | None, tool_endpoint: ToolEndpoint | None
+) -> dict[str, object]:
+    """The Responses API's MCP tool block: the interceptor and its token in host mode, else the session header."""
+    if tool_endpoint is not None:
+        url, headers = tool_endpoint.url, tool_endpoint.headers
+    else:
+        headers = _session_headers(session_token)
+    if url is None:
+        raise ValueError("No MCP server URL: pass mcp_server_url, or a tool endpoint in host mode")
+    return {"type": "mcp", "server_label": label, "server_url": url, "headers": headers, "require_approval": "never"}
 
 
 class SimpleHTTPAgentClient(AgentClient):
@@ -73,9 +120,11 @@ class SimpleHTTPAgentClient(AgentClient):
         self.agent_url = agent_url
         self.timeout = timeout
 
-    async def send_task(self, prompt: str, *, session_token: str) -> str:
+    async def send_task(
+        self, prompt: str, *, session_token: str | None = None, tool_endpoint: ToolEndpoint | None = None
+    ) -> str:
         async with httpx.AsyncClient(timeout=self.timeout) as client:
-            resp = await client.post(self.agent_url, json={"prompt": prompt}, headers={SESSION_HEADER: session_token})
+            resp = await client.post(self.agent_url, json={"prompt": prompt}, headers=_session_headers(session_token))
             resp.raise_for_status()
             data = resp.json()
             for key in ("response", "output", "text"):
@@ -95,12 +144,14 @@ class A2AAgentClient(AgentClient):
         self.agent_url = agent_url
         self.timeout = timeout
 
-    async def send_task(self, prompt: str, *, session_token: str) -> str:
+    async def send_task(
+        self, prompt: str, *, session_token: str | None = None, tool_endpoint: ToolEndpoint | None = None
+    ) -> str:
         from a2a.client import ClientConfig, create_client
         from a2a.types import Message, Part, Role, SendMessageRequest
 
         config = ClientConfig(
-            httpx_client=httpx.AsyncClient(timeout=self.timeout, headers={SESSION_HEADER: session_token}),
+            httpx_client=httpx.AsyncClient(timeout=self.timeout, headers=_session_headers(session_token)),
         )
         client = await create_client(self.agent_url, client_config=config)
         try:
@@ -148,15 +199,20 @@ class OpenAIResponsesAgentClient(AgentClient):
 
     A conversation sends each message after the first with the previous reply's
     response ID as ``previous_response_id``, so the server carries the context.
+
+    The MCP tool block names ``mcp_server_url`` with the session in
+    ``X-Midojo-Session``; in host mode, the interceptor's URL with its bearer
+    token, and no session.
     """
 
     supports_multiturn = True
+    supports_host_interception = True
 
     def __init__(
         self,
         base_url: str,
         model: str,
-        mcp_server_url: str,
+        mcp_server_url: str | None,
         *,
         mcp_server_label: str = "midojo",
         instructions: str = "",
@@ -171,33 +227,35 @@ class OpenAIResponsesAgentClient(AgentClient):
         self.api_key = api_key
         self.timeout = timeout
 
-    async def send_task(self, prompt: str, *, session_token: str) -> str:
-        conversation = self.start_conversation(session_token=session_token)
+    async def send_task(
+        self, prompt: str, *, session_token: str | None = None, tool_endpoint: ToolEndpoint | None = None
+    ) -> str:
+        conversation = self.start_conversation(session_token=session_token, tool_endpoint=tool_endpoint)
         try:
             return await conversation.send(prompt)
         finally:
             await conversation.aclose()
 
-    def start_conversation(self, *, session_token: str, turn_count: int = 1) -> Conversation:
-        return _ResponsesConversation(self, session_token)
+    def start_conversation(
+        self, *, session_token: str | None = None, turn_count: int = 1, tool_endpoint: ToolEndpoint | None = None
+    ) -> Conversation:
+        return _ResponsesConversation(self, session_token, tool_endpoint)
 
     async def _create_response(
-        self, openai_client, message: str, *, session_token: str, previous_response_id: str | None
+        self,
+        openai_client,
+        message: str,
+        *,
+        session_token: str | None,
+        previous_response_id: str | None,
+        tool_endpoint: ToolEndpoint | None = None,
     ):
         continuation = {"previous_response_id": previous_response_id} if previous_response_id is not None else {}
         return await openai_client.responses.create(
             model=self.model,
             input=message,
             instructions=self.instructions,
-            tools=[
-                {
-                    "type": "mcp",
-                    "server_label": self.mcp_server_label,
-                    "server_url": self.mcp_server_url,
-                    "headers": {SESSION_HEADER: session_token},
-                    "require_approval": "never",
-                },
-            ],
+            tools=[_mcp_server(self.mcp_server_url, self.mcp_server_label, session_token, tool_endpoint)],
             stream=False,
             **continuation,
         )
@@ -206,16 +264,19 @@ class OpenAIResponsesAgentClient(AgentClient):
 class _ResponsesConversation(Conversation):
     """Sends every turn through one ``AsyncOpenAI`` client, closed by ``aclose``."""
 
-    def __init__(self, client: OpenAIResponsesAgentClient, session_token: str) -> None:
+    def __init__(
+        self, client: OpenAIResponsesAgentClient, session_token: str | None, tool_endpoint: ToolEndpoint | None
+    ) -> None:
         self._client = client
         self._session_token = session_token
+        self._tool_endpoint = tool_endpoint
         self._previous_response_id: str | None = None
         self._openai = None
         self._resources = contextlib.AsyncExitStack()
 
     async def send(self, message: str) -> str:
         if self._openai is None:
-            from openai import AsyncOpenAI  # openai is in the [suites] optional extras
+            from openai import AsyncOpenAI  # pyright: ignore[reportMissingImports] - in the [suites] extras
 
             client = self._client
             self._openai = await self._resources.enter_async_context(
@@ -226,6 +287,7 @@ class _ResponsesConversation(Conversation):
             message,
             session_token=self._session_token,
             previous_response_id=self._previous_response_id,
+            tool_endpoint=self._tool_endpoint,
         )
         self._previous_response_id = response.id
         return response.output_text
@@ -240,13 +302,17 @@ class OGXResponsesClient(AgentClient):
     The Responses API runs the tool loop server-side — the model discovers
     and calls MCP tools without client involvement. This is the vector
     tested by ogx-ai/ogx#5036: server-side tool results bypass guardrails.
+
+    The MCP tool block is the same as ``OpenAIResponsesAgentClient``'s.
     """
+
+    supports_host_interception = True
 
     def __init__(
         self,
         ogx_url: str,
         model: str,
-        mcp_server_url: str,
+        mcp_server_url: str | None,
         *,
         mcp_server_label: str = "midojo",
         instructions: str = "",
@@ -261,23 +327,17 @@ class OGXResponsesClient(AgentClient):
         self.shield_id = shield_id
         self.timeout = timeout
 
-    async def send_task(self, prompt: str, *, session_token: str) -> str:
-        from ogx_client import OgxClient
+    async def send_task(
+        self, prompt: str, *, session_token: str | None = None, tool_endpoint: ToolEndpoint | None = None
+    ) -> str:
+        from ogx_client import OgxClient  # pyright: ignore[reportMissingImports] - in the [suites] extras
 
         client = OgxClient(base_url=self.ogx_url, timeout=self.timeout)
         kwargs: dict = dict(
             model=self.model,
             input=prompt,
             instructions=self.instructions,
-            tools=[
-                {
-                    "type": "mcp",
-                    "server_label": self.mcp_server_label,
-                    "server_url": self.mcp_server_url,
-                    "headers": {SESSION_HEADER: session_token},
-                    "require_approval": "never",
-                },
-            ],
+            tools=[_mcp_server(self.mcp_server_url, self.mcp_server_label, session_token, tool_endpoint)],
             stream=False,
         )
         if self.shield_id:
@@ -291,8 +351,16 @@ class PIAgentClient(AgentClient):
     """Launches a PI coding agent as a subprocess for each task.
 
     The ``agent_dir`` should point to a directory containing a ``.pi/``
-    configuration folder with extensions that use ``@midojo/pi-sdk``.
+    configuration folder with extensions that use ``@midojo/pi-sdk``, which
+    record with ``MIDOJO_SESSION_TOKEN`` at ``MIDOJO_URL``. In host mode the
+    subprocess gets neither, only ``MIDOJO_TOOL_URL`` and ``MIDOJO_TOOL_TOKEN``:
+    PI must be configured to reach its tools there. Either way it inherits the
+    orchestrator's environment without the control token or any of these; in
+    host mode, also without ``UPSTREAM_MCP_URL`` or ``MCP_SERVER_URL``, which
+    name the real MCP server.
     """
+
+    supports_host_interception = True
 
     def __init__(
         self,
@@ -305,13 +373,17 @@ class PIAgentClient(AgentClient):
         self.control_url = control_url
         self.timeout = timeout
 
-    async def send_task(self, prompt: str, *, session_token: str) -> str:
-        # The agent gets its session token only, never the orchestrator's control token.
-        env = {
-            **{name: value for name, value in os.environ.items() if name != CONTROL_TOKEN_ENV},
-            "MIDOJO_URL": self.control_url,
-            "MIDOJO_SESSION_TOKEN": session_token,
-        }
+    async def send_task(
+        self, prompt: str, *, session_token: str | None = None, tool_endpoint: ToolEndpoint | None = None
+    ) -> str:
+        # The agent gets its own evaluation's access only, never the orchestrator's control token.
+        env = {name: value for name, value in os.environ.items() if name not in _WITHHELD_ENV}
+        if tool_endpoint is not None:
+            # Nor anything that names the real MCP server, which would let it call its tools unrecorded.
+            env = {name: value for name, value in env.items() if name not in HOST_MODE_WITHHELD_ENV}
+            env.update(tool_endpoint.environment())
+        elif session_token is not None:
+            env.update({"MIDOJO_URL": self.control_url, "MIDOJO_SESSION_TOKEN": session_token})
 
         proc = await asyncio.create_subprocess_exec(
             "pi",
@@ -350,9 +422,12 @@ class OpenShellAgentClient(AgentClient):
     A single-turn task runs the command as ``send_task`` does, without them.
     Each run gets the full ``timeout``.
     Without a ``timeout``, it uses the runtime's (the suite's ``timeout_seconds``, or 300 s).
+    The session or tool endpoint is in the sandbox's environment already
+    (``OpenShellRuntime.setup``).
     """
 
     supports_multiturn = True
+    supports_host_interception = True
 
     def __init__(
         self,
@@ -363,12 +438,16 @@ class OpenShellAgentClient(AgentClient):
         self._runtime = runtime
         self.timeout = runtime.agent_timeout_seconds if timeout is None else timeout
 
-    async def send_task(self, prompt: str, *, session_token: str) -> str:
+    async def send_task(
+        self, prompt: str, *, session_token: str | None = None, tool_endpoint: ToolEndpoint | None = None
+    ) -> str:
         return await self._run(prompt)
 
-    def start_conversation(self, *, session_token: str, turn_count: int = 1) -> Conversation:
+    def start_conversation(
+        self, *, session_token: str | None = None, turn_count: int = 1, tool_endpoint: ToolEndpoint | None = None
+    ) -> Conversation:
         if turn_count == 1:
-            return super().start_conversation(session_token=session_token)
+            return super().start_conversation(session_token=session_token, tool_endpoint=tool_endpoint)
         return _OpenShellConversation(self, turn_count)
 
     async def _run(self, prompt: str, *, env: dict[str, str] | None = None, turn: str = "") -> str:
