@@ -35,7 +35,7 @@ import asyncio
 import hashlib
 import secrets
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -346,15 +346,19 @@ class ControlPlane:
             remaining = (evaluation.closure_deadline or 0.0) - time.time()
             await asyncio.sleep(max(0.0, min(CLOSURE_POLL_SECONDS, remaining)))
 
-    async def complete(self, run_id: str | None, eval_id: str, agent_output: str) -> Snapshot:
+    async def complete(
+        self, run_id: str | None, eval_id: str, agent_output: str, incomplete: Sequence[str] = ()
+    ) -> Snapshot:
         """Seal the evaluation with the agent's final output, closing it first if needed.
 
         Completing a sealed evaluation again with the same output returns its
         snapshot; another output is refused and recorded as a late fact.
+        ``incomplete`` names evidence the host didn't collect in full, such as
+        an episode a failure cut short: the snapshot marks it ``incomplete``.
         """
         if self.evaluation(ById(run_id, eval_id)).stage is not Stage.SEALED:
             await self.close(run_id, eval_id)
-        return self.apply(ById(run_id, eval_id), lifecycle.Seal(agent_output, _now()))
+        return self.apply(ById(run_id, eval_id), lifecycle.Seal(agent_output, _now(), incomplete=tuple(incomplete)))
 
     def snapshot(self, run_id: str | None, eval_id: str) -> Snapshot:
         """The evaluation's sealed snapshot, refused as ``not_sealed`` before the seal. It shares nothing stored."""

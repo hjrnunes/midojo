@@ -187,6 +187,13 @@ class CreateEvaluationResponse(BaseModel):
 
 class CompleteRequest(BaseModel):
     agent_output: str
+    incomplete: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Evidence-status keys the host didn't collect in full, such as an episode a failure cut short "
+            "(function_calls, turns, agent_output): the snapshot marks them incomplete."
+        ),
+    )
 
 
 _STAGE_DESCRIPTION = (

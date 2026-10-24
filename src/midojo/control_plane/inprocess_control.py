@@ -19,6 +19,7 @@ holds the ``ControlPlane`` is the host.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
@@ -108,9 +109,11 @@ class InProcessControlClient:
         """Stop admitting new calls, and wait (up to the control plane's closure wait) for admitted ones to finish."""
         return close_response(await self._control.close(run_id, eval_id))
 
-    async def complete_evaluation(self, run_id: str | None, eval_id: str, agent_output: str) -> None:
-        req = CompleteRequest(agent_output=agent_output)
-        await self._control.complete(run_id, eval_id, req.agent_output)
+    async def complete_evaluation(
+        self, run_id: str | None, eval_id: str, agent_output: str, incomplete: Sequence[str] = ()
+    ) -> None:
+        req = CompleteRequest(agent_output=agent_output, incomplete=list(incomplete))
+        await self._control.complete(run_id, eval_id, req.agent_output, req.incomplete)
 
     async def grade_evaluation(self, run_id: str | None, eval_id: str) -> GradeResponse:
         return self._control.grade(run_id, eval_id)

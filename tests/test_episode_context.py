@@ -7,8 +7,10 @@ scripted MCP server, and the agent a scripted MCP client on loopback.
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import dataclasses
+import threading
 import uuid
 
 import httpx
@@ -22,7 +24,8 @@ from midojo.control_plane.client import ControlPlaneClient
 from midojo.control_plane.config import AppConfig
 from midojo.control_plane.lifecycle import RejectedError, Rejection
 from midojo.control_plane.main import create_app
-from midojo.control_plane.service import ControlPlane
+from midojo.control_plane.service import ById, ControlPlane
+from midojo.control_plane.state import Stage
 from midojo.episode import Episode
 from midojo.episode_context import AgentBinding, open_episode
 from midojo.interception_host import HostInterception
@@ -327,3 +330,144 @@ async def test_a_target_is_reset_only_when_asked_and_declared_and_the_result_say
         await ep.turn("hi", _reply("rain"))
     assert runtime.steps == steps
     assert ep.result.reset == outcome
+
+
+# --- failure and cancellation: released, and sealed with incomplete evidence, never open ---
+
+
+INTERRUPTED = {"function_calls": "incomplete", "turns": "incomplete", "agent_output": "incomplete"}
+
+
+def assert_sealed_as_interrupted(plane: ControlPlane, ep, episode: Episode) -> None:
+    evaluation = plane.evaluation(ById(None, ep.evaluation_id))
+    assert evaluation.stage is Stage.SEALED and not evaluation.graded
+    assert evaluation.session is None  # revoked: nothing more is recorded with it
+    snapshot = ep.sealed
+    assert snapshot == evaluation.snapshot
+    assert {key: snapshot.evidence_status[key] for key in INTERRUPTED} == INTERRUPTED
+    assert ep.result.interrupted is True
+    # The injected call wasn't seen, but the agent was cut short: whether it would have made it is unknown.
+    verdict = midojo.grade(episode, snapshot)
+    assert verdict.grade.security is None and verdict.grade.grade_validity.security.status == "invalid"
+
+
+async def run_host_mode_episode(plane, runtime, agent):
+    """Run one host-mode episode whose agent is ``agent(ep)``: return the context, whatever the agent did."""
+    episode = weather_episode()
+    ep = open_episode(
+        episode, runtime=runtime, interception=HostInterception(upstream=scripted_upstream()), control=plane
+    )
+    async with ep:
+        await ep.turn("What's the weather in Boston?", lambda message: agent(ep))
+    return ep
+
+
+@pytest.mark.asyncio
+async def test_an_exception_releases_the_runtime_and_interceptor_and_seals_the_evaluation_incomplete():
+    plane, runtime = ControlPlane({}, config=AppConfig(closure_wait_seconds=0)), RecordingRuntime()
+    contexts = []
+
+    async def failing_agent(ep) -> str:
+        contexts.append(ep)
+        assert ep.binding.tool_endpoint is not None
+        await call_tools(ep.binding.tool_endpoint, ("get_weather", {"city": "Boston"}))
+        raise RuntimeError("the agent crashed")
+
+    with pytest.raises(RuntimeError, match="the agent crashed"):
+        await run_host_mode_episode(plane, runtime, failing_agent)
+    [ep] = contexts
+    assert runtime.steps == ["setup", "observe", "teardown"]
+    assert await refused(ep.binding.tool_endpoint)
+    assert_sealed_as_interrupted(plane, ep, ep.episode)
+    assert [call.function for call in ep.sealed.function_calls] == ["get_weather"]
+    [turn] = ep.sealed.turns
+    assert turn.reply is None and ep.sealed.agent_output == ""
+
+
+@pytest.mark.asyncio
+async def test_a_cancellation_releases_the_runtime_and_interceptor_and_seals_the_evaluation_incomplete():
+    plane, runtime = ControlPlane({}, config=AppConfig(closure_wait_seconds=0)), RecordingRuntime()
+    contexts, called = [], asyncio.Event()
+
+    async def hanging_agent(ep) -> str:
+        contexts.append(ep)
+        assert ep.binding.tool_endpoint is not None
+        await call_tools(ep.binding.tool_endpoint, ("get_weather", {"city": "Boston"}))
+        called.set()
+        await asyncio.Event().wait()
+        raise AssertionError("never answers")
+
+    task = asyncio.create_task(run_host_mode_episode(plane, runtime, hanging_agent))
+    await asyncio.wait_for(called.wait(), timeout=10)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    [ep] = contexts
+    assert runtime.steps == ["setup", "observe", "teardown"]
+    assert await refused(ep.binding.tool_endpoint)
+    assert_sealed_as_interrupted(plane, ep, ep.episode)
+
+
+class FailingSetupRuntime(RecordingRuntime):
+    def setup(self, injections, **kwargs):
+        super().setup(injections, **kwargs)
+        raise RuntimeError("seed failed")
+
+
+@pytest.mark.asyncio
+async def test_a_failed_setup_is_torn_down_and_its_evaluation_sealed_incomplete():
+    plane, runtime = ControlPlane({}, config=AppConfig(closure_wait_seconds=0)), FailingSetupRuntime()
+    ep = open_episode(
+        weather_episode(), runtime=runtime, interception=HostInterception(upstream=scripted_upstream()), control=plane
+    )
+    with pytest.raises(RuntimeError, match="seed failed"):
+        async with ep:
+            raise AssertionError("never entered")
+    # A runtime that wasn't set up isn't observed, but it is torn down.
+    assert runtime.steps == ["setup", "teardown"]
+    assert await refused(runtime.setups[0]["tool_endpoint"])
+    assert_sealed_as_interrupted(plane, ep, ep.episode)
+
+
+@pytest.mark.asyncio
+async def test_a_runtime_whose_run_fails_to_start_is_ended_and_no_evaluation_is_opened(monkeypatch):
+    class FailingStart(RecordingRuntime):
+        def start_run(self, run_id, *, suite_name):
+            super().start_run(run_id, suite_name=suite_name)
+            raise RuntimeError("no gateway")
+
+    plane, runtime = ControlPlane({}), FailingStart()
+    monkeypatch.setattr(Episode, "new_runtime", lambda self: runtime)
+    with pytest.raises(RuntimeError, match="no gateway"):
+        async with open_episode(weather_episode(), control=plane):
+            raise AssertionError("never entered")
+    assert runtime.steps == ["start_run", "end_run"]
+    assert plane.store.list_evaluations(None) == []
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_setup_finishes_before_the_runtime_is_torn_down():
+    started, release = threading.Event(), threading.Event()
+
+    class SlowSetup(RecordingRuntime):
+        def setup(self, injections, **kwargs):
+            self.steps.append("setup started")
+            started.set()
+            release.wait(10)
+            self.steps.append("setup finished")
+
+    runtime = SlowSetup()
+
+    async def run() -> None:
+        async with open_episode(weather_episode(), runtime=runtime):
+            raise AssertionError("never entered")
+
+    task = asyncio.create_task(run())
+    await asyncio.to_thread(started.wait, 10)
+    task.cancel()
+    await asyncio.sleep(0.05)
+    assert runtime.steps == ["setup started"]  # the cancellation waits for the step in its thread
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert runtime.steps == ["setup started", "setup finished", "teardown"]

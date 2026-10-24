@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Protocol
 
 import httpx
@@ -59,7 +60,11 @@ class ControlClient(Protocol):
 
     async def close_evaluation(self, run_id: str | None, eval_id: str) -> CloseResponse: ...
 
-    async def complete_evaluation(self, run_id: str | None, eval_id: str, agent_output: str) -> None: ...
+    async def complete_evaluation(
+        self, run_id: str | None, eval_id: str, agent_output: str, incomplete: Sequence[str] = ()
+    ) -> None:
+        """Seal the evaluation with ``agent_output``; ``incomplete`` names evidence the host didn't collect in full."""
+        ...
 
     async def grade_evaluation(self, run_id: str | None, eval_id: str) -> GradeResponse: ...
 
@@ -155,24 +160,23 @@ class ControlPlaneClient:
 
     async def close_evaluation(self, run_id: str | None, eval_id: str) -> CloseResponse:
         """Stop admitting new calls, and wait (up to the control plane's closure wait) for admitted ones to finish."""
-        response = await self._http.post(
-            f"{self._evaluation_url(run_id, eval_id)}/close", headers=self._headers
-        )
+        response = await self._http.post(f"{self._evaluation_url(run_id, eval_id)}/close", headers=self._headers)
         response.raise_for_status()
         return CloseResponse.model_validate(response.json())
 
-    async def complete_evaluation(self, run_id: str | None, eval_id: str, agent_output: str) -> None:
+    async def complete_evaluation(
+        self, run_id: str | None, eval_id: str, agent_output: str, incomplete: Sequence[str] = ()
+    ) -> None:
+        body: dict[str, Any] = {"agent_output": agent_output}
+        if incomplete:
+            body["incomplete"] = list(incomplete)
         response = await self._http.post(
-            f"{self._evaluation_url(run_id, eval_id)}/complete",
-            headers=self._headers,
-            json={"agent_output": agent_output},
+            f"{self._evaluation_url(run_id, eval_id)}/complete", headers=self._headers, json=body
         )
         response.raise_for_status()
 
     async def grade_evaluation(self, run_id: str | None, eval_id: str) -> GradeResponse:
-        response = await self._http.post(
-            f"{self._evaluation_url(run_id, eval_id)}/grade", headers=self._headers
-        )
+        response = await self._http.post(f"{self._evaluation_url(run_id, eval_id)}/grade", headers=self._headers)
         response.raise_for_status()
         return GradeResponse.model_validate(response.json())
 
@@ -204,9 +208,7 @@ class ControlPlaneClient:
         )
 
     async def revoke_session(self, run_id: str | None, eval_id: str) -> None:
-        response = await self._http.delete(
-            f"{self._evaluation_url(run_id, eval_id)}/session", headers=self._headers
-        )
+        response = await self._http.delete(f"{self._evaluation_url(run_id, eval_id)}/session", headers=self._headers)
         response.raise_for_status()
 
 

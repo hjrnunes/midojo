@@ -181,7 +181,7 @@ async def complete_evaluation(
     Completing again with the same output is a no-op; another output is a 409,
     recorded as a late fact.
     """
-    await control.complete(run.id, eval_id, req.agent_output)
+    await control.complete(run.id, eval_id, req.agent_output, req.incomplete)
     return {"status": "completed"}
 
 

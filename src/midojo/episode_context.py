@@ -34,13 +34,14 @@ from collections.abc import Awaitable, Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 from midojo_sdk.injection import Channel, InjectionOutcome
 
 from midojo.control_plane.client import ControlClient
 from midojo.control_plane.state import Snapshot
 from midojo.episode import DEFAULT_EPISODE_NAME, Episode
+from midojo.observations import FUNCTION_CALLS
 from midojo.runtimes import AgentRuntime, ResettableRuntime
 from midojo.tool_endpoint import ToolEndpoint
 from midojo.types import InterceptionMode
@@ -58,6 +59,11 @@ EpisodeStep = Literal["start_run", "reset", "interceptor", "setup", "close", "ob
 # ``not_requested``, or ``unsupported`` (asked, but the runtime declares no reset: the target was not reset, and
 # may hold what earlier episodes left).
 ResetOutcome = Literal["reset", "not_requested", "unsupported"]
+
+# What the seal of an episode cut short by a failure or a cancellation marks incomplete.
+INTERRUPTED_EVIDENCE = (FUNCTION_CALLS, "turns", "agent_output")
+
+T = TypeVar("T")
 
 
 @dataclass(frozen=True)
@@ -95,11 +101,15 @@ class EpisodeResult:
     ``injection_outcomes`` are the host interceptor's outcomes for the plan's
     tool-output placements (empty in in-agent mode). ``reset`` says whether the
     target was reset before the episode (see :data:`ResetOutcome`).
+    ``interrupted`` is True when a failure or a cancellation cut the episode
+    short: it was sealed with what was collected, and the snapshot marks
+    :data:`INTERRUPTED_EVIDENCE` incomplete.
     """
 
     snapshot: Snapshot
     interception: InterceptionMode
     reset: ResetOutcome = "not_requested"
+    interrupted: bool = False
     injection_outcomes: tuple[InjectionOutcome, ...] = ()
 
     @property
@@ -142,7 +152,10 @@ class EpisodeContext:
         self._entered = False
         self._run_started = False
         self._set_up = False
+        self._setup_done = False
         self._torn_down = False
+        # Whether a failure or a cancellation cut the episode short of its seal.
+        self.interrupted = False
         self._evaluation_id: str | None = None
         self._session_token: str | None = None
         self._binding: AgentBinding | None = None
@@ -186,6 +199,7 @@ class EpisodeContext:
             snapshot=self.sealed,
             interception="host" if self.interception is not None else "agent",
             reset=self.reset_outcome,
+            interrupted=self.interrupted,
             injection_outcomes=interceptor.injection_outcomes if interceptor is not None else (),
         )
 
@@ -220,12 +234,12 @@ class EpisodeContext:
                 self._run_started = True
                 run_name = self.run_id or f"episode-{uuid.uuid4().hex[:12]}"
                 suite_name = episode.suite_name or DEFAULT_EPISODE_NAME
-                await asyncio.to_thread(runtime.start_run, run_name, suite_name=suite_name)
+                await _in_thread(runtime.start_run, run_name, suite_name=suite_name)
         if self._reset_requested:
             # Only a declared capability: an external target is never reset behind its owner's back.
             if isinstance(runtime, ResettableRuntime):
                 with self._progress("reset"):
-                    await asyncio.to_thread(runtime.reset)
+                    await _in_thread(runtime.reset)
                 self.reset_outcome = "reset"
             else:
                 self.reset_outcome = "unsupported"
@@ -243,7 +257,7 @@ class EpisodeContext:
             self._binding = AgentBinding(session_token=self._session_token)
         with self._progress("setup"):
             self._set_up = True
-            await asyncio.to_thread(
+            await _in_thread(
                 runtime.setup,
                 dict(episode.injections),
                 **self._binding.access,
@@ -251,6 +265,7 @@ class EpisodeContext:
                 user_task_id=episode.user_task_id,
                 injection_task_id=episode.injection_task_id,
             )
+        self._setup_done = True
 
     async def _open(self) -> None:
         """Open the evaluation: the episode itself in process, or a suite's episode in a run."""
@@ -304,23 +319,37 @@ class EpisodeContext:
         if self._snapshot is not None:
             return self._snapshot
         output = agent_output if agent_output is not None else (self._last_reply or "")
+        await self._collect()
+        await self._seal(output)
+        assert self._snapshot is not None
+        return self._snapshot
+
+    async def _collect(self, *, best_effort: bool = False) -> None:
+        """Staged closure: no new call is admitted, calls already admitted may still finish, and the final
+        observations are collected after that, before the seal. The runtime is torn down whatever happens."""
         control, run_id, eval_id = self.control, self.run_id, self.evaluation_id
-        # Staged closure: no new call is admitted, calls already admitted may still finish, and the final
-        # observations are collected after that, before the seal.
         try:
             with self._progress("close"):
                 await control.close_evaluation(run_id, eval_id)
-            with self._progress("observe"):
-                observations = await asyncio.to_thread(self.runtime.observe)
-            for source, observed in observations.items():
-                await control.record_observations(run_id, eval_id, source, observed)
+            if self._ready:
+                with self._progress("observe"):
+                    observations = await _in_thread(self.runtime.observe)
+                for source, observed in observations.items():
+                    await control.record_observations(run_id, eval_id, source, observed)
+        except Exception:
+            if not best_effort:
+                raise
+            logger.info("Couldn't collect the final evidence of evaluation %s", eval_id, exc_info=True)
         finally:
             await self._teardown()
-        await control.complete_evaluation(run_id, eval_id, output)
+
+    async def _seal(self, agent_output: str, incomplete: tuple[str, ...] = ()) -> None:
+        control, run_id, eval_id = self.control, self.run_id, self.evaluation_id
+        marked = {"incomplete": incomplete} if incomplete else {}
+        await control.complete_evaluation(run_id, eval_id, agent_output, **marked)
         environment_type = self.episode.environment_type
         assert environment_type is not None  # An episode infers one when it isn't given.
         self._snapshot = await control.snapshot(run_id, eval_id, environment_type=environment_type)
-        return self._snapshot
 
     async def __aexit__(
         self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None
@@ -335,20 +364,30 @@ class EpisodeContext:
             raise
         await self._release(None)
 
+    @property
+    def _ready(self) -> bool:
+        """Whether the runtime was set up for the agent, and is still."""
+        return self._setup_done and not self._torn_down
+
     async def _teardown(self) -> None:
         if self._set_up and not self._torn_down:
             self._torn_down = True
             with self._progress("teardown"):
-                await asyncio.to_thread(self.runtime.teardown)
+                await _in_thread(self.runtime.teardown)
 
     async def _release(self, failure: BaseException | None) -> None:
-        """Release what the context acquired, in reverse, each step whatever the one before did."""
+        """Release what the context acquired, in reverse, each step whatever the one before did.
+
+        After a failure or a cancellation, an evaluation that isn't sealed yet
+        is sealed with what was collected, never left open (see
+        :meth:`_seal_interrupted`).
+        """
         try:
             try:
-                await self._teardown()
-            finally:
                 if failure is not None and self._snapshot is None and self._evaluation_id is not None:
-                    await self._abandon()
+                    await self._seal_interrupted()
+            finally:
+                await self._teardown()
         finally:
             try:
                 # Live until the evaluation is sealed: a call the target makes after closure, however late, is
@@ -359,14 +398,45 @@ class EpisodeContext:
                 if self._run_started:
                     self._run_started = False
                     with self._progress("end_run"):
-                        await asyncio.to_thread(self.runtime.end_run)
+                        await _in_thread(self.runtime.end_run)
 
-    async def _abandon(self) -> None:
-        """End a failed episode's session, so nothing more is recorded with it."""
+    async def _seal_interrupted(self) -> None:
+        """Seal an episode a failure or a cancellation cut short, its evidence marked incomplete.
+
+        Closure still lets admitted calls finish, and a runtime that was set up
+        is still observed, each as far as it goes. The seal marks
+        :data:`INTERRUPTED_EVIDENCE` incomplete: the conversation and the
+        agent's output were cut short, and the agent might have gone on to
+        make calls it never made, so no call's absence is evidence. Then the
+        session is revoked, sealed or not: nothing more is recorded with it, not
+        even as a late fact.
+        """
+        self.interrupted = True
+        await self._collect(best_effort=True)
         try:
-            await self.control.revoke_session(self.run_id, self.evaluation_id)
+            await self._seal(self._last_reply or "", INTERRUPTED_EVIDENCE)
         except Exception:
-            logger.info("Couldn't revoke the session of evaluation %s", self._evaluation_id, exc_info=True)
+            logger.info("Couldn't seal evaluation %s after a failure", self._evaluation_id, exc_info=True)
+        finally:
+            try:
+                await self.control.revoke_session(self.run_id, self.evaluation_id)
+            except Exception:
+                logger.info("Couldn't revoke the session of evaluation %s", self._evaluation_id, exc_info=True)
+
+
+async def _in_thread(function: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:
+    """Run a runtime step in a thread.
+
+    A cancellation doesn't stop the thread, so the step is let finish before
+    the cancellation goes on: the runtime is never released while one of its
+    steps is still running.
+    """
+    step = asyncio.ensure_future(asyncio.to_thread(function, *args, **kwargs))
+    try:
+        return await asyncio.shield(step)
+    except asyncio.CancelledError:
+        await asyncio.wait([step])
+        raise
 
 
 def open_episode(
