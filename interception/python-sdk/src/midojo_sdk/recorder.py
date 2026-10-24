@@ -19,6 +19,13 @@ and any one of them can happen without the others (a tool that changed the
 environment and then failed to record its finish, a record that never reached
 the control plane after the real tool ran).
 
+A record that can't be delivered is evidence too. A recorder that implements
+:class:`CaptureReporter` takes a report of each start or finish that never
+reached the control plane, which marks the evaluation's ``function_calls``
+incomplete, so a check that depends on a call's absence can't pass on a lost
+record. :class:`ReportingRecorder` sends that report whenever a record fails
+for good; the SDK's interception layers record through one.
+
 Implementations satisfy these protocols structurally and exchange plain values
 (dicts, ``None``): :class:`midojo_sdk.client.AgentControlPlaneClient` over HTTP,
 or the control plane's in-process client. They raise the same errors: a refusal
@@ -32,9 +39,10 @@ from __future__ import annotations
 
 import asyncio
 import enum
+import logging
 import warnings
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, Protocol, TypeVar, cast
 
 if TYPE_CHECKING:
     from midojo_sdk.client import AgentControlPlaneClient
@@ -58,6 +66,14 @@ RECORD_ATTEMPTS = 3
 
 RECORD_BACKOFF_SECONDS = 0.1
 """The wait before the first resend of a record, doubled before each later one."""
+
+CapturePhase = Literal["start", "finish"]
+"""Which record of a call couldn't be delivered: its start or its finish."""
+
+CAPTURE_REASON_MAX_LENGTH = 2048
+"""The longest capture failure ``reason`` the control plane accepts; a longer one is cut to this length."""
+
+logger = logging.getLogger(__name__)
 
 
 class RejectionKind(enum.StrEnum):
@@ -149,6 +165,26 @@ class Recorder(Protocol):
 
 CallRecorder = Recorder
 """The earlier name of :class:`Recorder`."""
+
+
+class CaptureReporter(Protocol):
+    """Reports a call record that couldn't be delivered, so the evaluation shows its capture is incomplete.
+
+    Optional for a :class:`Recorder`: the HTTP and in-process clients
+    implement it, and :class:`RetryingRecorder` and :class:`ReportingRecorder`
+    pass it on to the recorder they wrap.
+    """
+
+    async def report_capture_failure(self, *, call_id: str, function: str, phase: CapturePhase, reason: str) -> None:
+        """Report that the ``phase`` record of the call ``call_id`` never reached the control plane.
+
+        The control plane keeps one report per ``call_id``, function and
+        phase, and marks the evaluation's ``function_calls`` incomplete. It
+        raises :class:`ControlPlaneRejectedError` when the control plane
+        refuses it: after the seal, with ``late_fact`` True, it's still kept,
+        as a late fact.
+        """
+        ...
 
 
 class EnvironmentRevision(NamedTuple):
@@ -272,8 +308,102 @@ class RetryingRecorder:
             )
         )
 
+    async def report_capture_failure(self, *, call_id: str, function: str, phase: CapturePhase, reason: str) -> None:
+        """Report a lost record through the wrapped recorder, resent like a record.
+
+        Raises ``NotImplementedError`` when the wrapped recorder can't report one.
+        """
+        report = _reporter(self.recorder)
+        await self._retry(lambda: report(call_id=call_id, function=function, phase=phase, reason=reason))
+
     async def _retry(self, send: Callable[[], Awaitable[None]]) -> None:
         await retry(send, retryable=self._retryable, attempts=self._attempts, backoff_seconds=self._backoff_seconds)
+
+
+class ReportingRecorder:
+    """A :class:`Recorder` that reports each start or finish it couldn't deliver, then raises its error.
+
+    A record is lost when sending it raised anything but a refusal the control
+    plane kept as a late fact (which already marks the evidence incomplete):
+    a transport error after every resend of a :class:`RetryingRecorder`, an
+    invalid request, or another refusal, such as a ``call_conflict``. The
+    report goes through the wrapped recorder's
+    :meth:`CaptureReporter.report_capture_failure` once, best effort: when it
+    fails too, or the wrapped recorder can't report, it's logged, and the
+    record's own error is what's raised. Cancellation isn't a lost record:
+    it's raised without a report.
+    """
+
+    def __init__(self, recorder: Recorder) -> None:
+        self.recorder = recorder
+
+    async def start_call(self, *, call_id: str, function: str, args: dict[str, Any], disposition: Disposition) -> None:
+        await self._record(
+            "start",
+            call_id,
+            function,
+            lambda: self.recorder.start_call(call_id=call_id, function=function, args=args, disposition=disposition),
+        )
+
+    async def finish_call(
+        self,
+        *,
+        call_id: str,
+        function: str,
+        args: dict[str, Any],
+        result: str,
+        disposition: Disposition,
+        error: str | None = None,
+    ) -> None:
+        await self._record(
+            "finish",
+            call_id,
+            function,
+            lambda: self.recorder.finish_call(
+                call_id=call_id, function=function, args=args, result=result, disposition=disposition, error=error
+            ),
+        )
+
+    async def report_capture_failure(self, *, call_id: str, function: str, phase: CapturePhase, reason: str) -> None:
+        await _reporter(self.recorder)(call_id=call_id, function=function, phase=phase, reason=reason)
+
+    async def _record(
+        self, phase: CapturePhase, call_id: str, function: str, send: Callable[[], Awaitable[None]]
+    ) -> None:
+        try:
+            await send()
+        except ControlPlaneRejectedError as e:
+            if not e.late_fact:
+                await self._report(phase, call_id, function, e)
+            raise
+        except Exception as e:
+            await self._report(phase, call_id, function, e)
+            raise
+
+    async def _report(self, phase: CapturePhase, call_id: str, function: str, error: Exception) -> None:
+        reason = f"{type(error).__name__}: {error}"[:CAPTURE_REASON_MAX_LENGTH]
+        try:
+            await self.report_capture_failure(call_id=call_id, function=function, phase=phase, reason=reason)
+        except ControlPlaneRejectedError as refused:
+            if not refused.late_fact:
+                logger.warning(
+                    "The control plane refused the capture failure of %s (%s): %s", function, call_id, refused
+                )
+        except Exception:
+            logger.warning("The capture failure of %s (%s) wasn't delivered", function, call_id, exc_info=True)
+
+
+def reporting(recorder: Recorder) -> ReportingRecorder:
+    """``recorder`` as a :class:`ReportingRecorder`: itself when it already is one."""
+    return recorder if isinstance(recorder, ReportingRecorder) else ReportingRecorder(recorder)
+
+
+def _reporter(recorder: object) -> Callable[..., Awaitable[None]]:
+    """``recorder``'s :meth:`CaptureReporter.report_capture_failure`, or ``NotImplementedError`` without one."""
+    report = getattr(recorder, "report_capture_failure", None)
+    if not callable(report):
+        raise NotImplementedError(f"{type(recorder).__name__} can't report a capture failure")
+    return cast("Callable[..., Awaitable[None]]", report)
 
 
 class ControlPlaneRecorder:
@@ -311,3 +441,6 @@ class ControlPlaneRecorder:
         await self._recorder.finish_call(
             call_id=call_id, function=function, args=args, result=result, disposition=disposition, error=error
         )
+
+    async def report_capture_failure(self, *, call_id: str, function: str, phase: CapturePhase, reason: str) -> None:
+        await self._recorder.report_capture_failure(call_id=call_id, function=function, phase=phase, reason=reason)

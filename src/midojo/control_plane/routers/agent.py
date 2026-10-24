@@ -13,13 +13,21 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from ..dependencies import (
     CHANGE_ENVIRONMENT_RESPONSES,
     RECORD_FUNCTION_CALL_RESPONSES,
+    REPORT_CAPTURE_FAILURE_RESPONSES,
     START_FUNCTION_CALL_RESPONSES,
     created_or_replayed,
     get_control,
     get_session_token,
     validate_environment,
 )
-from ..models import ChangeEnvironmentRequest, CreateFunctionCallRecord, CreateFunctionCallStart, FunctionCallResponse
+from ..models import (
+    CaptureFailureResponse,
+    ChangeEnvironmentRequest,
+    CreateFunctionCallRecord,
+    CreateFunctionCallStart,
+    FunctionCallResponse,
+    ReportCaptureFailureRequest,
+)
 from ..service import BySession, ControlPlane
 
 router = APIRouter(prefix="/agent")
@@ -116,6 +124,34 @@ async def start_agent_function_call(
     """
     record = created_or_replayed(control.start_call(BySession(session_token), req), response)
     return FunctionCallResponse.model_validate(record)
+
+
+@router.post(
+    "/capture-failures",
+    response_model=CaptureFailureResponse,
+    status_code=201,
+    responses=REPORT_CAPTURE_FAILURE_RESPONSES,
+)
+async def report_capture_failure(
+    req: ReportCaptureFailureRequest,
+    response: Response,
+    session_token: Annotated[str, Depends(get_session_token)],
+    control: Annotated[ControlPlane, Depends(get_control)],
+) -> CaptureFailureResponse:
+    """Report a call record the interception layer couldn't deliver, after its resends.
+
+    The evaluation's ``function_calls`` evidence becomes incomplete, so a check
+    that depends on a call's absence grades unknown; no record is added or
+    changed. 201 when kept; 200 with the stored report when the same
+    ``call_id``, function and phase were already reported; 401 after the seal
+    (recorded as a late fact, which marks ``function_calls`` incomplete too).
+    """
+    failure, created = control.report_capture_failure(
+        BySession(session_token), call_id=req.call_id, function=req.function, phase=req.phase, reason=req.reason
+    )
+    if not created:
+        response.status_code = 200
+    return CaptureFailureResponse.model_validate(failure)
 
 
 @router.get("/function-calls", response_model=list[FunctionCallResponse])

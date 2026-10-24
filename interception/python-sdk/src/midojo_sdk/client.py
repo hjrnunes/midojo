@@ -9,9 +9,11 @@ from typing import Any
 import httpx
 
 from midojo_sdk.recorder import (
+    CAPTURE_REASON_MAX_LENGTH,
     RECORD_ATTEMPTS,
     RECORD_BACKOFF_SECONDS,
     REFUSED,
+    CapturePhase,
     ControlPlaneRejectedError,
     Disposition,
     EnvironmentRevision,
@@ -92,7 +94,8 @@ def transient(error: Exception) -> bool:
 class AgentControlPlaneClient:
     """Access interception endpoints for one evaluation session.
 
-    The HTTP :class:`~midojo_sdk.recorder.Recorder` and
+    The HTTP :class:`~midojo_sdk.recorder.Recorder` (and
+    :class:`~midojo_sdk.recorder.CaptureReporter`) and
     :class:`~midojo_sdk.recorder.WorldState`, bound to the session token's
     evaluation. Their methods send each request once. A response that carries
     one of the control plane's rejection kinds raises
@@ -172,6 +175,17 @@ class AgentControlPlaneClient:
         """
         body = _finish_body(call_id, function, args, result, error, disposition in REFUSED, disposition)
         await self._post("/agent/function-calls", body)
+
+    # --- CaptureReporter ---
+
+    async def report_capture_failure(self, *, call_id: str, function: str, phase: CapturePhase, reason: str) -> None:
+        """Send a report of a record that never reached the control plane, once.
+
+        The control plane marks the evaluation's ``function_calls``
+        incomplete. ``reason`` is cut to ``CAPTURE_REASON_MAX_LENGTH``.
+        """
+        body = {"call_id": call_id, "function": function, "phase": phase, "reason": reason[:CAPTURE_REASON_MAX_LENGTH]}
+        await self._post("/agent/capture-failures", body)
 
     # --- the /agent API, with resends ---
 
