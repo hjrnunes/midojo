@@ -229,7 +229,7 @@ Suite YAML places payloads with probe placeholders. `YAMLTaskSuite.episode(...)`
 
 ### Keep the evaluation out of the agent's reach
 
-By default the interception layer runs in or beside the agent (a PI extension, LangChain middleware, a fake MCP server the agent reaches) and records calls with the evaluation's session token, so the agent under test can hold that token. With it, the agent could read hidden environment state or rewrite its own record. `midojo-run --interception host` moves interception out of the agent. For each evaluation, `midojo-run` starts an MCP interceptor in its own process. The interceptor mirrors the real MCP server at `--upstream-mcp-url`, applies the evaluation's tool-output injections, and records every call. The agent gets only that interceptor's tool endpoint: a URL and a bearer token valid for that one interceptor. It never gets a session token, the control plane's URL or token, or a run or evaluation ID.
+By default the interception layer runs in or beside the agent (a PI extension, LangChain middleware, a fake MCP server the agent reaches) and records calls with the evaluation's session token, so the agent under test can hold that token. With it, the agent could read hidden environment state or rewrite its own record. `midojo-run --interception host` moves interception out of the agent. For each evaluation, `midojo-run` starts an MCP interceptor inside the `midojo-run` process (an asyncio server task, not a separate process). The interceptor mirrors the real MCP server at `--upstream-mcp-url`, applies the evaluation's tool-output injections, and records every call. The agent gets only that interceptor's tool endpoint: a URL and a bearer token valid for that one interceptor. It never gets a session token, the control plane's URL or token, or a run or evaluation ID. In host mode, MiDojo also withholds `UPSTREAM_MCP_URL` and `MCP_SERVER_URL`, which name the real MCP server, so the agent can't call its tools directly and skip the record.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
@@ -246,7 +246,7 @@ midojo-run --suite minibank --agent-uri ./agent --protocol pi \
   --interception host --upstream-mcp-url http://localhost:9000/mcp
 ```
 
-An OpenShell sandbox can't reach the host's loopback. Bind an address the sandbox can reach and give a fixed port. The sandbox gets `MIDOJO_TOOL_URL` (`http://host.openshell.internal:<port>/mcp`) and `MIDOJO_TOOL_TOKEN`; its agent command connects its MCP client there. MiDojo drops `MIDOJO_SESSION_TOKEN`, `MIDOJO_URL` and `MIDOJO_CONTROL_TOKEN` from the sandbox's environment, even when the suite's `env_vars` set them.
+An OpenShell sandbox can't reach the host's loopback. Bind an address the sandbox can reach and give a fixed port. The sandbox gets `MIDOJO_TOOL_URL` (`http://host.openshell.internal:<port>/mcp`) and `MIDOJO_TOOL_TOKEN`; its agent command connects its MCP client there. MiDojo drops `MIDOJO_SESSION_TOKEN`, `MIDOJO_URL`, `MIDOJO_CONTROL_TOKEN`, `UPSTREAM_MCP_URL` and `MCP_SERVER_URL` from the sandbox's environment, even when the suite's `env_vars` set them. Variables with other names aren't checked, so keep the real server's address out of a suite's `env_vars`. The sandbox gets a random name (`sbx-<hex>`) and only the suite's label, not the `eval-<id>` name and run, evaluation and task labels an agent-mode sandbox has; `midojo-run` logs which sandbox runs each evaluation. `--interceptor-bind` must not be a loopback address, and `--interceptor-advertise-host` must be neither a loopback nor an unspecified address (`0.0.0.0`, `::`).
 
 ```sh
 midojo-run --suite weather --gateway GATEWAY --control-url http://localhost:8090 \
@@ -254,7 +254,7 @@ midojo-run --suite weather --gateway GATEWAY --control-url http://localhost:8090
   --interceptor-bind 0.0.0.0 --interceptor-port 8765
 ```
 
-The suite's network policy must allow the interceptor's host and port for the binaries that make the MCP calls. It needs no rule for the control plane, which the sandbox never reaches in host mode; remove any such rule so the agent can't reach it. `midojo-run` warns when the policy doesn't allow the interceptor:
+The suite's network policy must allow the interceptor's host and port for the binaries that make the MCP calls. It needs no rule for the control plane, which the sandbox never reaches in host mode; remove any such rule so the agent can't reach it. `midojo-run` warns when no policy entry allows the interceptor's host and port. That check doesn't look at an entry's `binaries`, so make sure they include the program that makes the MCP calls:
 
 ```yaml
 policy:
