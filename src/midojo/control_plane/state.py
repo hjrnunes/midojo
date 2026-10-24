@@ -110,8 +110,15 @@ class Snapshot:
     ``evidence_status`` is the observations' own status, with every key a late
     fact recorded before the seal marked ``incomplete``, and ``function_calls``
     marked ``incomplete`` when a capture failure was reported before the seal.
+
+    ``evaluation_id`` and ``run_id`` name the evaluation it seals (``run_id``
+    None outside a run), and ``snapshot_id`` this snapshot: a result graded
+    from it names what it graded, never "the latest evaluation".
     """
 
+    evaluation_id: str
+    run_id: str | None
+    snapshot_id: str
     user_task_id: str | None
     injection_task_id: str | None
     agent_output: str

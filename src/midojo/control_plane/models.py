@@ -371,6 +371,30 @@ class EvaluationResponse(BaseModel):
     )
 
 
+class SnapshotResponse(BaseModel):
+    """A sealed evaluation's snapshot: everything grading reads, and how completely it was collected.
+
+    ``function_calls`` are the full call records, environment history
+    included. The snapshot never changes: a fact that arrives after the seal
+    shows up only in the evaluation's ``evidence_status``.
+    """
+
+    evaluation_id: str
+    run_id: str | None
+    snapshot_id: str = Field(description="Names this snapshot: what a grade of it graded.")
+    user_task_id: str | None
+    injection_task_id: str | None
+    agent_output: str
+    pre_environment: dict[str, Any]
+    environment: dict[str, Any]
+    function_calls: list[dict[str, Any]]
+    turns: list[TurnResponse]
+    observations: dict[str, dict[str, Any]]
+    evidence_status: dict[str, EvidenceStatus] = Field(description=_EVIDENCE_STATUS_DESCRIPTION)
+    sealed_at: str
+    capture_failures: list[CaptureFailureResponse]
+
+
 # --- Suite / task response models ---
 
 

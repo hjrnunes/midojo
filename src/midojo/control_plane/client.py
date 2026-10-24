@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 import httpx
 from pydantic import BaseModel
@@ -13,9 +13,12 @@ from midojo.control_plane.models import (
     CreateRunResponse,
     EvaluationResponse,
     GradeResponse,
+    SnapshotResponse,
     TurnResponse,
 )
-from midojo.types import InterceptionMode
+from midojo.control_plane.state import CaptureFailure, Snapshot, Stage, Turn
+from midojo.observations import observation_type
+from midojo.types import Environment, FunctionCallRecord, InterceptionMode
 
 if TYPE_CHECKING:
     from midojo_sdk.recorder import Recorder
@@ -30,6 +33,11 @@ class ControlClient(Protocol):
     failure raises an ``httpx`` error over HTTP, and the control plane's
     ``RejectedError`` (or a ``LookupError`` or ``ValueError`` for a request
     the routes would refuse as malformed) in process.
+
+    An evaluation is addressed by its run and its ID. ``run_id`` is None only
+    for an evaluation outside any run, which only a control plane in this
+    process can open (``InProcessControlClient.open_episode``); over HTTP that
+    raises ValueError.
     """
 
     async def aclose(self) -> None: ...
@@ -45,21 +53,25 @@ class ControlClient(Protocol):
         interception: InterceptionMode = "agent",
     ) -> CreateEvaluationResponse: ...
 
-    async def start_turn(self, run_id: str, eval_id: str, message: str) -> TurnResponse: ...
+    async def start_turn(self, run_id: str | None, eval_id: str, message: str) -> TurnResponse: ...
 
-    async def record_turn_reply(self, run_id: str, eval_id: str, index: int, reply: str) -> TurnResponse: ...
+    async def record_turn_reply(self, run_id: str | None, eval_id: str, index: int, reply: str) -> TurnResponse: ...
 
-    async def close_evaluation(self, run_id: str, eval_id: str) -> CloseResponse: ...
+    async def close_evaluation(self, run_id: str | None, eval_id: str) -> CloseResponse: ...
 
-    async def complete_evaluation(self, run_id: str, eval_id: str, agent_output: str) -> None: ...
+    async def complete_evaluation(self, run_id: str | None, eval_id: str, agent_output: str) -> None: ...
 
-    async def grade_evaluation(self, run_id: str, eval_id: str) -> GradeResponse: ...
+    async def grade_evaluation(self, run_id: str | None, eval_id: str) -> GradeResponse: ...
 
-    async def evaluation(self, run_id: str, eval_id: str) -> EvaluationResponse: ...
+    async def evaluation(self, run_id: str | None, eval_id: str) -> EvaluationResponse: ...
 
-    async def record_observations(self, run_id: str, eval_id: str, source: str, observed: BaseModel) -> None: ...
+    async def record_observations(self, run_id: str | None, eval_id: str, source: str, observed: BaseModel) -> None: ...
 
-    async def revoke_session(self, run_id: str, eval_id: str) -> None: ...
+    async def revoke_session(self, run_id: str | None, eval_id: str) -> None: ...
+
+    async def snapshot(self, run_id: str | None, eval_id: str, *, environment_type: type[Environment]) -> Snapshot:
+        """The sealed evaluation's snapshot, its environments as ``environment_type`` (the episode's)."""
+        ...
 
     def recorder(self, session_token: str) -> Recorder:
         """A recorder for the evaluation ``session_token`` is bound to, for a host-side interceptor.
@@ -90,6 +102,11 @@ class ControlPlaneClient:
         if self._owns_http:
             await self._http.aclose()
 
+    def _evaluation_url(self, run_id: str | None, eval_id: str) -> str:
+        if run_id is None:
+            raise ValueError("Over HTTP, an evaluation is addressed in its run: run_id is required")
+        return f"{self._base_url}/runs/{run_id}/evaluations/{eval_id}"
+
     async def create_run(self, suite_name: str) -> CreateRunResponse:
         response = await self._http.post(
             f"{self._base_url}/runs", headers=self._headers, json={"suite_name": suite_name}
@@ -118,59 +135,64 @@ class ControlPlaneClient:
         response.raise_for_status()
         return CreateEvaluationResponse.model_validate(response.json())
 
-    async def start_turn(self, run_id: str, eval_id: str, message: str) -> TurnResponse:
+    async def start_turn(self, run_id: str | None, eval_id: str, message: str) -> TurnResponse:
         response = await self._http.post(
-            f"{self._base_url}/runs/{run_id}/evaluations/{eval_id}/turns",
+            f"{self._evaluation_url(run_id, eval_id)}/turns",
             headers=self._headers,
             json={"message": message},
         )
         response.raise_for_status()
         return TurnResponse.model_validate(response.json())
 
-    async def record_turn_reply(self, run_id: str, eval_id: str, index: int, reply: str) -> TurnResponse:
+    async def record_turn_reply(self, run_id: str | None, eval_id: str, index: int, reply: str) -> TurnResponse:
         response = await self._http.post(
-            f"{self._base_url}/runs/{run_id}/evaluations/{eval_id}/turns/{index}/reply",
+            f"{self._evaluation_url(run_id, eval_id)}/turns/{index}/reply",
             headers=self._headers,
             json={"reply": reply},
         )
         response.raise_for_status()
         return TurnResponse.model_validate(response.json())
 
-    async def close_evaluation(self, run_id: str, eval_id: str) -> CloseResponse:
+    async def close_evaluation(self, run_id: str | None, eval_id: str) -> CloseResponse:
         """Stop admitting new calls, and wait (up to the control plane's closure wait) for admitted ones to finish."""
         response = await self._http.post(
-            f"{self._base_url}/runs/{run_id}/evaluations/{eval_id}/close", headers=self._headers
+            f"{self._evaluation_url(run_id, eval_id)}/close", headers=self._headers
         )
         response.raise_for_status()
         return CloseResponse.model_validate(response.json())
 
-    async def complete_evaluation(self, run_id: str, eval_id: str, agent_output: str) -> None:
+    async def complete_evaluation(self, run_id: str | None, eval_id: str, agent_output: str) -> None:
         response = await self._http.post(
-            f"{self._base_url}/runs/{run_id}/evaluations/{eval_id}/complete",
+            f"{self._evaluation_url(run_id, eval_id)}/complete",
             headers=self._headers,
             json={"agent_output": agent_output},
         )
         response.raise_for_status()
 
-    async def grade_evaluation(self, run_id: str, eval_id: str) -> GradeResponse:
+    async def grade_evaluation(self, run_id: str | None, eval_id: str) -> GradeResponse:
         response = await self._http.post(
-            f"{self._base_url}/runs/{run_id}/evaluations/{eval_id}/grade", headers=self._headers
+            f"{self._evaluation_url(run_id, eval_id)}/grade", headers=self._headers
         )
         response.raise_for_status()
         return GradeResponse.model_validate(response.json())
 
-    async def evaluation(self, run_id: str, eval_id: str) -> EvaluationResponse:
-        response = await self._http.get(f"{self._base_url}/runs/{run_id}/evaluations/{eval_id}", headers=self._headers)
+    async def evaluation(self, run_id: str | None, eval_id: str) -> EvaluationResponse:
+        response = await self._http.get(f"{self._evaluation_url(run_id, eval_id)}", headers=self._headers)
         response.raise_for_status()
         return EvaluationResponse.model_validate(response.json())
 
-    async def record_observations(self, run_id: str, eval_id: str, source: str, observed: BaseModel) -> None:
+    async def record_observations(self, run_id: str | None, eval_id: str, source: str, observed: BaseModel) -> None:
         response = await self._http.post(
-            f"{self._base_url}/runs/{run_id}/evaluations/{eval_id}/observations",
+            f"{self._evaluation_url(run_id, eval_id)}/observations",
             headers=self._headers,
             json={"source": source, "data": observed.model_dump(mode="json")},
         )
         response.raise_for_status()
+
+    async def snapshot(self, run_id: str | None, eval_id: str, *, environment_type: type[Environment]) -> Snapshot:
+        response = await self._http.get(f"{self._evaluation_url(run_id, eval_id)}/snapshot", headers=self._headers)
+        response.raise_for_status()
+        return snapshot_from_response(SnapshotResponse.model_validate(response.json()), environment_type)
 
     def recorder(self, session_token: str) -> Recorder:
         """The session's recorder over HTTP, on this client's connection pool, resending after a transient failure."""
@@ -181,8 +203,51 @@ class ControlPlaneClient:
             AgentControlPlaneClient(self._base_url, session_token, http=self._http), retryable=transient
         )
 
-    async def revoke_session(self, run_id: str, eval_id: str) -> None:
+    async def revoke_session(self, run_id: str | None, eval_id: str) -> None:
         response = await self._http.delete(
-            f"{self._base_url}/runs/{run_id}/evaluations/{eval_id}/session", headers=self._headers
+            f"{self._evaluation_url(run_id, eval_id)}/session", headers=self._headers
         )
         response.raise_for_status()
+
+
+def snapshot_from_response(response: SnapshotResponse, environment_type: type[Environment]) -> Snapshot:
+    """The snapshot ``response`` carries, as the control plane holds it: environments as ``environment_type``.
+
+    Observations are validated against the model registered for their source;
+    an unregistered source raises ValueError.
+    """
+
+    def call(data: dict[str, Any]) -> FunctionCallRecord:
+        # The record's environment history is typed as the base Environment: give it the episode's type.
+        history = {
+            key: environment_type.model_validate(data[key])
+            for key in ("pre_environment", "post_environment")
+            if data.get(key) is not None
+        }
+        return FunctionCallRecord.model_validate(data).model_copy(update=history)
+
+    observations: dict[str, BaseModel] = {}
+    for source, data in response.observations.items():
+        model = observation_type(source)
+        if model is None:
+            raise ValueError(f"Unknown observation source: {source!r}")
+        observations[source] = model.model_validate(data)
+    return Snapshot(
+        evaluation_id=response.evaluation_id,
+        run_id=response.run_id,
+        snapshot_id=response.snapshot_id,
+        user_task_id=response.user_task_id,
+        injection_task_id=response.injection_task_id,
+        agent_output=response.agent_output,
+        pre_environment=environment_type.model_validate(response.pre_environment),
+        environment=environment_type.model_validate(response.environment),
+        function_calls=tuple(call(data) for data in response.function_calls),
+        turns=tuple(Turn(**turn.model_dump()) for turn in response.turns),
+        observations=observations,
+        evidence_status=dict(response.evidence_status),
+        sealed_at=response.sealed_at,
+        capture_failures=tuple(
+            CaptureFailure(**{**failure.model_dump(), "stage": Stage(failure.stage)})
+            for failure in response.capture_failures
+        ),
+    )

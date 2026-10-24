@@ -576,7 +576,7 @@ class OpenShellRuntime:
         session_token: str | None = None,
         tool_endpoint: ToolEndpoint | None = None,
         eval_id: str,
-        user_task_id: str,
+        user_task_id: str | None,
         injection_task_id: str | None,
     ) -> None:
         """Create the sandbox in the run's workspace, seed the files, mark a baseline.
@@ -630,7 +630,9 @@ class OpenShellRuntime:
             logging.getLogger(__name__).info("Evaluation %s runs in sandbox %s", eval_id, name)
         else:
             name = f"eval-{eval_id}"
-            labels = {**self._run_labels, "midojo.eval-id": eval_id, "midojo.user-task": user_task_id}
+            labels = {**self._run_labels, "midojo.eval-id": eval_id}
+            if user_task_id is not None:
+                labels["midojo.user-task"] = user_task_id
             if injection_task_id is not None:
                 labels["midojo.injection-task"] = injection_task_id
         self._ref = self._client.create(workspace=self._workspace_name, spec=spec, name=name, labels=labels)

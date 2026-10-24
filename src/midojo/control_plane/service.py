@@ -356,6 +356,13 @@ class ControlPlane:
             await self.close(run_id, eval_id)
         return self.apply(ById(run_id, eval_id), lifecycle.Seal(agent_output, _now()))
 
+    def snapshot(self, run_id: str | None, eval_id: str) -> Snapshot:
+        """The evaluation's sealed snapshot, refused as ``not_sealed`` before the seal. It shares nothing stored."""
+        snapshot = self.evaluation(ById(run_id, eval_id)).snapshot
+        if snapshot is None:
+            raise _reject(Rejection.NOT_SEALED, "Evaluation not completed. Call complete first.")
+        return snapshot
+
     # --- grading ---
 
     def grade(self, run_id: str | None, eval_id: str) -> GradeResponse:

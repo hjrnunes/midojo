@@ -47,13 +47,14 @@ class AgentRuntime(Protocol):
         session_token: str | None = None,
         tool_endpoint: ToolEndpoint | None = None,
         eval_id: str,
-        user_task_id: str,
+        user_task_id: str | None,
         injection_task_id: str | None,
     ) -> None:
         """Prepare the agent for one evaluation, with the active injections in place.
 
         The agent is given ``session_token`` (in-agent interception) or
-        ``tool_endpoint`` (host mode), whichever is set.
+        ``tool_endpoint`` (host mode), whichever is set. ``user_task_id`` is
+        None for an episode no suite compiled.
         """
         ...
 
@@ -90,7 +91,7 @@ class UnmanagedRuntime:
         session_token: str | None = None,
         tool_endpoint: ToolEndpoint | None = None,
         eval_id: str,
-        user_task_id: str,
+        user_task_id: str | None,
         injection_task_id: str | None,
     ) -> None:
         pass
