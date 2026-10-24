@@ -6,6 +6,7 @@ import pytest
 from click.testing import CliRunner
 from fastapi.testclient import TestClient
 
+from midojo.control_plane.service import ById
 from midojo.serve import main
 from midojo.suites import get_suite
 
@@ -101,3 +102,23 @@ def test_serve_refuses_a_negative_closure_wait():
         result = CliRunner().invoke(main, ["--load-suite", "weather", "--closure-wait", "-1"])
     assert result.exit_code != 0
     serve.assert_not_called()
+
+
+@pytest.mark.parametrize(("args", "expected"), [([], False), (["--environment-history"], True)])
+def test_serve_keeps_environment_history_when_asked(args, expected):
+    with patch("midojo.serve.uvicorn.run") as serve:
+        result = CliRunner().invoke(main, ["--load-suite", "weather", *args])
+    assert result.exit_code == 0, result.exception
+    app = serve.call_args.args[0]
+    assert app.state.config.environment_history is expected
+    client = TestClient(app)
+    run_id = client.post("/runs", json={"suite_name": "weather"}).json()["id"]
+    created = client.post(f"/runs/{run_id}/evaluations", json={"user_task_id": "weather_new_york"}).json()
+    response = client.post(
+        "/agent/function-calls",
+        json={"function": "get_weather", "args": {}, "result": "sunny"},
+        headers={"Authorization": f"Bearer {created['session_token']}"},
+    )
+    assert response.status_code == 201
+    [call] = app.state.control.evaluation(ById(run_id, created["id"])).function_calls
+    assert (call.pre_environment is not None, call.post_environment is not None) == (expected, expected)

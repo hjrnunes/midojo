@@ -36,6 +36,12 @@ logger = logging.getLogger(__name__)
     help="Seconds an evaluation's already admitted tool calls may still finish once it starts closing.",
 )
 @click.option(
+    "--environment-history",
+    is_flag=True,
+    default=False,
+    help="Record a snapshot of the environment when each tool call starts and finishes. Off by default.",
+)
+@click.option(
     "--control-token",
     envvar=CONTROL_TOKEN_ENV,
     default=None,
@@ -47,10 +53,14 @@ def main(
     load_suite: tuple[str, ...],
     session_ttl: int,
     closure_wait: float,
+    environment_history: bool,
     control_token: str | None,
 ) -> None:
     config = AppConfig(
-        session_ttl_seconds=session_ttl, closure_wait_seconds=closure_wait, control_token=control_token or None
+        session_ttl_seconds=session_ttl,
+        closure_wait_seconds=closure_wait,
+        environment_history=environment_history,
+        control_token=control_token or None,
     )
     if config.control_token is None:
         logger.warning(

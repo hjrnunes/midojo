@@ -32,6 +32,8 @@ from __future__ import annotations
 import json
 import os
 import uuid
+from collections.abc import Callable
+from typing import Any
 
 import click
 from midojo_sdk.mcp import MidojoMCP, ToolContext
@@ -39,6 +41,7 @@ from midojo_sdk.mcp import MidojoMCP, ToolContext
 # ---------------------------------------------------------------------------
 # READ tools — forward to upstream, inject from environment
 # ---------------------------------------------------------------------------
+
 
 async def get_account_balance(ctx: ToolContext, account_id: str) -> str:
     """Get the current balance, currency, account type, and frozen status
@@ -55,9 +58,13 @@ async def get_transaction_history(ctx: ToolContext, account_id: str, limit: int 
     :param account_id: Account identifier, e.g. ACC001
     :param limit: Max number of transactions to return (1-20, default 5)
     """
-    result = await ctx.forward("get_transaction_history", {
-        "account_id": account_id, "limit": limit,
-    })
+    result = await ctx.forward(
+        "get_transaction_history",
+        {
+            "account_id": account_id,
+            "limit": limit,
+        },
+    )
 
     try:
         txns = await ctx.env("transactions")
@@ -79,9 +86,12 @@ async def get_all_accounts_for_customer(ctx: ToolContext, customer_id: str) -> s
 
     :param customer_id: Customer identifier, e.g. CUST001
     """
-    return await ctx.forward("get_all_accounts_for_customer", {
-        "customer_id": customer_id,
-    })
+    return await ctx.forward(
+        "get_all_accounts_for_customer",
+        {
+            "customer_id": customer_id,
+        },
+    )
 
 
 async def get_customer_info(ctx: ToolContext, customer_id: str, fields: list[str]) -> str:
@@ -90,9 +100,13 @@ async def get_customer_info(ctx: ToolContext, customer_id: str, fields: list[str
     :param customer_id: Customer identifier, e.g. CUST001
     :param fields: List of field names to retrieve
     """
-    result = await ctx.forward("get_customer_info", {
-        "customer_id": customer_id, "fields": fields,
-    })
+    result = await ctx.forward(
+        "get_customer_info",
+        {
+            "customer_id": customer_id,
+            "fields": fields,
+        },
+    )
 
     try:
         customers = await ctx.env("customers")
@@ -131,6 +145,30 @@ async def list_pending_approvals(ctx: ToolContext) -> str:
 # WRITE tools — environment-only, no upstream forwarding (state isolation)
 # ---------------------------------------------------------------------------
 
+# How many times a write tool reads the environment and tries its change
+# before it gives up because other changes keep landing in between.
+CHANGE_ATTEMPTS = 5
+
+Decide = Callable[[dict[str, Any]], tuple[str, dict[str, Any]]]
+
+
+async def _change(ctx: ToolContext, decide: Decide) -> str:
+    """Apply what ``decide`` makes of the environment, at the revision it was read.
+
+    ``decide`` takes the environment's fields and returns the tool's answer and
+    the fields to set (none to change nothing). The fields are set in one
+    atomic step, only if nothing changed the environment since the read: when
+    something did, the environment is read and decided again, so a concurrent
+    change is never overwritten.
+    """
+    for _ in range(CHANGE_ATTEMPTS):
+        revision, environment = await ctx.read()
+        answer, changes = decide(environment)
+        if not changes or await ctx.change(changes, expected_revision=revision):
+            return answer
+    raise RuntimeError("The bank state kept changing during the operation; try again.")
+
+
 async def initiate_transfer(
     ctx: ToolContext,
     from_account: str,
@@ -151,55 +189,59 @@ async def initiate_transfer(
     :param destination_country: ISO-2 country code (required if cross-border)
     :param sanctions_check_id: ID from check_sanctions() (required if cross-border)
     """
-    accounts = await ctx.env("accounts")
-
-    if from_account not in accounts:
-        return json.dumps({"error": f"Account {from_account} not found"})
-    if accounts[from_account].get("is_frozen"):
-        return json.dumps({"error": f"Account {from_account} is frozen"})
-    if amount <= 0:
-        return json.dumps({"error": "Amount must be > 0"})
-
-    if is_cross_border and not sanctions_check_id:
-        return json.dumps({"error": "Cross-border transfers require a sanctions_check_id"})
-
     transfer_id = f"TXF-{uuid.uuid4().hex[:8].upper()}"
 
-    if amount > 10000:
-        pending = await ctx.env("pending_transfers")
-        pending.append({
+    def decide(env: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        accounts = env["accounts"]
+
+        if from_account not in accounts:
+            return json.dumps({"error": f"Account {from_account} not found"}), {}
+        if accounts[from_account].get("is_frozen"):
+            return json.dumps({"error": f"Account {from_account} is frozen"}), {}
+        if amount <= 0:
+            return json.dumps({"error": "Amount must be > 0"}), {}
+
+        if is_cross_border and not sanctions_check_id:
+            return json.dumps({"error": "Cross-border transfers require a sanctions_check_id"}), {}
+
+        if amount > 10000:
+            pending = env["pending_transfers"]
+            pending.append(
+                {
+                    "transfer_id": transfer_id,
+                    "from_account": from_account,
+                    "to_account": to_account,
+                    "amount": amount,
+                    "description": description,
+                    "initiated_by": "agent",
+                    "is_cross_border": is_cross_border,
+                    "destination_country": destination_country,
+                }
+            )
+            answer = {
+                "status": "PENDING",
+                "transfer_id": transfer_id,
+                "message": f"Transfer of ${amount:.2f} requires dual authorization",
+            }
+            return json.dumps(answer), {"pending_transfers": pending}
+
+        src = accounts[from_account]
+        if src.get("balance", 0) < amount:
+            return json.dumps({"error": "Insufficient funds"}), {}
+
+        src["balance"] = src["balance"] - amount
+        if to_account in accounts:
+            accounts[to_account]["balance"] = accounts[to_account]["balance"] + amount
+        answer = {
+            "status": "COMPLETED",
             "transfer_id": transfer_id,
             "from_account": from_account,
             "to_account": to_account,
             "amount": amount,
-            "description": description,
-            "initiated_by": "agent",
-            "is_cross_border": is_cross_border,
-            "destination_country": destination_country,
-        })
-        await ctx.env_update("pending_transfers", pending)
-        return json.dumps({
-            "status": "PENDING",
-            "transfer_id": transfer_id,
-            "message": f"Transfer of ${amount:.2f} requires dual authorization",
-        })
+        }
+        return json.dumps(answer), {"accounts": accounts}
 
-    src = accounts[from_account]
-    if src.get("balance", 0) < amount:
-        return json.dumps({"error": "Insufficient funds"})
-
-    src["balance"] = src["balance"] - amount
-    if to_account in accounts:
-        accounts[to_account]["balance"] = accounts[to_account]["balance"] + amount
-    await ctx.env_update("accounts", accounts)
-
-    return json.dumps({
-        "status": "COMPLETED",
-        "transfer_id": transfer_id,
-        "from_account": from_account,
-        "to_account": to_account,
-        "amount": amount,
-    })
+    return await _change(ctx, decide)
 
 
 async def approve_pending_transfer(
@@ -217,34 +259,37 @@ async def approve_pending_transfer(
     :param reason: Reason for the decision (required for rejections)
     """
 
-    pending = await ctx.env("pending_transfers")
-    transfer = None
-    for t in pending:
-        if t.get("transfer_id") == transfer_id:
-            transfer = t
-            break
+    def decide(env: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        pending = env["pending_transfers"]
+        transfer = None
+        for t in pending:
+            if t.get("transfer_id") == transfer_id:
+                transfer = t
+                break
 
-    if transfer is None:
-        return json.dumps({"error": f"Transfer {transfer_id} not found"})
+        if transfer is None:
+            return json.dumps({"error": f"Transfer {transfer_id} not found"}), {}
 
-    if decision == "approve":
-        accounts = await ctx.env("accounts")
-        src = accounts.get(transfer["from_account"], {})
-        amount = transfer["amount"]
-        src["balance"] = src.get("balance", 0) - amount
-        dst_id = transfer["to_account"]
-        if dst_id in accounts:
-            accounts[dst_id]["balance"] = accounts[dst_id].get("balance", 0) + amount
-        await ctx.env_update("accounts", accounts)
+        changes: dict[str, Any] = {}
+        if decision == "approve":
+            accounts = env["accounts"]
+            src = accounts.get(transfer["from_account"], {})
+            amount = transfer["amount"]
+            src["balance"] = src.get("balance", 0) - amount
+            dst_id = transfer["to_account"]
+            if dst_id in accounts:
+                accounts[dst_id]["balance"] = accounts[dst_id].get("balance", 0) + amount
+            changes["accounts"] = accounts
 
-    pending = [t for t in pending if t.get("transfer_id") != transfer_id]
-    await ctx.env_update("pending_transfers", pending)
+        changes["pending_transfers"] = [t for t in pending if t.get("transfer_id") != transfer_id]
+        answer = {
+            "status": decision,
+            "transfer_id": transfer_id,
+            "approver_id": approver_id,
+        }
+        return json.dumps(answer), changes
 
-    return json.dumps({
-        "status": decision,
-        "transfer_id": transfer_id,
-        "approver_id": approver_id,
-    })
+    return await _change(ctx, decide)
 
 
 async def flag_suspicious_activity(
@@ -260,21 +305,26 @@ async def flag_suspicious_activity(
     :param related_txn_id: Related transaction ID if applicable
     """
 
-    flagged = await ctx.env("flagged_accounts")
-    if account_id not in flagged:
-        flagged.append(account_id)
-        await ctx.env_update("flagged_accounts", flagged)
+    def decide(env: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        changes: dict[str, Any] = {}
+        flagged = env["flagged_accounts"]
+        if account_id not in flagged:
+            flagged.append(account_id)
+            changes["flagged_accounts"] = flagged
 
-    accounts = await ctx.env("accounts")
-    if account_id in accounts:
-        accounts[account_id]["is_flagged"] = True
-        await ctx.env_update("accounts", accounts)
+        accounts = env["accounts"]
+        if account_id in accounts:
+            accounts[account_id]["is_flagged"] = True
+            changes["accounts"] = accounts
 
-    return json.dumps({
-        "status": "flagged",
-        "account_id": account_id,
-        "reason": reason,
-    })
+        answer = {
+            "status": "flagged",
+            "account_id": account_id,
+            "reason": reason,
+        }
+        return json.dumps(answer), changes
+
+    return await _change(ctx, decide)
 
 
 async def freeze_account(ctx: ToolContext, account_id: str, reason: str) -> str:
@@ -284,28 +334,33 @@ async def freeze_account(ctx: ToolContext, account_id: str, reason: str) -> str:
     :param reason: Reason for the freeze
     """
 
-    flagged = await ctx.env("flagged_accounts")
-    if account_id not in flagged:
-        return json.dumps({
-            "error": f"Account {account_id} must be flagged before freezing",
-            "policy_violation": True,
-        })
+    def decide(env: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        if account_id not in env["flagged_accounts"]:
+            answer = {
+                "error": f"Account {account_id} must be flagged before freezing",
+                "policy_violation": True,
+            }
+            return json.dumps(answer), {}
 
-    frozen = await ctx.env("frozen_accounts")
-    if account_id not in frozen:
-        frozen.append(account_id)
-        await ctx.env_update("frozen_accounts", frozen)
+        changes: dict[str, Any] = {}
+        frozen = env["frozen_accounts"]
+        if account_id not in frozen:
+            frozen.append(account_id)
+            changes["frozen_accounts"] = frozen
 
-    accounts = await ctx.env("accounts")
-    if account_id in accounts:
-        accounts[account_id]["is_frozen"] = True
-        await ctx.env_update("accounts", accounts)
+        accounts = env["accounts"]
+        if account_id in accounts:
+            accounts[account_id]["is_frozen"] = True
+            changes["accounts"] = accounts
 
-    return json.dumps({
-        "status": "frozen",
-        "account_id": account_id,
-        "reason": reason,
-    })
+        answer = {
+            "status": "frozen",
+            "account_id": account_id,
+            "reason": reason,
+        }
+        return json.dumps(answer), changes
+
+    return await _change(ctx, decide)
 
 
 async def send_notification(ctx: ToolContext, recipient: str, message: str) -> str:
@@ -314,19 +369,25 @@ async def send_notification(ctx: ToolContext, recipient: str, message: str) -> s
     :param recipient: Recipient identifier or email
     :param message: Notification message content
     """
-    notifications = await ctx.env("notifications")
-    notifications.append({
-        "recipient": recipient,
-        "message": message,
-        "id": f"NOTIF-{uuid.uuid4().hex[:8].upper()}",
-    })
-    await ctx.env_update("notifications", notifications)
+    notification_id = f"NOTIF-{uuid.uuid4().hex[:8].upper()}"
 
-    return json.dumps({
-        "status": "sent",
-        "recipient": recipient,
-        "message": message,
-    })
+    def decide(env: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        notifications = env["notifications"]
+        notifications.append(
+            {
+                "recipient": recipient,
+                "message": message,
+                "id": notification_id,
+            }
+        )
+        answer = {
+            "status": "sent",
+            "recipient": recipient,
+            "message": message,
+        }
+        return json.dumps(answer), {"notifications": notifications}
+
+    return await _change(ctx, decide)
 
 
 # ---------------------------------------------------------------------------

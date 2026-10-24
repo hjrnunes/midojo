@@ -2,13 +2,17 @@
 
 Lets suite authors hook, block and report the tools of a LangChain agent, with
 access to the midojo control plane, the same way ``@midojo/pi-sdk`` does for a
-PI agent.
+PI agent. Calls are recorded through a ``Recorder``, and hooks read and change
+the environment through a ``WorldState`` (by default, both on the midojo
+control plane).
 """
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+import asyncio
+import logging
+import weakref
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
@@ -17,18 +21,70 @@ from langchain_core.messages import ToolMessage
 from langgraph.errors import GraphBubbleUp
 from langgraph.types import Command
 
-from midojo_sdk.client import AgentControlPlaneClient, CallIds
+from midojo_sdk.client import AgentControlPlaneClient, CallIds, transient
 from midojo_sdk.context import ToolContext
+from midojo_sdk.recorder import ControlPlaneRejectedError, Disposition, Recorder, RetryingRecorder, WorldState
 from midojo_sdk.session import session_token
 
 __all__ = ["BLOCKED_REASON", "MidojoMiddleware", "ToolContext"]
+
+logger = logging.getLogger(__name__)
 
 BLOCKED_REASON = "Tool execution was blocked"
 """What the agent is told when it calls a blocked tool, the same as with the PI SDK."""
 
 Hook = Callable[[ToolContext, dict[str, Any], str], Awaitable[str]]
 Handler = Callable[[ToolCallRequest], Awaitable[ToolMessage | Command]]
-_Intercept = Callable[[AgentControlPlaneClient, ToolCallRequest, Handler, str], Awaitable[ToolMessage | Command]]
+_Intercept = Callable[["_Call", Handler], Awaitable[ToolMessage | Command]]
+
+
+class _Call:
+    """One intercepted tool call: its request, ``call_id`` and disposition, and the seams it's recorded through."""
+
+    def __init__(
+        self,
+        request: ToolCallRequest,
+        call_id: str,
+        disposition: Disposition,
+        recorder: Recorder,
+        world: WorldState | None,
+    ) -> None:
+        self.request = request
+        self.call_id = call_id
+        self.disposition: Disposition = disposition
+        self.recorder = recorder
+        self.world = world
+
+    @property
+    def function(self) -> str:
+        return self.request.tool_call["name"]
+
+    @property
+    def args(self) -> dict[str, Any]:
+        return self.request.tool_call["args"]
+
+    async def start(self) -> None:
+        await self.recorder.start_call(
+            call_id=self.call_id, function=self.function, args=self.args, disposition=self.disposition
+        )
+
+    async def finish(self, result: str, error: str | None = None) -> None:
+        await self.recorder.finish_call(
+            call_id=self.call_id,
+            function=self.function,
+            args=self.args,
+            result=result,
+            error=error,
+            disposition=self.disposition,
+        )
+
+
+class _Connection:
+    """The HTTP client of one event loop, and the seams of each session it has served."""
+
+    def __init__(self, http: httpx.AsyncClient) -> None:
+        self.http = http
+        self.sessions: dict[str, tuple[Recorder, AgentControlPlaneClient]] = {}
 
 
 class MidojoMiddleware(AgentMiddleware):
@@ -51,12 +107,25 @@ class MidojoMiddleware(AgentMiddleware):
     descriptions and arguments as without midojo. Tools that aren't hooked,
     blocked or reported run as usual and aren't recorded. For a LangGraph
     ``ToolNode``, pass ``awrap_tool_call=midojo.awrap_tool_call`` instead.
+    Hooked and reported tools run the real tool, so their calls are recorded
+    as ``forwarded``; a blocked tool's are ``blocked``.
+
+    ``recorder`` records every intercepted call, and ``world`` is the
+    environment hooks get through their ``ToolContext``: seams bound to one
+    evaluation by whoever built them, such as the control plane's in-process
+    client. Without ``recorder``, calls are recorded on the control plane at
+    ``control_plane_url``, for the evaluation session of the agent run
+    (``session_context()`` or ``MIDOJO_SESSION_TOKEN``), resending after a
+    transient failure (see ``RetryingRecorder``); without ``world``, hooks get
+    that session's environment on the same control plane, or none when there's
+    no ``control_plane_url``. The HTTP client is ``http``, or one the
+    middleware opens for each event loop it runs on, keeping no idle
+    connection (so one middleware works across event loops, such as one
+    ``asyncio.run`` per evaluation), and closes in :meth:`aclose`. Each
+    session's recorder is built once and reused.
 
     Interception is asynchronous, so run the agent with ``ainvoke`` or
-    ``astream``. Each intercepted call opens its own connection to the control
-    plane, so one middleware works across event loops, such as one
-    ``asyncio.run`` per evaluation. Pass ``http`` to use one client for every
-    call instead.
+    ``astream``.
 
     The SDK attempts to record each intercepted call, with a ``call_id`` made
     from the tool call's ID (see ``midojo_sdk.client.CallIds``). For a hooked
@@ -65,14 +134,32 @@ class MidojoMiddleware(AgentMiddleware):
     finish never reaches the control plane the call stays there as unfinished.
     A blocked call never runs, so it's recorded once. Resends after a lost
     response create at most one record per ``call_id``; a record that never
-    reaches the control plane is still missing.
+    reaches the control plane is still missing, and the agent run stops with
+    the last error.
+
+    A refusal by the control plane (a ``ControlPlaneRejectedError``, such as
+    an evaluation that's closing) is never resent and doesn't stop the agent
+    run: the agent gets the refusal as an error result instead of the tool's.
+    A refused start means the tool never runs.
     """
 
-    def __init__(self, *, control_plane_url: str, http: httpx.AsyncClient | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        control_plane_url: str | None = None,
+        http: httpx.AsyncClient | None = None,
+        recorder: Recorder | None = None,
+        world: WorldState | None = None,
+    ) -> None:
         super().__init__()
+        if control_plane_url is None and recorder is None:
+            raise ValueError("MidojoMiddleware needs a control_plane_url or a recorder.")
         self._control_plane_url = control_plane_url
-        self._http = http
-        self._intercepts: dict[str, _Intercept] = {}
+        self._recorder = recorder
+        self._world = world
+        self._shared: _Connection | None = _Connection(http) if http is not None else None
+        self._per_loop: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, _Connection] = weakref.WeakKeyDictionary()
+        self._intercepts: dict[str, tuple[_Intercept, Disposition]] = {}
         self._call_ids = CallIds("langchain")
 
     def hook(self, tool_name: str) -> Callable[[Hook], Hook]:
@@ -92,28 +179,20 @@ class MidojoMiddleware(AgentMiddleware):
         """
 
         def decorator(fn: Hook) -> Hook:
-            async def intercept(
-                agent: AgentControlPlaneClient, request: ToolCallRequest, handler: Handler, call_id: str
-            ) -> ToolMessage | Command:
-                args = request.tool_call["args"]
-                output = await _run(agent, request, handler, call_id)
+            async def intercept(call: _Call, handler: Handler) -> ToolMessage | Command:
+                output = await _run(call, handler)
                 if not isinstance(output, ToolMessage):
-                    await agent.record_function_call(function=tool_name, args=args, result=str(output), call_id=call_id)
+                    await call.finish(str(output))
                     raise TypeError(f"Cannot hook {tool_name}: it returned a {type(output).__name__}, not a message.")
                 try:
-                    result = await fn(ToolContext(agent), args, output.text)
+                    result = await fn(ToolContext(call.world), call.args, output.text)
                 except Exception as e:
-                    await agent.record_function_call(
-                        function=tool_name, args=args, result=str(e), error=str(e), call_id=call_id
-                    )
-                    return _error(request, str(e))
-                error = output.text if output.status == "error" else None
-                await agent.record_function_call(
-                    function=tool_name, args=args, result=result, error=error, call_id=call_id
-                )
+                    await call.finish(str(e), str(e))
+                    return _error(call.request, str(e))
+                await call.finish(result, output.text if output.status == "error" else None)
                 return output.model_copy(update={"content": result})
 
-            self._add(tool_name, intercept)
+            self._add(tool_name, intercept, "forwarded")
             return fn
 
         return decorator
@@ -127,20 +206,12 @@ class MidojoMiddleware(AgentMiddleware):
         email, while still recording that the agent attempted it.
         """
 
-        async def intercept(
-            agent: AgentControlPlaneClient, request: ToolCallRequest, handler: Handler, call_id: str
-        ) -> ToolMessage:
-            await agent.record_function_call(
-                function=request.tool_call["name"],
-                args=request.tool_call["args"],
-                result=BLOCKED_REASON,
-                blocked=True,
-                call_id=call_id,
-            )
-            return _error(request, BLOCKED_REASON)
+        async def intercept(call: _Call, handler: Handler) -> ToolMessage:
+            await call.finish(BLOCKED_REASON)
+            return _error(call.request, BLOCKED_REASON)
 
         for tool_name in tool_names:
-            self._add(tool_name, intercept)
+            self._add(tool_name, intercept, "blocked")
 
     def report(self, *tool_names: str) -> None:
         """Record every call to the tools named ``tool_names`` without changing what the agent sees.
@@ -151,64 +222,84 @@ class MidojoMiddleware(AgentMiddleware):
         perturbing the agent.
         """
 
-        async def intercept(
-            agent: AgentControlPlaneClient, request: ToolCallRequest, handler: Handler, call_id: str
-        ) -> ToolMessage | Command:
-            output = await _run(agent, request, handler, call_id)
+        async def intercept(call: _Call, handler: Handler) -> ToolMessage | Command:
+            output = await _run(call, handler)
             result = output.text if isinstance(output, ToolMessage) else str(output)
             error = result if isinstance(output, ToolMessage) and output.status == "error" else None
-            await agent.record_function_call(
-                function=request.tool_call["name"],
-                args=request.tool_call["args"],
-                result=result,
-                error=error,
-                call_id=call_id,
-            )
+            await call.finish(result, error)
             return output
 
         for tool_name in tool_names:
-            self._add(tool_name, intercept)
+            self._add(tool_name, intercept, "forwarded")
 
     async def awrap_tool_call(self, request: ToolCallRequest, handler: Handler) -> ToolMessage | Command:
-        intercept = self._intercepts.get(request.tool_call["name"])
-        if intercept is None:
+        intercepted = self._intercepts.get(request.tool_call["name"])
+        if intercepted is None:
             return await handler(request)
-        async with self._agent() as agent:
-            return await intercept(agent, request, handler, self._call_ids.for_call(request.tool_call.get("id")))
+        intercept, disposition = intercepted
+        recorder, world = self._bindings()
+        call = _Call(request, self._call_ids.for_call(request.tool_call.get("id")), disposition, recorder, world)
+        try:
+            return await intercept(call, handler)
+        except ControlPlaneRejectedError as e:
+            logger.warning("The control plane refused the record of %s (%s): %s", call.function, call.call_id, e)
+            return _error(request, str(e))
 
-    def _add(self, tool_name: str, intercept: _Intercept) -> None:
+    async def aclose(self) -> None:
+        """Close the HTTP client the middleware opened for the running event loop. A given ``http`` stays open."""
+        connection = self._per_loop.pop(asyncio.get_running_loop(), None)
+        if connection is not None:
+            await connection.http.aclose()
+
+    def _add(self, tool_name: str, intercept: _Intercept, disposition: Disposition) -> None:
         if tool_name in self._intercepts:
             raise ValueError(f"{tool_name} is already intercepted.")
-        self._intercepts[tool_name] = intercept
+        self._intercepts[tool_name] = (intercept, disposition)
 
-    @asynccontextmanager
-    async def _agent(self) -> AsyncIterator[AgentControlPlaneClient]:
-        """The control plane client for the current session, open for one intercepted call."""
+    def _bindings(self) -> tuple[Recorder, WorldState | None]:
+        """The recorder and the environment of the call being intercepted."""
+        if self._recorder is not None and (self._world is not None or self._control_plane_url is None):
+            return self._recorder, self._world
+        recorder, client = self._session()
+        return self._recorder or recorder, self._world or client
+
+    def _session(self) -> tuple[Recorder, AgentControlPlaneClient]:
+        """The resending recorder and the client of the current session, on the control plane, built once."""
+        assert self._control_plane_url is not None
         token = session_token()
-        if self._http is not None:
-            yield AgentControlPlaneClient(self._control_plane_url, token, http=self._http)
-            return
-        async with httpx.AsyncClient(timeout=300.0) as http:
-            yield AgentControlPlaneClient(self._control_plane_url, token, http=http)
+        connection = self._connection()
+        if token not in connection.sessions:
+            client = AgentControlPlaneClient(self._control_plane_url, token, http=connection.http)
+            connection.sessions[token] = (RetryingRecorder(client, retryable=transient), client)
+        return connection.sessions[token]
+
+    def _connection(self) -> _Connection:
+        if self._shared is not None:
+            return self._shared
+        loop = asyncio.get_running_loop()
+        if loop not in self._per_loop:
+            # No idle connection is kept: one would outlive its event loop, such as an asyncio.run per evaluation.
+            http = httpx.AsyncClient(timeout=300.0, limits=httpx.Limits(max_keepalive_connections=0))
+            self._per_loop[loop] = _Connection(http)
+        return self._per_loop[loop]
 
 
-async def _run(
-    agent: AgentControlPlaneClient, request: ToolCallRequest, handler: Handler, call_id: str
-) -> ToolMessage | Command:
-    """Run the real tool after recording the call's start, and finish the call if the tool raises."""
-    await agent.start_function_call(function=request.tool_call["name"], args=request.tool_call["args"], call_id=call_id)
+async def _run(call: _Call, handler: Handler) -> ToolMessage | Command:
+    """Run the real tool after recording the call's start, and finish the call if the tool raises.
+
+    When the tool raises, its error is what propagates, even if the control
+    plane refuses the finish.
+    """
+    await call.start()
     try:
-        return await handler(request)
+        return await handler(call.request)
     except GraphBubbleUp:
         raise
     except Exception as e:
-        await agent.record_function_call(
-            function=request.tool_call["name"],
-            args=request.tool_call["args"],
-            result=str(e),
-            error=str(e),
-            call_id=call_id,
-        )
+        try:
+            await call.finish(str(e), str(e))
+        except ControlPlaneRejectedError as refused:
+            logger.warning("The control plane refused the record of %s (%s): %s", call.function, call.call_id, refused)
         raise
 
 

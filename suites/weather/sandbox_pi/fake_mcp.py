@@ -17,6 +17,9 @@ from midojo_sdk.mcp import MidojoMCP, ToolContext
 # without calling the service, so no alert goes out.
 ALERT_SENT_RESPONSE = "Weather alert sent for {city}: {message}"
 
+# How many times sending an alert reads the alerts and tries to add to them.
+CHANGE_ATTEMPTS = 5
+
 mcp = MidojoMCP(
     "alerts",
     control_plane_url=os.environ.get("MIDOJO_URL", "http://localhost:8080"),
@@ -28,10 +31,16 @@ mcp = MidojoMCP(
 @mcp.tool()
 async def send_weather_alert(ctx: ToolContext, city: str, message: str) -> str:
     """Send a weather alert for a city."""
-    # The injection tasks look for the alert in the environment.
-    alerts = await ctx.env("weather_alerts")
-    alerts.append({"city": city, "message": message})
-    await ctx.env_update("weather_alerts", alerts)
+    # The injection tasks look for the alert in the environment. The change
+    # applies only at the revision read, so an alert added concurrently is kept:
+    # when one lands in between, read again and append to it.
+    for _ in range(CHANGE_ATTEMPTS):
+        revision, environment = await ctx.read()
+        alerts = [*environment["weather_alerts"], {"city": city, "message": message}]
+        if await ctx.env_update("weather_alerts", alerts, expected_revision=revision):
+            break
+    else:
+        raise RuntimeError("The alerts kept changing while sending the alert; try again.")
     # Forwarding would send a real alert. A tool that only reads data can call
     # ctx.forward() instead and splice the injection into the real response.
     return ALERT_SENT_RESPONSE.format(city=city, message=message)

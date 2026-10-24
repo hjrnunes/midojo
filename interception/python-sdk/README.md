@@ -36,6 +36,7 @@ if __name__ == "__main__":
 
 - `await ctx.env(field)` reads a field of the evaluation's environment, and `await ctx.read()` the whole environment with its revision
 - `await ctx.env_update(field, value)` sets one field in one atomic step, so a concurrent change to another field isn't lost. Pass `expected_revision=` the revision `ctx.read()` returned to apply it only if nothing changed the environment since: it returns `False` otherwise
+- `await ctx.change({field: value, ...}, expected_revision=...)` sets several fields in one atomic step: all of them change, or none. A tool that reads the environment, computes new values and writes them back passes the revision it read, and reads again when it gets `False` (see `suites/minibank/a2a_agent/fake_mcp.py`)
 - `await ctx.forward(tool, args)` calls the tool on the upstream MCP server and returns its text
 
 The SDK attempts to record each call with its arguments and the result the agent saw. The evaluation session comes from the incoming request's `X-Midojo-Session` header, or else from the `MIDOJO_SESSION_TOKEN` environment variable.
@@ -96,9 +97,13 @@ agent = create_agent(model, tools=[get_alerts, read_file, send_email], middlewar
 
 Calls to these tools are recorded on the control plane, and the agent's other tools run as usual. Run the agent with `ainvoke` or `astream`: the middleware is asynchronous. For a [LangGraph](https://docs.langchain.com/oss/python/langgraph/overview) graph with its own `ToolNode`, pass `ToolNode(tools, awrap_tool_call=midojo.awrap_tool_call)`. The evaluation session comes from `MIDOJO_SESSION_TOKEN`, or from `midojo_sdk.session.session_context()` for an agent that serves several evaluations.
 
+Like `MidojoMCP`, the middleware records through a `Recorder` and gives hooks a `WorldState` (see [Recorder and WorldState](#recorder-and-worldstate)). With `control_plane_url`, they're the session's `AgentControlPlaneClient`, built once per session and wrapped in `RetryingRecorder` for resends; the HTTP client is `http`, or one the middleware opens per event loop (closed by `await midojo.aclose()`). Pass `recorder=` and `world=` instead to record somewhere else, such as `MidojoMiddleware(recorder=agent, world=agent)` with the control plane's `InProcessAgentClient`. Hooked and reported calls are recorded as `forwarded`, blocked ones as `blocked`.
+
+When the control plane refuses a record (a `ControlPlaneRejectedError`, for example because the evaluation is closing), the refusal is never resent and the agent run goes on: the agent gets the refusal as an error result instead of the tool's, and a tool whose start was refused never runs. A transport error or a 5xx is resent, and the last one stops the agent run.
+
 ## Records
 
-Each record carries a `call_id`: the LangChain tool call's ID, namespaced as `langchain:<UUID>:<id>`, or a fresh UUID for a fake MCP server tool, a call without an ID, or an ID the middleware has already used. A record that fails with a transport error or a 5xx is resent with the same `call_id`, up to 3 sends in all, so the control plane records it at most once (`RetryingRecorder` for a fake MCP server; the client's `record_function_call` and `start_function_call` for the LangChain middleware). A 4xx, including a 409, is raised without a resend. The [interception README](https://github.com/asago-ai/midojo/blob/main/interception/README.md#record-ids-and-retries) describes the guarantee.
+Each record carries a `call_id`: the LangChain tool call's ID, namespaced as `langchain:<UUID>:<id>`, or a fresh UUID for a fake MCP server tool, a call without an ID, or an ID the middleware has already used. A record that fails with a transport error or a 5xx is resent with the same `call_id`, up to 3 sends in all, so the control plane records it at most once (`RetryingRecorder`, for a fake MCP server and the LangChain middleware alike). A 4xx, including a 409, is raised without a resend. The [interception README](https://github.com/asago-ai/midojo/blob/main/interception/README.md#record-ids-and-retries) describes the guarantee.
 
 A call that runs a tool (a fake MCP server tool, or a hooked or reported LangChain tool) is started on the control plane before the tool runs and finished after, with the same `call_id`. When the start fails, the tool doesn't run; when the finish fails, the call stays recorded as unfinished. A blocked call never runs, so it's recorded once. See [Started and unfinished calls](https://github.com/asago-ai/midojo/blob/main/interception/README.md#started-and-unfinished-calls).
 

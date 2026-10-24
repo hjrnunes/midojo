@@ -71,8 +71,8 @@ test("a registered tool's call is started before it runs and finished after", as
 		const [[startPath, start], [finishPath, finish]] = sent;
 		assert.deepEqual([startPath, finishPath], [START, FINISH]);
 		assert.match(start.call_id, /^pi:[0-9a-f-]{36}:call-1$/);
-		assert.deepEqual(start, { call_id: start.call_id, function: "alert", args: input });
-		assert.deepEqual(finish, { ...start, result: "ok", error: null });
+		assert.deepEqual(start, { call_id: start.call_id, function: "alert", args: input, disposition: "simulated" });
+		assert.deepEqual(finish, { ...start, result: "ok", error: null, blocked: false });
 	});
 });
 
@@ -91,8 +91,9 @@ for (const kind of ["hooks", "reportTools"]) {
 
 			const [[startPath, start], [finishPath, finish]] = sent;
 			assert.deepEqual([startPath, finishPath], [START, FINISH]);
-			assert.deepEqual(start, { call_id: start.call_id, function: "get_weather", args: input });
+			assert.deepEqual(start, { call_id: start.call_id, function: "get_weather", args: input, disposition: "forwarded" });
 			assert.equal(finish.call_id, start.call_id);
+			assert.equal(finish.disposition, "forwarded");
 			assert.deepEqual(finish.args, input);
 			assert.equal(finish.result, "sunny");
 		});

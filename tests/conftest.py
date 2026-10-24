@@ -1,5 +1,6 @@
 import os
 
+import httpx
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
@@ -49,3 +50,17 @@ async def backend(request, app, monkeypatch):
     backend = Backend(request.param, app, monkeypatch)
     yield backend
     await backend.aclose()
+
+
+@pytest.fixture
+def no_http(monkeypatch):
+    """Fail on any request any httpx client sends, synchronous or not."""
+
+    def refuse(self, request, *args, **kwargs):
+        pytest.fail(f"An HTTP request was sent: {request.method} {request.url}")
+
+    async def refuse_async(self, request, *args, **kwargs):
+        refuse(self, request)
+
+    monkeypatch.setattr(httpx.Client, "send", refuse)
+    monkeypatch.setattr(httpx.AsyncClient, "send", refuse_async)
