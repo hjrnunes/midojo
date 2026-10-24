@@ -157,6 +157,19 @@ async def test_a_langchain_hook_still_records_over_http_as_lower_trust_agent_evi
     assert (call["function"], call["result"], call["provenance"]) == ("get_forecast", "Boston: fog", "agent")
 
 
+def test_a_pi_extension_still_records_over_http_as_lower_trust_agent_evidence(client):
+    # The requests the PI SDK's ControlPlaneClient sends: startCall, then finishCall with its blocked flag.
+    url, evaluation = open_evaluation(client)
+    call = {"call_id": "pi-1", "function": "get_weather", "args": {"city": "Boston"}, "disposition": "forwarded"}
+    headers = {"Content-Type": "application/json", **agent_headers(evaluation)}
+    assert client.post("/agent/function-calls/start", json=call, headers=headers).status_code == 201
+    finish = {**call, "result": "Boston: rain", "error": None, "blocked": False}
+    assert client.post("/agent/function-calls", json=finish, headers=headers).status_code == 201
+
+    [recorded] = client.get(url).json()["function_calls"]
+    assert (recorded["complete"], recorded["disposition"], recorded["provenance"]) == (True, "forwarded", "agent")
+
+
 @pytest.mark.parametrize(
     "check",
     [
