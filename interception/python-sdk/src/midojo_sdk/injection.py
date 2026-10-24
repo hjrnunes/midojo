@@ -84,6 +84,20 @@ class InjectionTarget:
             raise ValueError("content_block_index must be a non-negative int")
         object.__setattr__(self, "structured_content_path", _path(self.structured_content_path, "field path"))
         object.__setattr__(self, "template_path", _path(self.template_path, "template path"))
+        content_selector = self.content_block_index is not None or self.content_block_type is not None
+        template_selector = bool(self.template_path) or self.template_key is not None
+        if self.surface is SelectorSurface.CONTENT_BLOCK and (self.structured_content_path or template_selector):
+            raise ValueError("content_block selectors cannot include structured-content or template fields")
+        if self.surface is SelectorSurface.STRUCTURED_CONTENT and (content_selector or template_selector):
+            raise ValueError("structured_content selectors cannot include content-block or template fields")
+        if self.surface is SelectorSurface.DESCRIPTION and (
+            content_selector or self.structured_content_path or template_selector
+        ):
+            raise ValueError(
+                "description selectors cannot include content-block, structured-content, or template fields"
+            )
+        if self.surface is SelectorSurface.TEMPLATE and (content_selector or self.structured_content_path):
+            raise ValueError("template selectors cannot include content-block or structured-content fields")
 
 
 @dataclass(frozen=True)
@@ -149,8 +163,12 @@ class InjectionInstruction:
         elif self.channel is Channel.TOOL_DESCRIPTION:
             if self.target.surface is not SelectorSurface.DESCRIPTION:
                 raise ValueError("tool_description needs a description selector")
-        elif self.target.surface is not SelectorSurface.TEMPLATE or self.target.template_key is None:
-            raise ValueError(f"{self.channel.value} needs a template selector and template_key")
+        elif (
+            self.target.surface is not SelectorSurface.TEMPLATE
+            or self.target.template_key is None
+            or self.target.tool is not None
+        ):
+            raise ValueError(f"{self.channel.value} needs a template selector and template_key, without a tool")
 
 
 @dataclass(frozen=True)

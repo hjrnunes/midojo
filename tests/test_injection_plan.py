@@ -132,6 +132,21 @@ def test_plan_is_frozen_and_generator_output_is_bounded():
             instruction_from_generator(output, permissions)
 
 
+def test_selector_fields_must_belong_to_the_selected_surface():
+    with pytest.raises(ValueError, match="structured_content selectors"):
+        InjectionTarget(
+            surface=SelectorSurface.STRUCTURED_CONTENT,
+            content_block_index=0,
+            structured_content_path=("summary",),
+        )
+    with pytest.raises(ValueError, match="without a tool"):
+        InjectionInstruction(
+            channel=Channel.USER_PROMPT,
+            payload="x",
+            target=InjectionTarget(surface=SelectorSurface.TEMPLATE, template_key="task:probe", tool="search"),
+        )
+
+
 def test_capability_gaps_are_typed_and_listed_before_calls():
     target = InjectionTarget(surface=SelectorSurface.DESCRIPTION)
     plan = InjectionPlan((InjectionInstruction(Channel.TOOL_DESCRIPTION, "x", target),))
