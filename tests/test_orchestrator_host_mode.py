@@ -1,0 +1,208 @@
+"""midojo-run in host mode: one interceptor per evaluation, the agent given only its endpoint, stopped after it.
+
+The upstream is the scripted MCP server in this process and the agent an MCP
+client on loopback. No model and no network beyond loopback.
+"""
+
+from __future__ import annotations
+
+from unittest.mock import AsyncMock
+
+import click
+import httpx
+import pytest
+from click.testing import CliRunner
+from fastmcp import Client
+
+from midojo import orchestrator
+from midojo.agent_client import AgentClient, SimpleHTTPAgentClient
+from midojo.control_plane.config import AppConfig
+from midojo.control_plane.inprocess_control import InProcessControlClient
+from midojo.control_plane.service import ControlPlane
+from midojo.interception_host import HostInterception
+from midojo.orchestrator import run_benchmark
+from midojo.runtimes import UnmanagedRuntime
+from midojo.runtimes.openshell import OpenShellRuntime
+from midojo.tool_endpoint import ToolEndpoint
+from tests.fixtures.scripted_target.upstream import scripted_upstream
+
+
+class ToolCallingAgent(AgentClient):
+    """Calls ``get_weather`` at the tool endpoint it's given, and keeps what it was given."""
+
+    supports_host_interception = True
+
+    def __init__(self, fail: bool = False) -> None:
+        self.given: list[dict] = []
+        self.fail = fail
+
+    async def send_task(self, prompt, *, session_token=None, tool_endpoint=None):
+        self.given.append({"session_token": session_token, "tool_endpoint": tool_endpoint})
+        assert tool_endpoint is not None
+        async with Client(tool_endpoint.url, auth=tool_endpoint.token) as tools:
+            weather = await tools.call_tool("get_weather", {"city": "New York"})
+        if self.fail:
+            raise RuntimeError("Agent failed")
+        return f"New York is {weather.content[0].text}"  # type: ignore[union-attr]
+
+
+class SetupRecordingRuntime(UnmanagedRuntime):
+    """An unmanaged runtime that keeps what each setup was given."""
+
+    def __init__(self) -> None:
+        self.setups: list[dict] = []
+
+    def setup(self, injections, **kwargs) -> None:
+        self.setups.append(kwargs)
+
+
+@pytest.fixture
+def control(suite) -> ControlPlane:
+    return ControlPlane({"weather": suite}, config=AppConfig(closure_wait_seconds=0))
+
+
+async def benchmark(control, suite, agent, runtime, tmp_path, interception, **kwargs):
+    async with InProcessControlClient(control) as in_process:
+        await run_benchmark(
+            control_url="http://control",
+            agent_client=agent,
+            agent_uri="http://agent",
+            protocol=kwargs.pop("protocol", "openai"),
+            suite=suite,
+            suite_name="weather",
+            user_task_ids=["weather_new_york", "warmest_city"],
+            injection_task_ids=[],
+            logdir=tmp_path,
+            control=in_process,
+            runtime=runtime,
+            interception=interception,
+        )
+
+
+async def refused(endpoint: ToolEndpoint) -> bool:
+    """Whether nothing serves the endpoint any more."""
+    try:
+        async with httpx.AsyncClient() as http:
+            await http.post(endpoint.url, headers=endpoint.headers, json={})
+    except httpx.ConnectError:
+        return True
+    return False
+
+
+@pytest.mark.asyncio
+async def test_each_evaluation_gets_its_own_interceptor_and_only_its_endpoint(control, suite, tmp_path):
+    agent, runtime = ToolCallingAgent(), SetupRecordingRuntime()
+    await benchmark(control, suite, agent, runtime, tmp_path, HostInterception(upstream=scripted_upstream()))
+
+    endpoints = [given["tool_endpoint"] for given in agent.given]
+    assert [given["session_token"] for given in agent.given] == [None, None]
+    assert len({e.url for e in endpoints}) == len({e.token for e in endpoints}) == 2
+    # The runtime was given the same endpoint as the agent, and no session.
+    assert [setup.get("tool_endpoint") for setup in runtime.setups] == endpoints
+    assert all("session_token" not in setup for setup in runtime.setups)
+    # Every interceptor was stopped after its evaluation.
+    assert [await refused(endpoint) for endpoint in endpoints] == [True, True]
+
+    [run] = control.store.list_runs()
+    evaluations = control.evaluations(run.id)
+    assert [(e.interception, e.stage.value, e.graded) for e in evaluations] == [("host", "sealed", True)] * 2
+    for evaluation in evaluations:
+        assert [(c.function, c.provenance) for c in evaluation.function_calls] == [("get_weather", "interceptor")]
+    assert evaluations[0].grade is not None and evaluations[0].grade.utility is True
+
+
+@pytest.mark.asyncio
+async def test_the_interceptor_stops_when_the_agent_fails(control, suite, tmp_path):
+    agent = ToolCallingAgent(fail=True)
+    with pytest.raises(RuntimeError, match="Agent failed"):
+        await benchmark(
+            control, suite, agent, SetupRecordingRuntime(), tmp_path, HostInterception(upstream=scripted_upstream())
+        )
+    [given] = agent.given
+    assert await refused(given["tool_endpoint"])
+
+
+@pytest.mark.asyncio
+async def test_host_mode_is_refused_before_a_run_for_a_client_that_cant_pass_an_endpoint(control, suite, tmp_path):
+    with pytest.raises(click.UsageError, match="can't give the agent a tool endpoint"):
+        await benchmark(
+            control,
+            suite,
+            SimpleHTTPAgentClient("http://agent"),
+            UnmanagedRuntime(),
+            tmp_path,
+            HostInterception(upstream=scripted_upstream()),
+            protocol="http",
+        )
+    assert control.store.list_runs() == []
+
+
+# --- the CLI ---
+
+
+@pytest.fixture
+def cli_benchmark(monkeypatch):
+    for name in ("MODEL_NAME", "MCP_SERVER_URL", "OPENAI_API_KEY", "UPSTREAM_MCP_URL"):
+        monkeypatch.delenv(name, raising=False)
+    mock = AsyncMock()
+    monkeypatch.setattr(orchestrator, "run_benchmark", mock)
+    return mock
+
+
+PI = ["--suite", "minibank", "--agent-uri", "/agent", "--protocol", "pi"]
+OPENSHELL = ["--suite", "document_assistant", "--gateway", "g"]
+UPSTREAM = ["--upstream-mcp-url", "http://localhost:9000/mcp"]
+
+
+def test_the_cli_runs_an_unmanaged_agent_in_host_mode_on_loopback(cli_benchmark):
+    result = CliRunner().invoke(orchestrator.main, [*PI, "--interception", "host", *UPSTREAM])
+    assert result.exit_code == 0, result.output
+    interception = cli_benchmark.call_args.kwargs["interception"]
+    assert interception == HostInterception(
+        upstream="http://localhost:9000/mcp", bind_host="127.0.0.1", port=0, advertise_host=None
+    )
+
+
+def test_the_cli_runs_in_agent_mode_by_default(cli_benchmark):
+    result = CliRunner().invoke(orchestrator.main, PI)
+    assert result.exit_code == 0, result.output
+    assert cli_benchmark.call_args.kwargs["interception"] is None
+
+
+def test_the_cli_gives_an_openshell_sandbox_the_interceptor_and_not_the_control_plane(cli_benchmark):
+    args = [*OPENSHELL, "--interception", "host", *UPSTREAM, "--interceptor-bind", "0.0.0.0"]
+    result = CliRunner().invoke(orchestrator.main, [*args, "--interceptor-port", "8765"])
+    assert result.exit_code == 0, result.output
+    kwargs = cli_benchmark.call_args.kwargs
+    assert kwargs["interception"] == HostInterception(
+        upstream="http://localhost:9000/mcp", bind_host="0.0.0.0", port=8765, advertise_host="host.openshell.internal"
+    )
+    runtime = kwargs["runtime"]
+    assert isinstance(runtime, OpenShellRuntime)
+    assert (runtime._interceptor_url, runtime._control_url) == ("http://host.openshell.internal:8765/mcp", "")
+
+
+def test_a_responses_protocol_needs_no_mcp_server_url_in_host_mode(cli_benchmark):
+    args = ["--suite", "minibank", "--agent-uri", "http://agent", "--protocol", "openai", "--model-name", "m"]
+    result = CliRunner().invoke(
+        orchestrator.main, [*args, "--interception", "host", *UPSTREAM], env={"OPENAI_API_KEY": "k"}
+    )
+    assert result.exit_code == 0, result.output
+    assert cli_benchmark.call_args.kwargs["agent_client"].mcp_server_url is None
+
+
+@pytest.mark.parametrize(
+    "args,message",
+    [
+        ([*PI, "--interception", "host"], "requires --upstream-mcp-url"),
+        ([*OPENSHELL, "--interception", "host", *UPSTREAM, "--interceptor-bind", "0.0.0.0"], "--interceptor-port"),
+        ([*OPENSHELL, "--interception", "host", *UPSTREAM, "--interceptor-port", "8765"], "host's loopback"),
+        ([*PI, "--interceptor-port", "8765"], "apply only to --interception host"),
+        ([*PI, "--interceptor-advertise-host", "h"], "apply only to --interception host"),
+    ],
+)
+def test_the_cli_refuses_host_mode_settings_a_target_couldnt_reach(cli_benchmark, args, message):
+    result = CliRunner().invoke(orchestrator.main, args)
+    assert result.exit_code == 2
+    assert message in result.output
+    cli_benchmark.assert_not_called()

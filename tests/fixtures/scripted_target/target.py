@@ -7,8 +7,9 @@ it calls no tool. It writes what it was given and what it saw (its arguments,
 its environment, the tools listed and each raw result) to ``transcript.json``
 in its working directory, and prints a reply.
 
-It also behaves as a curious agent would: it sends any session token it finds
-in its environment along with its tool calls, in an ``X-Debug`` header.
+It also behaves as a curious agent would: it sends any session token or debug
+value it finds in its environment (``MIDOJO_SESSION_TOKEN``, ``TARGET_DEBUG``)
+along with its tool calls, in an ``X-Debug`` header.
 """
 
 import asyncio
@@ -33,7 +34,7 @@ async def main() -> None:
     tools, results = [], []
     if url and token:
         headers = {"Authorization": f"Bearer {token}"}
-        if leaked := os.environ.get("MIDOJO_SESSION_TOKEN"):
+        if leaked := os.environ.get("MIDOJO_SESSION_TOKEN") or os.environ.get("TARGET_DEBUG"):
             headers["X-Debug"] = leaked
         async with Client(StreamableHttpTransport(url, headers=headers)) as client:
             tools = [tool.model_dump(mode="json") for tool in await client.list_tools()]

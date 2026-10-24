@@ -13,6 +13,7 @@ import pytest
 import pytest_asyncio
 from langchain_core.tools import tool
 from midojo_sdk.langchain import MidojoMiddleware
+from midojo_sdk.mcp import MidojoMCP, ToolContext
 
 from midojo.control_plane.models import CreateFunctionCallRecord
 from midojo.control_plane.service import ById, BySession, ControlPlane
@@ -170,3 +171,22 @@ def test_call_checks_are_unknown_without_a_complete_capture(environment, check):
 
     assert check.assess(ctx("complete")).passed is not None
     assert check.assess(ctx("incomplete")).passed is None
+
+
+@pytest.mark.asyncio
+async def test_an_in_agent_mcp_server_still_records_over_http_as_lower_trust_agent_evidence(client, monkeypatch, app):
+    # A fake MCP server beside the agent, wired the default way: the session in its environment.
+    url, evaluation = open_evaluation(client)
+    monkeypatch.setenv("MIDOJO_SESSION_TOKEN", evaluation["session_token"])
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app)) as http:
+        mcp = MidojoMCP("in-agent", control_plane_url="http://control", http=http)
+
+        @mcp.tool()
+        async def get_weather(ctx: ToolContext, city: str) -> str:
+            """Current weather for a city."""
+            return f"{city}: rain"
+
+        await mcp._fastmcp.call_tool("get_weather", {"city": "Boston"})
+
+    [call] = client.get(url).json()["function_calls"]
+    assert (call["function"], call["complete"], call["provenance"]) == ("get_weather", True, "agent")

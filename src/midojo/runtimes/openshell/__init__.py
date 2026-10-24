@@ -102,6 +102,8 @@ _SEED_STATUSES = frozenset({"unchanged", "modified", "deleted"})
 # endpoint; midojo never edits the declared policy — it only warns when the
 # allow rule is missing (see `_warn_if_control_plane_not_allowed`).
 SANDBOX_HOST = "host.openshell.internal"
+# What a host-mode sandbox never gets: the variables that give or name access to the control plane.
+_CONTROL_PLANE_ENV = ("MIDOJO_SESSION_TOKEN", "MIDOJO_URL", "MIDOJO_CONTROL_TOKEN")
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
 
 # The gateway's sandbox teardown can take longer than the SDK's 30s default
@@ -585,6 +587,9 @@ class OpenShellRuntime:
 
         env = dict(self._env_vars)
         if tool_endpoint is not None:
+            # Nothing that opens or names the control plane, even if the suite's env_vars set it.
+            for name in _CONTROL_PLANE_ENV:
+                env.pop(name, None)
             env.update(tool_endpoint.environment())
         else:
             assert session_token is not None
