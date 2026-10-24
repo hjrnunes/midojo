@@ -71,6 +71,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from midojo.observations import EvidenceStatus, register_observation_type
 from midojo.probes import substitute_probes
 from midojo.runtimes.openshell.logs import OCSFEvents, parse_ocsf_lines
+from midojo.tool_endpoint import ToolEndpoint
 
 # ---------------------------------------------------------------------------
 
@@ -100,7 +101,7 @@ _SEED_STATUSES = frozenset({"unchanged", "modified", "deleted"})
 # rewritten to use it. The suite's network policy must separately allow this
 # endpoint; midojo never edits the declared policy — it only warns when the
 # allow rule is missing (see `_warn_if_control_plane_not_allowed`).
-_SANDBOX_HOST = "host.openshell.internal"
+SANDBOX_HOST = "host.openshell.internal"
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
 
 # The gateway's sandbox teardown can take longer than the SDK's 30s default
@@ -220,7 +221,7 @@ def _rewrite_host_for_sandbox(url: str) -> str:
             userinfo += f":{parts.password}"
         userinfo += "@"
     port = f":{parts.port}" if parts.port else ""
-    netloc = f"{userinfo}{_SANDBOX_HOST}{port}"
+    netloc = f"{userinfo}{SANDBOX_HOST}{port}"
     return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
@@ -247,7 +248,7 @@ def _warn_if_control_plane_not_allowed(policy_spec: dict | None, url: str) -> No
     parts = urlsplit(url)
     host = parts.hostname or ""
     if host.lower() in _LOCAL_HOSTS:
-        host = _SANDBOX_HOST
+        host = SANDBOX_HOST
     port = parts.port or (443 if parts.scheme == "https" else 80)
 
     if not policy_spec:
@@ -261,17 +262,55 @@ def _warn_if_control_plane_not_allowed(policy_spec: dict | None, url: str) -> No
         )
         return
 
-    network_policies = policy_spec.get("networkPolicies") or {}
-    allowed = any(
-        any(ep.get("host") == host and ep.get("port") == port for ep in (entry.get("endpoints") or []))
-        for entry in network_policies.values()
-    )
-    if not allowed:
+    if not _policy_allows(policy_spec, host, port):
         log.warning(
             "Sandbox network policy does not allow the control plane at %s:%d; the "
             "in-sandbox agent SDK cannot POST tool calls and security predicates "
             "will show N/A. Add it to your suite's policy under networkPolicies, "
             "e.g. an endpoint {host: %s, port: %d}.",
+            host,
+            port,
+            host,
+            port,
+        )
+
+
+def _policy_allows(policy_spec: dict, host: str, port: int) -> bool:
+    """Whether an endpoint of the policy's ``networkPolicies`` is exactly ``host:port``."""
+    network_policies = policy_spec.get("networkPolicies") or {}
+    return any(
+        any(ep.get("host") == host and ep.get("port") == port for ep in (entry.get("endpoints") or []))
+        for entry in network_policies.values()
+    )
+
+
+def _warn_if_interceptor_not_allowed(policy_spec: dict | None, url: str) -> None:
+    """Warn (never mutate) if the policy does not allow reaching the host-side interceptor at ``url``.
+
+    In host mode the agent calls its tools at the interceptor the host runs,
+    advertised to the sandbox at ``url`` (``host.openshell.internal`` and a
+    fixed port), so the suite's network policy needs an allow rule for that
+    host and port, for the binaries that make the MCP calls. It needs none for
+    the control plane: the sandbox never reaches it.
+    """
+    import logging
+    from urllib.parse import urlsplit
+
+    log = logging.getLogger(__name__)
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    if not policy_spec:
+        log.warning(
+            "No sandbox network policy defined; cannot verify the agent can reach the host-side interceptor at "
+            "%s:%d. If it cannot, the agent's tool calls fail. Ensure the image's built-in policy allows it.",
+            host,
+            port,
+        )
+    elif not _policy_allows(policy_spec, host, port):
+        log.warning(
+            "Sandbox network policy does not allow the host-side interceptor at %s:%d; the agent cannot call its "
+            "tools. Add it to your suite's policy under networkPolicies, e.g. an endpoint {host: %s, port: %d}.",
             host,
             port,
             host,
@@ -375,7 +414,8 @@ class OpenShellRuntime:
             customer_report.txt: "Q4 report ... {injection_task_0:main}"
 
     Lifecycle (driven by the orchestrator):
-      1. ``configure(cluster=..., control_url=...)`` — inject deployment config (once)
+      1. ``configure(cluster=..., control_url=...)`` — inject deployment config (once);
+         in host mode ``interceptor_url=...`` instead of ``control_url``
       2. ``start_run(run_id)`` — open the run's OpenShell workspace + client (once)
       3. ``setup(injections, ...)`` — create sandbox with evaluation labels, seed files (per evaluation)
       4. agent executes (via ``exec_agent``), once per turn of the user task
@@ -430,6 +470,7 @@ class OpenShellRuntime:
         # Deployment config — set by configure() before start_run()
         self._cluster: str = ""
         self._control_url: str = ""
+        self._interceptor_url: str = ""
 
         # Run-level state — set by start_run(), cleared by end_run()
         self._client: Any = None
@@ -471,15 +512,20 @@ class OpenShellRuntime:
 
     # --- Deployment config ---
 
-    def configure(self, *, cluster: str, control_url: str = "") -> None:
+    def configure(self, *, cluster: str, control_url: str = "", interceptor_url: str = "") -> None:
         """Inject deployment config. Must be called before ``start_run()``.
 
         ``cluster`` names an OpenShell gateway registered with the CLI, as
         passed to ``midojo-run --gateway``. The gateway's gRPC endpoint and
         mTLS bundle are read from ``~/.config/openshell`` at ``start_run()``.
+        ``control_url`` is the control plane an in-sandbox SDK records to;
+        in host mode, give ``interceptor_url`` instead, the host-side
+        interceptor's URL as the sandbox reaches it, which ``start_run()``
+        checks the policy allows.
         """
         self._cluster = cluster
         self._control_url = control_url
+        self._interceptor_url = interceptor_url
 
     # --- Run-level lifecycle ---
 
@@ -502,9 +548,11 @@ class OpenShellRuntime:
         self._workspace_name = workspace.name
         self._run_labels = labels
 
-        # Policy and control-plane URL are fixed for the whole run, so check the
-        # control-plane allow rule once here rather than on every setup().
-        if self._control_url:
+        # Policy and control-plane (or interceptor) URL are fixed for the whole run, so check the
+        # allow rule once here rather than on every setup().
+        if self._interceptor_url:
+            _warn_if_interceptor_not_allowed(self._policy_spec, self._interceptor_url)
+        elif self._control_url:
             _warn_if_control_plane_not_allowed(self._policy_spec, self._control_url)
         return f"workspace {self._workspace_name}"
 
@@ -514,7 +562,8 @@ class OpenShellRuntime:
         self,
         injections: dict[str, str],
         *,
-        session_token: str,
+        session_token: str | None = None,
+        tool_endpoint: ToolEndpoint | None = None,
         eval_id: str,
         user_task_id: str,
         injection_task_id: str | None,
@@ -523,17 +572,30 @@ class OpenShellRuntime:
 
         The injections are substituted into the seeded files. Requires
         ``start_run()`` to have opened the client and workspace.
+
+        The sandbox's environment gets ``session_token`` as
+        ``MIDOJO_SESSION_TOKEN`` and the control plane as ``MIDOJO_URL``, for
+        an in-sandbox SDK; or, in host mode, only ``tool_endpoint`` as
+        ``MIDOJO_TOOL_URL`` and ``MIDOJO_TOOL_TOKEN``: no session token and no
+        control-plane URL.
         """
+        if (session_token is None) == (tool_endpoint is None):
+            raise ValueError("setup needs exactly one of session_token and tool_endpoint")
         self._cached_ocsf = None
 
-        env = {**self._env_vars, "MIDOJO_SESSION_TOKEN": session_token}
-        # The in-sandbox agent SDK POSTs its tool calls to the control plane, so
-        # the sandbox must be able to reach it. `localhost` resolves to the sandbox
-        # itself, so hand the SDK the host.openshell.internal form of the URL. The
-        # suite's network policy must allow this endpoint (checked once in
-        # start_run); midojo never edits the declared policy.
-        if self._control_url:
-            env["MIDOJO_URL"] = _rewrite_host_for_sandbox(self._control_url)
+        env = dict(self._env_vars)
+        if tool_endpoint is not None:
+            env.update(tool_endpoint.environment())
+        else:
+            assert session_token is not None
+            env["MIDOJO_SESSION_TOKEN"] = session_token
+            # The in-sandbox agent SDK POSTs its tool calls to the control plane, so
+            # the sandbox must be able to reach it. `localhost` resolves to the sandbox
+            # itself, so hand the SDK the host.openshell.internal form of the URL. The
+            # suite's network policy must allow this endpoint (checked once in
+            # start_run); midojo never edits the declared policy.
+            if self._control_url:
+                env["MIDOJO_URL"] = _rewrite_host_for_sandbox(self._control_url)
         spec = openshell_pb2.SandboxSpec(
             template=openshell_pb2.SandboxTemplate(image=self._image),
             environment=env,
