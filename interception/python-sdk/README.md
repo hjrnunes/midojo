@@ -46,9 +46,11 @@ The SDK attempts to record each call with its arguments and the result the agent
 
 Pass a frozen `InjectionPlan` as `MidojoMCP(..., plan=plan)`. `append` is the one default because an unqualified content selector can preserve the upstream result without guessing a field. The interceptor supports exact content-block and structured-content selectors, and `mirror_upstream()` validates targeted tool names before serving calls.
 
-Unsupported placements raise `CapabilityError` with every gap. Strict selector and size mismatches leave the result unchanged; `fallback_append` is explicit. `mcp.injection_outcomes` reports every result.
+Unsupported placements raise `CapabilityError` with every gap. Strict selector and size mismatches leave the result unchanged; `fallback_append` is explicit. `mcp.injection_outcomes` reports every result with the recorded call's `call_id`.
 
-Matching calls are numbered per evaluation under a lock before forwarding. Concurrent calls therefore use interceptor-admission order, not completion order.
+Matching calls are numbered per evaluation under a lock after their recorded start succeeds and before forwarding. Concurrent calls therefore use interceptor-admission order, not completion order. Blocked and denied calls are never admitted; an upstream error or cancellation consumes the admitted occurrence and reports an unmatched outcome. A cancelled call remains unfinished in the recorder.
+
+When `recorder=` is injected, a non-empty plan also requires `evaluation_id=`. That binds the interceptor and all its counters to one evaluation; build a separate `MidojoMCP` for another evaluation. Without an injected recorder, the incoming evaluation session is the scope.
 
 ## Recorder and WorldState
 

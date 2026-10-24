@@ -249,6 +249,7 @@ class MidojoMCP:
         recorder: Recorder | None = None,
         world: WorldState | None = None,
         plan: InjectionPlan | Sequence[InjectionInstruction] = (),
+        evaluation_id: str | None = None,
     ) -> None:
         if control_plane_url is None and recorder is None:
             raise ValueError("MidojoMCP needs a control_plane_url or a recorder.")
@@ -263,12 +264,18 @@ class MidojoMCP:
         self._recorder = recorder
         self._world = world
         self._plan = plan if isinstance(plan, InjectionPlan) else InjectionPlan(tuple(plan))
+        if evaluation_id is not None and (type(evaluation_id) is not str or not evaluation_id):
+            raise ValueError("evaluation_id must be a non-empty str or None.")
+        if recorder is None and evaluation_id is not None:
+            raise ValueError("evaluation_id is only used with an injected recorder.")
+        if recorder is not None and self._plan and evaluation_id is None:
+            raise ValueError("A non-empty plan with an injected recorder needs an evaluation_id.")
+        self._evaluation_id = evaluation_id
         self._validate_plan()
         self._plan_lock = anyio.Lock()
         self._occurrences: dict[object, list[int]] = {}
         self._admissions: dict[object, int] = {}
         self._outcomes: list[InjectionOutcome] = []
-        self._bound_evaluation = object()
         self._blocked: set[str] = set()
         self._denials: dict[str, Denial] = {}
         self._pass_protocol_errors()
@@ -437,11 +444,12 @@ class MidojoMCP:
     def _evaluation_scope(self) -> object:
         """The bound evaluation or the incoming session: one counter scope."""
         if self._recorder is not None:
-            return self._bound_evaluation
+            assert self._evaluation_id is not None  # A non-empty plan requires it.
+            return self._evaluation_id
         incoming = get_http_headers().get(SESSION_HEADER.lower())
         return session_token(incoming)
 
-    async def _admit_injections(self, scope: object, name: str) -> list[_AdmittedInstruction]:
+    async def _admit_injections(self, scope: object, call_id: str, name: str) -> list[_AdmittedInstruction]:
         """Number matches under a lock before forwarding; that is admission order."""
         admitted: list[_AdmittedInstruction] = []
         async with self._plan_lock:
@@ -460,6 +468,7 @@ class MidojoMCP:
                         _outcome(
                             index,
                             instruction,
+                            call_id,
                             name,
                             occurrence,
                             order,
@@ -469,12 +478,13 @@ class MidojoMCP:
                     )
         return admitted
 
-    def _report_no_result(self, name: str, admitted: Sequence[_AdmittedInstruction]) -> None:
+    def _report_no_result(self, call_id: str, name: str, admitted: Sequence[_AdmittedInstruction]) -> None:
         for index, instruction, occurrence, order in admitted:
             self._outcomes.append(
                 _outcome(
                     index,
                     instruction,
+                    call_id,
                     name,
                     occurrence,
                     order,
@@ -523,11 +533,11 @@ class MidojoMCP:
         await self._refuse(recorder, name, arguments)
         call_id = str(uuid.uuid4())
         await recorder.start_call(call_id=call_id, function=name, args=arguments, disposition="forwarded")
-        admitted = await self._admit_injections(self._evaluation_scope(), name)
+        admitted = await self._admit_injections(self._evaluation_scope(), call_id, name) if self._plan else []
         try:
             result = await self._upstream.call_tool_mcp(name, arguments)
         except McpError as e:
-            self._report_no_result(name, admitted)
+            self._report_no_result(call_id, name, admitted)
             message = e.error.message
             await recorder.finish_call(
                 call_id=call_id, function=name, args=arguments, result=message, error=message, disposition="forwarded"
@@ -537,14 +547,19 @@ class MidojoMCP:
                 errors.append(e)
             raise
         except Exception as e:
-            self._report_no_result(name, admitted)
+            self._report_no_result(call_id, name, admitted)
             await recorder.finish_call(
                 call_id=call_id, function=name, args=arguments, result=str(e), error=str(e), disposition="forwarded"
             )
             raise
+        except BaseException:
+            # Cancellation leaves the started disposition record unfinished,
+            # but this admitted call still consumed its occurrence.
+            self._report_no_result(call_id, name, admitted)
+            raise
         for index, instruction, occurrence, order in admitted:
             result, status, detail = _inject_result(result, instruction)
-            self._outcomes.append(_outcome(index, instruction, name, occurrence, order, status, detail))
+            self._outcomes.append(_outcome(index, instruction, call_id, name, occurrence, order, status, detail))
         seen = _text(result.content)
         await recorder.finish_call(
             call_id=call_id,
@@ -663,10 +678,11 @@ def _inject_result(
 def _outcome(
     index: int,
     instruction: InjectionInstruction,
+    call_id: str,
     tool: str,
     occurrence: int,
     admission_order: int,
     status: OutcomeStatus,
     detail: str,
 ) -> InjectionOutcome:
-    return InjectionOutcome(index, instruction.probe_key, tool, occurrence, admission_order, status, detail)
+    return InjectionOutcome(index, instruction.probe_key, call_id, tool, occurrence, admission_order, status, detail)

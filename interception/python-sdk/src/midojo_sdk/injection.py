@@ -244,6 +244,7 @@ class CapabilityError(ValueError):
 class InjectionOutcome:
     instruction_index: int
     probe_key: str | None
+    call_id: str
     tool: str
     occurrence: int
     admission_order: int
