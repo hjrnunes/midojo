@@ -7,7 +7,9 @@ client on the loopback interface. No model and no network beyond loopback.
 from __future__ import annotations
 
 import asyncio
+import re
 import signal
+import socket
 
 import httpx
 import pytest
@@ -269,3 +271,49 @@ async def test_requests_are_observed_only_when_asked_and_then_with_every_body(co
             ("/mcp", 401, b"no token"),
             ("/other", 404, b"wrong path"),
         ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("advertise", ["2001:db8::1", "[2001:db8::1]"])
+async def test_an_ipv6_advertised_host_is_bracketed_once_in_the_endpoint(control, serve, advertise):
+    _, evaluation = open_evaluation(control)
+    endpoint = await serve(interceptor_for(control, evaluation.session_token, evaluation.id, advertise_host=advertise))
+    assert re.fullmatch(r"http://\[2001:db8::1\]:\d+/mcp", endpoint.url)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bind", ["::1", "[::1]"])
+async def test_an_interceptor_bound_to_ipv6_loopback_serves_the_target(control, serve, bind):
+    try:
+        with socket.socket(socket.AF_INET6) as probe:
+            probe.bind(("::1", 0))
+    except OSError:
+        pytest.skip("no IPv6 loopback on this machine")
+    _, evaluation = open_evaluation(control)
+    endpoint = await serve(interceptor_for(control, evaluation.session_token, evaluation.id, bind_host=bind))
+    assert re.fullmatch(r"http://\[::1\]:\d+/mcp", endpoint.url)
+    async with Client(endpoint.url, auth=endpoint.token) as target:
+        assert (await target.call_tool("list_alerts", {})).content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path,status", [("/mcp", 401), ("/other", 404)])
+async def test_an_unobserved_interceptor_refuses_without_reading_the_body(control, path, status):
+    # A client that drips its body and never finishes it: refused at once, nothing of it read or kept.
+    _, evaluation = open_evaluation(control)
+    interceptor = interceptor_for(control, evaluation.session_token, evaluation.id)
+    reads, sent = [], []
+
+    async def receive():
+        reads.append(path)
+        if len(reads) == 1:
+            return {"type": "http.request", "body": b"x" * 1024, "more_body": True}
+        await asyncio.Event().wait()
+
+    async def send(message):
+        sent.append(message)
+
+    scope = {"type": "http", "method": "POST", "path": path, "query_string": b"", "headers": []}
+    await asyncio.wait_for(interceptor.app()(scope, receive, send), timeout=2)
+    assert (sent[0]["type"], sent[0]["status"]) == ("http.response.start", status)
+    assert reads == [] and interceptor.requests == []

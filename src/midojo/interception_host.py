@@ -45,10 +45,7 @@ from midojo_sdk.injection import InjectionOutcome, InjectionPlan
 from midojo_sdk.mcp import MidojoMCP
 from midojo_sdk.recorder import Recorder
 
-from midojo.tool_endpoint import ToolEndpoint
-
-# The path the interceptor serves its tools on.
-TOOL_PATH = "/mcp"
+from midojo.tool_endpoint import TOOL_PATH, ToolEndpoint, bare_host, tool_url
 
 # Hosts that mean every interface: a listener can bind them, but a target can't connect to them.
 _WILDCARD_HOSTS = {"0.0.0.0", "::", ""}
@@ -85,10 +82,6 @@ class _Server(uvicorn.Server):
         yield
 
 
-def _url_host(host: str) -> str:
-    return f"[{host}]" if ":" in host else host
-
-
 class HostInterceptor:
     """Mirrors ``upstream``'s tools for one evaluation, recording each call with ``recorder`` and applying ``plan``.
 
@@ -122,9 +115,11 @@ class HostInterceptor:
             evaluation_id=evaluation_id,
         )
         self._token = secrets.token_urlsafe(32)
-        self._bind_host = bind_host
+        # A host is kept without URL brackets, and bracketed once when the endpoint's URL is made.
+        self._bind_host = bind_host = bare_host(bind_host)
         self._port = port
-        self._advertise_host = advertise_host or (bind_host if bind_host not in _WILDCARD_HOSTS else "127.0.0.1")
+        default_advertise = bind_host if bind_host not in _WILDCARD_HOSTS else "127.0.0.1"
+        self._advertise_host = bare_host(advertise_host) if advertise_host else default_advertise
         # With observe_requests, every request the interceptor received, in full (credentials included): what
         # the target sent, for checking it. Off by default, so a long run keeps none of it.
         self._observe_requests = observe_requests
@@ -167,9 +162,11 @@ class HostInterceptor:
                 await send(message)
 
             async def refuse(status: int, body: bytes) -> None:
-                # Read the refused request's body first, so an observed request keeps all the target sent.
-                while (await receive_and_keep()).get("more_body", False):
-                    pass
+                # An observed request keeps all the target sent, so read its body first. Unobserved, answer at
+                # once: an unauthorized client can't make the interceptor wait for, or hold, a body it drips.
+                if self._observe_requests:
+                    while (await receive_and_keep()).get("more_body", False):
+                        pass
                 await _respond(send_and_note, status, body)
 
             if scope["path"].rstrip("/") != TOOL_PATH:
@@ -199,7 +196,7 @@ class HostInterceptor:
                 raise RuntimeError(f"The interceptor stopped before serving on {self._bind_host}:{self._port}")
             await asyncio.sleep(0.01)
         port = listener.getsockname()[1]
-        return ToolEndpoint(f"http://{_url_host(self._advertise_host)}:{port}{TOOL_PATH}", self._token)
+        return ToolEndpoint(tool_url(self._advertise_host, port), self._token)
 
     async def stop(self) -> None:
         """Stop serving. The target's open connections get a short grace period, then are closed."""

@@ -21,6 +21,20 @@ HOST_MODE_WITHHELD_ENV = frozenset(
     {"MIDOJO_SESSION_TOKEN", "MIDOJO_URL", "MIDOJO_CONTROL_TOKEN", "UPSTREAM_MCP_URL", "MCP_SERVER_URL"}
 )
 
+# The path an interceptor serves its tools on.
+TOOL_PATH = "/mcp"
+
+
+def bare_host(host: str) -> str:
+    """``host`` without the brackets an IPv6 address has in a URL: how a socket and a policy name it."""
+    return host[1:-1] if host.startswith("[") and host.endswith("]") else host
+
+
+def tool_url(host: str, port: int) -> str:
+    """The URL of an interceptor at ``host`` and ``port``, an IPv6 host bracketed once, bracketed or not."""
+    host = bare_host(host)
+    return f"http://{f'[{host}]' if ':' in host else host}:{port}{TOOL_PATH}"
+
 
 @dataclass(frozen=True)
 class ToolEndpoint:
