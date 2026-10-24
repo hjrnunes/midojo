@@ -13,6 +13,7 @@ import httpx
 import pytest
 from click.testing import CliRunner
 from fastmcp import Client
+from fastmcp.exceptions import ToolError
 
 from midojo import orchestrator
 from midojo.agent_client import AgentClient, SimpleHTTPAgentClient
@@ -62,7 +63,8 @@ def control(suite) -> ControlPlane:
 
 
 async def benchmark(control, suite, agent, runtime, tmp_path, interception, **kwargs):
-    async with InProcessControlClient(control) as in_process:
+    control_client = kwargs.pop("control_client", InProcessControlClient)
+    async with control_client(control) as in_process:
         await run_benchmark(
             control_url="http://control",
             agent_client=agent,
@@ -109,6 +111,42 @@ async def test_each_evaluation_gets_its_own_interceptor_and_only_its_endpoint(co
     for evaluation in evaluations:
         assert [(c.function, c.provenance) for c in evaluation.function_calls] == [("get_weather", "interceptor")]
     assert evaluations[0].grade is not None and evaluations[0].grade.utility is True
+
+
+@pytest.mark.asyncio
+async def test_a_call_after_the_seal_is_refused_by_a_live_interceptor_and_kept_as_a_late_fact(control, suite, tmp_path):
+    agent = ToolCallingAgent()
+    after_seal: list[str] = []
+
+    class CallingAfterTheSeal(InProcessControlClient):
+        """Once each evaluation is sealed, the target tries one more call, as a slow agent would."""
+
+        async def complete_evaluation(self, run_id, eval_id, agent_output):
+            result = await super().complete_evaluation(run_id, eval_id, agent_output)
+            endpoint = agent.given[-1]["tool_endpoint"]
+            async with Client(endpoint.url, auth=endpoint.token) as tools:
+                with pytest.raises(ToolError):
+                    await tools.call_tool("get_weather", {"city": "Chicago"})
+            after_seal.append(eval_id)
+            return result
+
+    interception = HostInterception(upstream=scripted_upstream())
+    await benchmark(
+        control, suite, agent, SetupRecordingRuntime(), tmp_path, interception, control_client=CallingAfterTheSeal
+    )
+
+    [run] = control.store.list_runs()
+    evaluations = control.evaluations(run.id)
+    assert after_seal == [e.id for e in evaluations]
+    for evaluation in evaluations:
+        # The refused call is a late fact, not a record, and the sealed grade is unchanged.
+        assert [c.args for c in evaluation.function_calls] == [{"city": "New York"}]
+        [fact] = evaluation.late_facts
+        assert (fact.event, fact.by, fact.stage.value) == ("start_call", "interceptor", "sealed")
+        assert fact.payload["args"] == {"city": "Chicago"}
+        assert evaluation.grade is not None and evaluation.grade.utility is True
+    # The interceptors still stopped once their evaluations were done.
+    assert [await refused(given["tool_endpoint"]) for given in agent.given] == [True, True]
 
 
 @pytest.mark.asyncio
@@ -180,6 +218,16 @@ def test_the_cli_gives_an_openshell_sandbox_the_interceptor_and_not_the_control_
     runtime = kwargs["runtime"]
     assert isinstance(runtime, OpenShellRuntime)
     assert (runtime._interceptor_url, runtime._control_url) == ("http://host.openshell.internal:8765/mcp", "")
+
+
+@pytest.mark.parametrize("advertise", ["2001:db8::1", "[2001:db8::1]"])
+def test_the_cli_gives_an_openshell_sandbox_an_ipv6_interceptor_in_brackets_once(cli_benchmark, advertise):
+    args = [*OPENSHELL, "--interception", "host", *UPSTREAM, "--interceptor-bind", "::", "--interceptor-port", "8765"]
+    result = CliRunner().invoke(orchestrator.main, [*args, "--interceptor-advertise-host", advertise])
+    assert result.exit_code == 0, result.output
+    kwargs = cli_benchmark.call_args.kwargs
+    assert (kwargs["interception"].bind_host, kwargs["interception"].advertise_host) == ("::", "2001:db8::1")
+    assert kwargs["runtime"]._interceptor_url == "http://[2001:db8::1]:8765/mcp"
 
 
 def test_a_responses_protocol_needs_no_mcp_server_url_in_host_mode(cli_benchmark):

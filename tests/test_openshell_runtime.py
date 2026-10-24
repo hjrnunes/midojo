@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import subprocess
@@ -250,13 +251,18 @@ def test_setup_needs_exactly_one_of_a_session_and_a_tool_endpoint(access):
         ({"networkPolicies": {"tools": {"endpoints": [{"host": "host.openshell.internal", "port": 8765}]}}}, None),
     ],
 )
-def test_start_run_warns_when_the_policy_does_not_allow_the_interceptor(monkeypatch, caplog, policy, warning):
+@pytest.mark.parametrize("host", ["host.openshell.internal", "[2001:db8::1]"])
+def test_start_run_warns_when_the_policy_does_not_allow_the_interceptor(monkeypatch, caplog, policy, warning, host):
+    # A policy names an IPv6 host without the brackets its URL needs.
+    bare = host.strip("[]")
+    policy = json.loads(json.dumps(policy).replace("host.openshell.internal", bare)) if policy else policy
+    warning = warning and warning.replace("host.openshell.internal", bare)
     runtime = OpenShellRuntime("shell_suite", image="pi", policy=policy)
     workspaces = MagicMock()
     workspaces.create.side_effect = lambda name, **kw: SimpleNamespace(name=name)
     monkeypatch.setattr(openshell_runtime.SandboxClient, "from_active_cluster", lambda **kw: MagicMock())
     monkeypatch.setattr(openshell_runtime.WorkspaceClient, "from_sandbox_client", lambda client: workspaces)
-    runtime.configure(cluster="test", interceptor_url="http://host.openshell.internal:8765/mcp")
+    runtime.configure(cluster="test", interceptor_url=f"http://{host}:8765/mcp")
     with caplog.at_level("WARNING", logger="midojo.runtimes.openshell"):
         runtime.start_run("a" * 32, suite_name="shell_suite")
     warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]

@@ -37,6 +37,7 @@ from midojo.reachability import Reachability, count, reachability
 from midojo.runtimes import AgentRuntime
 from midojo.runtimes.openshell import SANDBOX_HOST, OpenShellRuntime
 from midojo.suites import get_suite, list_suites
+from midojo.tool_endpoint import bare_host, tool_url
 from midojo.yaml_task_suite import YAMLTaskSuite
 
 if TYPE_CHECKING:
@@ -275,9 +276,9 @@ async def run_task(
     session, for an interception layer in the agent. With it (host mode), the
     evaluation is opened for host interception, and an interceptor started for
     it with the session's recorder and the episode's tool-output plan: the
-    runtime and the agent get only its tool endpoint. It stops after the
-    runtime's teardown; calls it gets once the evaluation is closing are late
-    facts.
+    runtime and the agent get only its tool endpoint. It stops once the
+    evaluation is sealed and graded, or the evaluation fails; calls it gets
+    once the evaluation is closing, and after the seal, are late facts.
     """
     user_task_id, injection_task_id = episode.user_task_id, episode.injection_task_id
     if user_task_id is None:
@@ -331,12 +332,8 @@ async def run_task(
             for source, observed in observations.items():
                 await control.record_observations(run_id, eval_id, source, observed)
         finally:
-            try:
-                with console.status(f"[dim]{pair} · tearing down the {runtime.name} runtime…[/dim]", spinner="dots"):
-                    await asyncio.to_thread(runtime.teardown)
-            finally:
-                if interceptor is not None:
-                    await interceptor.stop()
+            with console.status(f"[dim]{pair} · tearing down the {runtime.name} runtime…[/dim]", spinner="dots"):
+                await asyncio.to_thread(runtime.teardown)
 
         agent_output = turns[-1].reply
         await control.complete_evaluation(run_id, eval_id, agent_output)
@@ -346,6 +343,11 @@ async def run_task(
         with contextlib.suppress(*_CONTROL_ERRORS):
             await control.revoke_session(run_id, eval_id)
         raise
+    finally:
+        # Live until the evaluation is sealed: a call the target makes after closure, however late, is refused
+        # and kept as a late fact, rather than lost to a refused connection.
+        if interceptor is not None:
+            await interceptor.stop()
 
 
 async def _run_benchmark(
@@ -685,7 +687,8 @@ def main(
             raise click.UsageError(f"Suite {suite_name!r} runs its agent in OpenShell and requires --gateway.")
         if host_interception is not None:
             # The sandbox never gets the control plane's URL in host mode, only the interceptor's.
-            advertised = f"http://{host_interception.advertise_host}:{host_interception.port}/mcp"
+            assert host_interception.advertise_host is not None
+            advertised = tool_url(host_interception.advertise_host, host_interception.port)
             runtime.configure(cluster=gateway, interceptor_url=advertised)
         else:
             runtime.configure(cluster=gateway, control_url=control_url)
@@ -754,7 +757,7 @@ def main(
 def _ip(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
     """``host`` as an IP address (an IPv4-mapped IPv6 one as its IPv4 address), or None for a name."""
     try:
-        ip = ipaddress.ip_address(host.strip("[]"))
+        ip = ipaddress.ip_address(bare_host(host))
     except ValueError:
         return None
     return ip.ipv4_mapped or ip if isinstance(ip, ipaddress.IPv6Address) else ip
@@ -781,6 +784,9 @@ def _host_interception(
 
     if not upstream_mcp_url:
         raise click.UsageError("--interception host requires --upstream-mcp-url or UPSTREAM_MCP_URL.")
+    # Hosts are kept without URL brackets ([2001:db8::1] is 2001:db8::1), and bracketed once in a URL.
+    bind = bare_host(bind)
+    advertise = bare_host(advertise) if advertise else None
     if openshell:
         if not port:
             raise click.UsageError(
