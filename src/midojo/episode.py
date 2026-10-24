@@ -119,7 +119,9 @@ class Episode:
 
     ``turns`` are the user's messages, sent one at a time in one evaluation, or
     None when the host drives the conversation. ``plan`` holds exact immutable
-    placements. ``injections`` is its derived legacy placeholder view. ``security`` and ``utility``
+    placements. Host template channels are rendered from its validated
+    substitution map; tool channels are carried for an external interceptor.
+    ``injections`` is the derived legacy substitution view. ``security`` and ``utility``
     are the checks as authored (a suite's ``security:``/``utility:`` blocks,
     e.g. ``{"output_contains": "pwned"}``); either may be absent. Each grading
     parses a fresh :class:`~midojo.verifier.Check` from them. ``environment``
@@ -192,7 +194,7 @@ class Episode:
     @property
     def injections(self) -> Mapping[str, str]:
         """Legacy placeholder mapping derived from ``plan``; new callers use the plan."""
-        return MappingProxyType(dict(self.plan.probe_payloads))
+        return self.plan.substitution_payloads
 
     def runtime_definition(self) -> AgentRuntimeDefinition:
         """A fresh copy of the runtime definition the episode needs."""

@@ -10,6 +10,7 @@ from __future__ import annotations
 import enum
 from collections.abc import Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any
 
 type PathPart = str | int
@@ -190,7 +191,15 @@ class GeneratorPermissions:
 
 @dataclass(frozen=True)
 class InjectionPlan:
-    """An immutable ordered collection of instructions and generator bounds."""
+    """An immutable ordered collection of instructions and generator bounds.
+
+    ``probe_payloads`` is the host's substitution map. It may contain active
+    probes not referenced by a template in this episode, but every template
+    instruction must name an entry with the same payload. Tool-output and
+    tool-description instructions are carried for an external interceptor;
+    select that interceptor's part with :meth:`for_channels`, which will then
+    validate the selected instructions against its capability.
+    """
 
     instructions: tuple[InjectionInstruction, ...] = ()
     generator_permissions: GeneratorPermissions = field(default_factory=GeneratorPermissions)
@@ -205,13 +214,42 @@ class InjectionPlan:
         probes = tuple((_str(key, "probe key"), _str(payload, "probe payload")) for key, payload in self.probe_payloads)
         if len(dict(probes)) != len(probes):
             raise ValueError("probe_payloads contains a duplicate key")
+        probes = tuple(sorted(probes))
         object.__setattr__(self, "probe_payloads", probes)
+        substitutions = dict(probes)
+        for instruction in self.instructions:
+            if instruction.target.surface is not SelectorSurface.TEMPLATE:
+                continue
+            key = instruction.target.template_key
+            assert key is not None  # InjectionInstruction validates template selectors.
+            if key not in substitutions:
+                raise ValueError(f"template instruction {key!r} is missing from probe_payloads")
+            if substitutions[key] != instruction.payload:
+                raise ValueError(f"template instruction {key!r} disagrees with probe_payloads")
+            if instruction.probe_key is not None and instruction.probe_key != key:
+                raise ValueError(f"template instruction {key!r} must use the same probe_key")
 
     def __iter__(self) -> Iterator[InjectionInstruction]:
         return iter(self.instructions)
 
     def __len__(self) -> int:
         return len(self.instructions)
+
+    @property
+    def substitution_payloads(self) -> Mapping[str, str]:
+        """The immutable host substitution map, validated against template instructions."""
+        return MappingProxyType(dict(self.probe_payloads))
+
+    def for_channels(self, *channels: Channel) -> InjectionPlan:
+        """Return the part delivered by an interceptor responsible for ``channels``."""
+        if any(type(channel) is not Channel for channel in channels):
+            raise TypeError("channels must be exact Channel values")
+        selected = frozenset(channels)
+        return InjectionPlan(
+            tuple(instruction for instruction in self.instructions if instruction.channel in selected),
+            generator_permissions=self.generator_permissions,
+            probe_payloads=self.probe_payloads,
+        )
 
 
 @dataclass(frozen=True)

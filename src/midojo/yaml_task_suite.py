@@ -187,13 +187,14 @@ class YAMLTaskSuite:
         files = getattr(self.definition.agent_runtime, "files", {})
         instructions += _template_instructions(files, Channel.RUNTIME_FILE, active)
         plan = InjectionPlan(tuple(instructions), probe_payloads=tuple(active.items()))
+        substitutions = dict(plan.substitution_payloads)
         return Episode(
             runtime=self.definition.agent_runtime,
-            turns=self.inject_user_task_turns(user_task_id, active),
+            turns=self.inject_user_task_turns(user_task_id, substitutions),
             plan=plan,
             security=injection_task.spec if injection_task is not None else None,
             utility=self.user_tasks[user_task_id].spec,
-            environment=cast(dict[str, Any], substitute_probes_deep(self.definition.environment, active)),
+            environment=cast(dict[str, Any], substitute_probes_deep(self.definition.environment, substitutions)),
             environment_type=self.environment_type,
             suite_name=self.name,
             user_task_id=user_task_id,

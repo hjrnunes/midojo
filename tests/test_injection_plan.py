@@ -140,6 +140,51 @@ def test_plan_is_frozen_and_generator_output_is_bounded():
             instruction_from_generator(output, permissions)
 
 
+def test_template_instructions_must_agree_with_the_substitution_map():
+    instruction = InjectionInstruction(
+        channel=Channel.USER_PROMPT,
+        payload="payload",
+        target=InjectionTarget(surface=SelectorSurface.TEMPLATE, template_key="task:probe"),
+        mode=InjectionMode.REPLACE,
+        probe_key="task:probe",
+    )
+    with pytest.raises(ValueError, match="missing from probe_payloads"):
+        InjectionPlan((instruction,))
+    with pytest.raises(ValueError, match="disagrees"):
+        InjectionPlan((instruction,), probe_payloads=(("task:probe", "different"),))
+    with pytest.raises(ValueError, match="same probe_key"):
+        InjectionPlan(
+            (dataclasses.replace(instruction, probe_key="other:probe"),),
+            probe_payloads=(("task:probe", "payload"),),
+        )
+
+    plan = InjectionPlan(
+        (instruction,),
+        probe_payloads=(("unused:probe", "unused"), ("task:probe", "payload")),
+    )
+    assert dict(plan.substitution_payloads) == {"task:probe": "payload", "unused:probe": "unused"}
+    with pytest.raises(TypeError):
+        plan.substitution_payloads["task:probe"] = "changed"  # type: ignore[index]
+
+
+def test_a_plan_selects_the_channels_an_external_interceptor_delivers():
+    tool = _instruction()
+    template = InjectionInstruction(
+        channel=Channel.RUNTIME_FILE,
+        payload="payload",
+        target=InjectionTarget(surface=SelectorSurface.TEMPLATE, template_key="task:probe"),
+        mode=InjectionMode.REPLACE,
+        probe_key="task:probe",
+    )
+    plan = InjectionPlan((template, tool), probe_payloads=(("task:probe", "payload"),))
+
+    selected = plan.for_channels(Channel.TOOL_OUTPUT)
+
+    assert selected.instructions == (tool,)
+    assert selected.generator_permissions == plan.generator_permissions
+    assert selected.probe_payloads == plan.probe_payloads
+
+
 def test_generator_output_is_constrained_by_the_episode_plan_permissions():
     permissions = GeneratorPermissions(
         tools=frozenset({"search"}),
