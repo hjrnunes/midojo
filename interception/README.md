@@ -75,7 +75,7 @@ In a function-call record, `result` is what the agent saw. `error` (optional) is
 
 A record sent without a `call_id` is always appended, and the control plane assigns it a UUID. Every stored record, and every response, has a `call_id`.
 
-This makes resending a record safe, not delivery exactly-once. A record that never reaches the control plane is still missing, and a missing record doesn't mean the agent didn't try the call: the PI SDK blocks a `blockTools` call even when its record fails.
+This makes resending a record safe, not delivery exactly-once. A record that never reaches the control plane is still missing, and a missing record doesn't mean the agent didn't try the call: the PI SDK blocks a `blockTools` call even when its record fails. The Python SDK reports each start or finish it couldn't deliver (after its resends, or refused other than as a late fact) to `POST /agent/capture-failures` with its `call_id`, `function`, `phase` (`start` or `finish`) and `reason`: 201 when kept, 200 for the same `call_id`, `function` and `phase` again, 401 with `late_fact` true after the seal. The report never adds a record, but marks `function_calls` `incomplete` in the evaluation's `evidence_status`, so a check that depends on a call's absence is unknown instead of passing on a lost record.
 
 The SDKs send a `call_id` with every record:
 
