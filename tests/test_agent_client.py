@@ -362,6 +362,9 @@ async def test_http_client_without_a_session_sends_no_session_header():
 async def test_pi_subprocess_in_host_mode_gets_the_tool_endpoint_and_no_session(monkeypatch, tmp_path):
     monkeypatch.setenv("MIDOJO_SESSION_TOKEN", "host-session")
     monkeypatch.setenv("MIDOJO_URL", "http://control")
+    # A direct route to the real tools would bypass the interceptor and its records.
+    monkeypatch.setenv("UPSTREAM_MCP_URL", "http://upstream:9000/mcp")
+    monkeypatch.setenv("MCP_SERVER_URL", "http://upstream:9000/mcp")
     launches = []
 
     class Process:
@@ -379,4 +382,4 @@ async def test_pi_subprocess_in_host_mode_gets_the_tool_endpoint_and_no_session(
     assert await agent.send_task("task", tool_endpoint=ENDPOINT) == "done"
     env = launches[0]["env"]
     assert (env["MIDOJO_TOOL_URL"], env["MIDOJO_TOOL_TOKEN"]) == (ENDPOINT.url, "tool-token")
-    assert {"MIDOJO_SESSION_TOKEN", "MIDOJO_URL"}.isdisjoint(env)
+    assert {"MIDOJO_SESSION_TOKEN", "MIDOJO_URL", "UPSTREAM_MCP_URL", "MCP_SERVER_URL"}.isdisjoint(env)

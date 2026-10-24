@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING
 import httpx
 
 from midojo.control_plane.config import CONTROL_TOKEN_ENV
-from midojo.tool_endpoint import TOOL_TOKEN_ENV, TOOL_URL_ENV, ToolEndpoint
+from midojo.tool_endpoint import HOST_MODE_WITHHELD_ENV, TOOL_TOKEN_ENV, TOOL_URL_ENV, ToolEndpoint
 
 if TYPE_CHECKING:
     from midojo.runtimes.openshell import OpenShellRuntime
@@ -355,7 +355,9 @@ class PIAgentClient(AgentClient):
     record with ``MIDOJO_SESSION_TOKEN`` at ``MIDOJO_URL``. In host mode the
     subprocess gets neither, only ``MIDOJO_TOOL_URL`` and ``MIDOJO_TOOL_TOKEN``:
     PI must be configured to reach its tools there. Either way it inherits the
-    orchestrator's environment without the control token or any of these.
+    orchestrator's environment without the control token or any of these; in
+    host mode, also without ``UPSTREAM_MCP_URL`` or ``MCP_SERVER_URL``, which
+    name the real MCP server.
     """
 
     supports_host_interception = True
@@ -377,6 +379,8 @@ class PIAgentClient(AgentClient):
         # The agent gets its own evaluation's access only, never the orchestrator's control token.
         env = {name: value for name, value in os.environ.items() if name not in _WITHHELD_ENV}
         if tool_endpoint is not None:
+            # Nor anything that names the real MCP server, which would let it call its tools unrecorded.
+            env = {name: value for name, value in env.items() if name not in HOST_MODE_WITHHELD_ENV}
             env.update(tool_endpoint.environment())
         elif session_token is not None:
             env.update({"MIDOJO_URL": self.control_url, "MIDOJO_SESSION_TOKEN": session_token})

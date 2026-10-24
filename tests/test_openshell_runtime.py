@@ -133,10 +133,13 @@ class _FakeSandboxClient:
         self.logs_requests = []
         self.specs = []
         self.created_specs = self.specs
+        # Each sandbox's name and labels, as created.
+        self.created = []
         self._stub = self
 
     def create(self, *, spec, name, workspace="midojo-shell-abc123", labels=None, **kwargs):
         self.specs.append(spec)
+        self.created.append((name, dict(labels or {})))
         return SandboxRef(
             id="sb-1", name=name, workspace=workspace, status=SandboxStatusRef(phase=0, current_policy_version=0)
         )
@@ -184,7 +187,14 @@ def test_sandbox_environment_never_carries_the_control_token(monkeypatch):
 
 
 def test_host_mode_sandbox_environment_has_the_tool_endpoint_and_nothing_of_the_control_plane():
-    stale = {"MIDOJO_URL": "http://control", "MIDOJO_SESSION_TOKEN": "stale", "MIDOJO_CONTROL_TOKEN": "secret"}
+    stale = {
+        "MIDOJO_URL": "http://control",
+        "MIDOJO_SESSION_TOKEN": "stale",
+        "MIDOJO_CONTROL_TOKEN": "secret",
+        # A direct route to the real tools would bypass the interceptor and its records.
+        "UPSTREAM_MCP_URL": "http://upstream:9000/mcp",
+        "MCP_SERVER_URL": "http://upstream:9000/mcp",
+    }
     runtime, client = _runtime_with_sandbox(env_vars={"LITELLM_MODEL": "m", **stale})
     runtime.configure(cluster="test", interceptor_url="http://host.openshell.internal:8765/mcp")
     endpoint = ToolEndpoint("http://host.openshell.internal:8765/mcp", "tool-token")
@@ -193,6 +203,35 @@ def test_host_mode_sandbox_environment_has_the_tool_endpoint_and_nothing_of_the_
         "LITELLM_MODEL": "m",
         "MIDOJO_TOOL_URL": "http://host.openshell.internal:8765/mcp",
         "MIDOJO_TOOL_TOKEN": "tool-token",
+    }
+
+
+def test_a_host_mode_sandbox_is_named_and_labelled_with_nothing_of_its_evaluation():
+    runtime, client = _runtime_with_sandbox()
+    runtime._run_labels = {"midojo.suite": "shell_suite", "midojo.run-id": "r" * 32}
+    runtime.configure(cluster="test", interceptor_url="http://host.openshell.internal:8765/mcp")
+    endpoint = ToolEndpoint("http://host.openshell.internal:8765/mcp", "tool-token")
+    for _ in range(2):
+        runtime.setup({}, tool_endpoint=endpoint, eval_id="e1", user_task_id="t", injection_task_id="attack")
+    names = [name for name, _ in client.created]
+    assert all(re.fullmatch(r"sbx-[0-9a-f]{12}", name) for name in names) and len(set(names)) == 2
+    assert [labels for _, labels in client.created] == [{"midojo.suite": "shell_suite"}] * 2
+    # The host, not the sandbox, knows which sandbox runs the evaluation.
+    assert runtime.sandbox_name == names[-1]
+
+
+def test_an_agent_mode_sandbox_keeps_its_evaluation_name_and_labels():
+    runtime, client = _runtime_with_sandbox()
+    runtime._run_labels = {"midojo.suite": "shell_suite", "midojo.run-id": "r" * 32}
+    runtime.setup({}, session_token="s", eval_id="e1", user_task_id="t", injection_task_id="attack")
+    [(name, labels)] = client.created
+    assert name == "eval-e1"
+    assert labels == {
+        "midojo.suite": "shell_suite",
+        "midojo.run-id": "r" * 32,
+        "midojo.eval-id": "e1",
+        "midojo.user-task": "t",
+        "midojo.injection-task": "attack",
     }
 
 
