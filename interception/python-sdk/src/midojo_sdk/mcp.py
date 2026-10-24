@@ -35,6 +35,7 @@ from midojo_sdk.client import AgentControlPlaneClient, transient
 from midojo_sdk.context import ToolContext
 from midojo_sdk.injection import (
     CapabilityError,
+    CapabilityGap,
     Channel,
     InjectionInstruction,
     InjectionMode,
@@ -74,7 +75,7 @@ MIDOJO_MCP_CAPABILITY = InterceptorCapability(
     transformations=frozenset(Transformation),
     mismatch_policies=frozenset(MismatchPolicy),
 )
-"""Placements the MCP forwarding interceptor implements without degradation."""
+"""Placements the MCP forwarding interceptor implements for mirrored tool results without degradation."""
 
 type _AdmittedInstruction = tuple[int, InjectionInstruction, int, int]
 
@@ -248,7 +249,7 @@ class MidojoMCP:
         upstream_transport: Any = None,
         recorder: Recorder | None = None,
         world: WorldState | None = None,
-        plan: InjectionPlan | Sequence[InjectionInstruction] = (),
+        plan: InjectionPlan = InjectionPlan(),
         evaluation_id: str | None = None,
     ) -> None:
         if control_plane_url is None and recorder is None:
@@ -263,7 +264,9 @@ class MidojoMCP:
         )
         self._recorder = recorder
         self._world = world
-        self._plan = plan if isinstance(plan, InjectionPlan) else InjectionPlan(tuple(plan))
+        if type(plan) is not InjectionPlan:
+            raise TypeError("plan must be an InjectionPlan")
+        self._plan = plan
         if evaluation_id is not None and (type(evaluation_id) is not str or not evaluation_id):
             raise ValueError("evaluation_id must be a non-empty str or None.")
         if recorder is None and evaluation_id is not None:
@@ -272,6 +275,10 @@ class MidojoMCP:
             raise ValueError("A non-empty plan with an injected recorder needs an evaluation_id.")
         self._evaluation_id = evaluation_id
         self._validate_plan()
+        if self._plan and self._upstream is None:
+            raise CapabilityError(
+                tuple(CapabilityGap(index, "delivery", "mirrored_upstream") for index, _ in enumerate(self._plan))
+            )
         self._plan_lock = anyio.Lock()
         self._occurrences: dict[object, list[int]] = {}
         self._admissions: dict[object, int] = {}
@@ -283,7 +290,7 @@ class MidojoMCP:
 
     @property
     def injection_capability(self) -> InterceptorCapability:
-        """The exact plan vocabulary this interceptor supports."""
+        """The exact plan vocabulary this interceptor supports on mirrored results."""
         return MIDOJO_MCP_CAPABILITY
 
     @property
@@ -361,6 +368,13 @@ class MidojoMCP:
 
     def tool(self):
         def decorator(fn):
+            gaps = tuple(
+                CapabilityGap(index, "delivery", f"simulated_tool:{fn.__name__}")
+                for index, instruction in enumerate(self._plan)
+                if instruction.target.tool in (None, fn.__name__)
+            )
+            if gaps:
+                raise CapabilityError(gaps)
             sig = inspect.signature(fn, eval_str=True)
             params = list(sig.parameters.values())
             if not params or params[0].annotation is not ToolContext:

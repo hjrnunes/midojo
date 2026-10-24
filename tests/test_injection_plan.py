@@ -26,9 +26,10 @@ from midojo_sdk.injection import (
     instruction_from_generator,
     instruction_from_generator_for_plan,
 )
-from midojo_sdk.mcp import MidojoMCP
+from midojo_sdk.mcp import MidojoMCP, ToolContext
 
 from midojo.episode import Episode
+from midojo.suites import get_suite
 from tests.scripted_mcp import ScriptedMCP
 from tests.test_mcp_fidelity import CapturingRecorder
 
@@ -231,7 +232,61 @@ def test_capability_gaps_are_typed_and_listed_before_calls():
 
 def test_a_nonempty_plan_with_an_injected_recorder_requires_an_evaluation_binding():
     with pytest.raises(ValueError, match="needs an evaluation_id"):
-        MidojoMCP("proxy", recorder=CapturingRecorder(), upstream_transport=object(), plan=(_instruction(),))
+        MidojoMCP(
+            "proxy",
+            recorder=CapturingRecorder(),
+            upstream_transport=object(),
+            plan=InjectionPlan((_instruction(),)),
+        )
+
+
+def test_midojo_mcp_requires_an_exact_plan_and_an_upstream_to_deliver_it():
+    with pytest.raises(TypeError, match="plan must be an InjectionPlan"):
+        MidojoMCP(
+            "proxy",
+            recorder=CapturingRecorder(),
+            upstream_transport=object(),
+            plan=(_instruction(),),  # type: ignore[arg-type]
+        )
+    with pytest.raises(CapabilityError) as raised:
+        MidojoMCP(
+            "proxy",
+            recorder=CapturingRecorder(),
+            plan=InjectionPlan((_instruction(),)),
+            evaluation_id="evaluation-1",
+        )
+    assert [(gap.aspect, gap.value) for gap in raised.value.gaps] == [("delivery", "mirrored_upstream")]
+
+
+@pytest.mark.parametrize("target_tool", ["simulated", None], ids=["named", "all-tools"])
+def test_simulated_tools_reject_instructions_that_would_match_them(target_tool):
+    instruction = _instruction(target=InjectionTarget(tool=target_tool))
+    mcp = MidojoMCP(
+        "proxy",
+        recorder=CapturingRecorder(),
+        upstream_transport=object(),
+        plan=InjectionPlan((instruction,)),
+        evaluation_id="evaluation-1",
+    )
+
+    async def simulated(ctx: ToolContext) -> str:
+        return "result"
+
+    with pytest.raises(CapabilityError) as raised:
+        mcp.tool()(simulated)
+    assert [(gap.aspect, gap.value) for gap in raised.value.gaps] == [("delivery", "simulated_tool:simulated")]
+
+
+@pytest.mark.asyncio
+async def test_a_compiled_suite_plan_can_select_the_part_midojo_mcp_delivers():
+    suite = get_suite("weather")
+    probes = suite.get_probes_for_task("tornado_alert_via_prompt")
+    episode = suite.episode("weather_new_york", "tornado_alert_via_prompt", probes)
+    plan = episode.plan.for_channels(Channel.TOOL_OUTPUT)
+    mcp = MidojoMCP("proxy", recorder=CapturingRecorder(), upstream_transport=ScriptedMCP().transport, plan=plan)
+
+    assert plan.instructions == ()
+    assert await mcp.mirror_upstream()
 
 
 @pytest.mark.asyncio
