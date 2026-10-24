@@ -88,6 +88,8 @@ Port 8090 matches the sandbox's access policy. The server listens on all interfa
 
 When the agent has replied, MiDojo closes the evaluation before grading it: it stops admitting new tool calls, lets calls already under way finish for up to 5 seconds (`midojo-serve --closure-wait SECONDS` changes this), collects the sandbox evidence, and then seals what it recorded. Grading reads only the sealed record. A tool call or other write that arrives too late is kept separately as a late fact, and marks the evidence it carries `incomplete` instead of changing the record (see [Closure and late facts](interception/README.md#closure-and-late-facts)).
 
+By default a tool call's record doesn't copy the environment. `midojo-serve --environment-history` keeps, on each record, the environment as it was when the call started and when it finished: what changed while the call ran, not necessarily what the call did (see [Started and unfinished calls](interception/README.md#started-and-unfinished-calls)).
+
 Anything that can reach the server can read and change its runs. To require a token on every route except the agent's callbacks and `/health`, add `MIDOJO_CONTROL_TOKEN=<a random secret>` to `.env`: `midojo-serve` and `midojo-run` both read it (or pass `--control-token`), and `midojo-run` never hands it to the agent.
 
 ### 2. Run a red-team test
