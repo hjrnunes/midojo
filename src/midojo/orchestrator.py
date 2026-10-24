@@ -25,8 +25,9 @@ from midojo.agent_client import (
     PIAgentClient,
     SimpleHTTPAgentClient,
 )
-from midojo.control_plane.client import ControlPlaneClient
+from midojo.control_plane.client import ControlClient, ControlPlaneClient
 from midojo.control_plane.config import CONTROL_TOKEN_ENV
+from midojo.control_plane.lifecycle import RejectedError
 from midojo.control_plane.models import GradeResponse
 from midojo.episode import Episode
 from midojo.reachability import UNKNOWN as UNKNOWN_REACHABILITY
@@ -37,6 +38,10 @@ from midojo.suites import get_suite, list_suites
 from midojo.yaml_task_suite import YAMLTaskSuite
 
 console = Console()
+
+# What a control client raises when the control plane refuses a request or can't be reached: an
+# ``httpx`` error over HTTP, the control plane's own rejection in process.
+_CONTROL_ERRORS: tuple[type[Exception], ...] = (httpx.HTTPError, RejectedError)
 
 
 def _resolve_system_message(suite_name: str) -> str:
@@ -206,7 +211,7 @@ def _reachability_detail(report: Reachability) -> str:
 
 
 async def _injection_reachability(
-    control: ControlPlaneClient, run_id: str, eval_id: str, injections: dict[str, str]
+    control: ControlClient, run_id: str, eval_id: str, injections: dict[str, str]
 ) -> Reachability:
     """Search every turn's user message and the recorded tool results for the injection payloads.
 
@@ -214,7 +219,7 @@ async def _injection_reachability(
     """
     try:
         evaluation = await control.evaluation(run_id, eval_id)
-    except (httpx.HTTPError, ValueError):
+    except (*_CONTROL_ERRORS, ValueError):
         # ValueError covers a body that isn't JSON (JSONDecodeError, UnicodeDecodeError)
         # and one that doesn't match EvaluationResponse (pydantic's ValidationError).
         return UNKNOWN_REACHABILITY
@@ -245,7 +250,7 @@ def _check_turns_supported(
 
 
 async def run_task(
-    control: ControlPlaneClient,
+    control: ControlClient,
     agent_client: AgentClient,
     run_id: str,
     episode: Episode,
@@ -309,13 +314,13 @@ async def run_task(
         grade = await control.grade_evaluation(run_id, eval_id)
         return TaskResult(eval_id=eval_id, prompt=turns[0].message, agent_output=agent_output, grade=grade, turns=turns)
     except BaseException:
-        with contextlib.suppress(httpx.HTTPError):
+        with contextlib.suppress(*_CONTROL_ERRORS):
             await control.revoke_session(run_id, eval_id)
         raise
 
 
 async def _run_benchmark(
-    control: ControlPlaneClient,
+    control: ControlClient,
     control_url: str,
     agent_client: AgentClient,
     agent_uri: str,
@@ -446,16 +451,22 @@ async def run_benchmark(
     control_token: str | None = None,
     http: httpx.AsyncClient | None = None,
     runtime: AgentRuntime | None = None,
+    control: ControlClient | None = None,
 ) -> None:
     """Run the benchmark against the control plane at ``control_url``.
 
     ``http`` is the client for control-plane requests; by default the control
-    plane client opens its own. ``runtime`` runs the run's evaluations, one at
+    plane client opens its own. ``control`` replaces that client altogether,
+    such as an ``InProcessControlClient`` for a control plane in this process;
+    the caller keeps it open and closes it, and ``control_url`` only names the
+    evaluations in the output. ``runtime`` runs the run's evaluations, one at
     a time; by default it's a fresh one from the suite (``suite.new_runtime()``).
     """
     if runtime is None:
         runtime = suite.new_runtime()
-    async with ControlPlaneClient(control_url, token=control_token, http=http) as control:
+    async with contextlib.AsyncExitStack() as stack:
+        if control is None:
+            control = await stack.enter_async_context(ControlPlaneClient(control_url, token=control_token, http=http))
         await _run_benchmark(
             control,
             control_url,

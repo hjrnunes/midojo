@@ -1,8 +1,9 @@
 """The two implementations of the SDK's seams, for tests that run over both.
 
-``http`` reaches a control plane app through ``AgentControlPlaneClient`` over
-an in-memory ASGI transport. ``in-process`` calls the app's ``ControlPlane``
-through ``InProcessAgentClient``; every HTTP client it hands out fails the test
+``http`` reaches a control plane app through ``AgentControlPlaneClient`` (and
+the orchestrator's ``ControlPlaneClient``) over an in-memory ASGI transport.
+``in-process`` calls the app's ``ControlPlane`` through ``InProcessAgentClient``
+(and ``InProcessControlClient``); every HTTP client it hands out fails the test
 on any request, so an in-process run that sent one can't pass.
 """
 
@@ -16,7 +17,9 @@ from fastapi import FastAPI
 from midojo_sdk.client import AgentControlPlaneClient
 from midojo_sdk.mcp import MidojoMCP
 
+from midojo.control_plane.client import ControlClient, ControlPlaneClient
 from midojo.control_plane.inprocess import InProcessAgentClient
+from midojo.control_plane.inprocess_control import InProcessControlClient
 
 CONTROL_URL = "http://control"
 
@@ -54,6 +57,13 @@ class Backend:
         if self.in_process:
             return InProcessAgentClient(app.state.control, session_token)
         return AgentControlPlaneClient(CONTROL_URL, session_token, http=self.http(app))
+
+    def control(self, app: FastAPI | None = None) -> ControlClient:
+        """The orchestrator's control client for ``app``'s control plane."""
+        app = app or self.app
+        if self.in_process:
+            return InProcessControlClient(app.state.control)
+        return ControlPlaneClient(CONTROL_URL, http=self.http(app))
 
     def mcp(self, name: str, session_token: str, **kwargs: Any) -> MidojoMCP:
         """A ``MidojoMCP`` recording in the evaluation ``session_token`` is bound to.

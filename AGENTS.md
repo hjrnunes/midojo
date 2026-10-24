@@ -24,6 +24,8 @@ uv run pyright src/midojo/serve.py                    # type check single file
 
 The control plane (`src/midojo/control_plane/`) is a FastAPI server whose routes submit events to one writer per evaluation (see Evaluation lifecycle below). The orchestrator (`src/midojo/orchestrator.py`) drives benchmark runs via CLI. Suites define the scenarios; the attack library wraps payloads; verifiers check outcomes.
 
+The orchestrator drives the control plane through a `ControlClient` (`control_plane/client.py`): `ControlPlaneClient` over HTTP, or `InProcessControlClient` (`control_plane/inprocess_control.py`) in the control plane's own process, passed as `run_benchmark(control=...)`. The in-process client calls `ControlPlane` directly, with no HTTP request, and returns the same response models; a refusal raises the control plane's `RejectedError` instead of an `httpx` error.
+
 ```mermaid
 graph LR
     O[Orchestrator<br/><i>midojo-run CLI</i>] -->|creates eval, grades| CP

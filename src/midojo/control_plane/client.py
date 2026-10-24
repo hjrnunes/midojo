@@ -1,6 +1,8 @@
-"""HTTP client for the MiDojo control plane."""
+"""The orchestrator's control client: what it needs from a control plane, and the HTTP implementation."""
 
 from __future__ import annotations
+
+from typing import Protocol
 
 import httpx
 from pydantic import BaseModel
@@ -15,8 +17,48 @@ from midojo.control_plane.models import (
 )
 
 
+class ControlClient(Protocol):
+    """Drives runs and evaluations on one control plane, for the orchestrator.
+
+    :class:`ControlPlaneClient` implements it over HTTP, and
+    :class:`midojo.control_plane.inprocess_control.InProcessControlClient` in
+    the control plane's own process. Both return the same response models; a
+    failure raises an ``httpx`` error over HTTP, and the control plane's
+    ``RejectedError`` (or a ``LookupError`` or ``ValueError`` for a request
+    the routes would refuse as malformed) in process.
+    """
+
+    async def aclose(self) -> None: ...
+
+    async def create_run(self, suite_name: str) -> CreateRunResponse: ...
+
+    async def create_evaluation(
+        self,
+        run_id: str,
+        user_task_id: str,
+        injection_task_id: str | None,
+        injections: dict[str, str],
+    ) -> CreateEvaluationResponse: ...
+
+    async def start_turn(self, run_id: str, eval_id: str, message: str) -> TurnResponse: ...
+
+    async def record_turn_reply(self, run_id: str, eval_id: str, index: int, reply: str) -> TurnResponse: ...
+
+    async def close_evaluation(self, run_id: str, eval_id: str) -> CloseResponse: ...
+
+    async def complete_evaluation(self, run_id: str, eval_id: str, agent_output: str) -> None: ...
+
+    async def grade_evaluation(self, run_id: str, eval_id: str) -> GradeResponse: ...
+
+    async def evaluation(self, run_id: str, eval_id: str) -> EvaluationResponse: ...
+
+    async def record_observations(self, run_id: str, eval_id: str, source: str, observed: BaseModel) -> None: ...
+
+    async def revoke_session(self, run_id: str, eval_id: str) -> None: ...
+
+
 class ControlPlaneClient:
-    """Access orchestrator endpoints on one control plane."""
+    """Access orchestrator endpoints on one control plane, over HTTP."""
 
     def __init__(self, base_url: str, *, token: str | None = None, http: httpx.AsyncClient | None = None) -> None:
         self._base_url = base_url.rstrip("/")

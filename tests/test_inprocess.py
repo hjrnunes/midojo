@@ -1,27 +1,15 @@
-"""The in-process implementation of the SDK's seams makes no HTTP request, and the test backend proves it."""
+"""The in-process implementations of the SDK's seams and the control client make no HTTP request."""
 
-import httpx
 import pytest
 from midojo_sdk.mcp import MidojoMCP, ToolContext
 
 from midojo.control_plane.inprocess import InProcessAgentClient
+from midojo.control_plane.inprocess_control import InProcessControlClient
+from midojo.control_plane.lifecycle import RejectedError, Rejection
 from midojo.control_plane.service import BySession
+from midojo.runtimes.openshell import OpenShellObservations
 from tests.backends import Backend
 from tests.scripted_mcp import ScriptedMCP, wire_session
-
-
-@pytest.fixture
-def no_http(monkeypatch):
-    """Fail on any request any httpx client sends, synchronous or not."""
-
-    def refuse(self, request, *args, **kwargs):
-        pytest.fail(f"An HTTP request was sent: {request.method} {request.url}")
-
-    async def refuse_async(self, request, *args, **kwargs):
-        refuse(self, request)
-
-    monkeypatch.setattr(httpx.Client, "send", refuse)
-    monkeypatch.setattr(httpx.AsyncClient, "send", refuse_async)
 
 
 @pytest.mark.asyncio
@@ -64,3 +52,30 @@ async def test_the_in_process_backend_fails_on_any_http_request(app, monkeypatch
     assert [request.url.path for request in backend.forbidden_requests] == ["/agent/environment"]
     with pytest.raises(AssertionError, match="sent HTTP requests"):
         await backend.aclose()
+
+
+@pytest.mark.asyncio
+async def test_the_in_process_control_client_refuses_as_the_routes_do(app, no_http):
+    control = InProcessControlClient(app.state.control)
+    with pytest.raises(LookupError, match="Unknown suite"):
+        await control.create_run("nope")
+    with pytest.raises(RejectedError) as unknown:
+        await control.create_evaluation("no-run", "weather_new_york", None, {})
+    assert unknown.value.kind is Rejection.UNKNOWN_RUN
+    run = await control.create_run("weather")
+    with pytest.raises(RejectedError) as unknown_task:
+        await control.create_evaluation(run.id, "no-task", None, {})
+    assert unknown_task.value.kind is Rejection.UNKNOWN_TASK
+    created = await control.create_evaluation(run.id, "weather_new_york", None, {})
+    with pytest.raises(RejectedError) as not_sealed:
+        await control.grade_evaluation(run.id, created.id)
+    assert not_sealed.value.kind is Rejection.NOT_SEALED
+    with pytest.raises(ValueError, match="Unknown observation source"):
+        await control.record_observations(run.id, created.id, "nope", OpenShellObservations())
+
+    await control.record_observations(run.id, created.id, "openshell", OpenShellObservations())
+    await control.complete_evaluation(run.id, created.id, "72°F")
+    grade = await control.grade_evaluation(run.id, created.id)
+    evaluation = await control.evaluation(run.id, created.id)
+    assert (evaluation.stage, evaluation.graded, evaluation.utility) == ("sealed", True, grade.utility)
+    assert evaluation.observations == {"openshell": OpenShellObservations().model_dump(mode="json")}

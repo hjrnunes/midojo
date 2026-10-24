@@ -101,6 +101,11 @@ async def create_evaluation(
     status_code=status.HTTP_200_OK,
 )
 async def retrieve_evaluation(evaluation: Annotated[Evaluation, Depends(get_evaluation_by_id)]):
+    return evaluation_response(evaluation)
+
+
+def evaluation_response(evaluation: Evaluation) -> EvaluationResponse:
+    """The evaluation as ``GET /runs/{run_id}/evaluations/{eval_id}`` returns it."""
     grade = evaluation.grade
     return EvaluationResponse(
         id=evaluation.id,
@@ -147,7 +152,11 @@ async def close_evaluation(
     Idempotent: closing again waits for what is left of the same closure wait,
     or returns at once when it's over.
     """
-    evaluation = await control.close(run.id, eval_id)
+    return close_response(await control.close(run.id, eval_id))
+
+
+def close_response(evaluation: Evaluation) -> CloseResponse:
+    """The closed evaluation as ``POST .../close`` returns it."""
     return CloseResponse(
         stage=evaluation.stage.value,
         unfinished_calls=[call.call_id for call in evaluation.function_calls if not call.complete],
