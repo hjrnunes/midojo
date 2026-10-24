@@ -19,6 +19,8 @@ holds the ``ControlPlane`` is the host.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from pydantic import BaseModel
 
 from midojo.observations import observation_type
@@ -40,6 +42,9 @@ from .models import (
 )
 from .routers.runs import close_response, evaluation_response
 from .service import ById, ControlPlane
+
+if TYPE_CHECKING:
+    from midojo_sdk.recorder import Recorder
 
 
 class InProcessControlClient:
@@ -114,3 +119,9 @@ class InProcessControlClient:
 
     async def revoke_session(self, run_id: str, eval_id: str) -> None:
         self._control.close_session(run_id, eval_id)
+
+    def recorder(self, session_token: str) -> Recorder:
+        """The session's recorder in this process: no HTTP request, the same single writer."""
+        from .inprocess import InProcessAgentClient
+
+        return InProcessAgentClient(self._control, session_token)
