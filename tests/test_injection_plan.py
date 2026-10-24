@@ -27,6 +27,7 @@ from midojo_sdk.injection import (
     instruction_from_generator_for_plan,
 )
 from midojo_sdk.mcp import MidojoMCP, ToolContext
+from midojo_sdk.recorder import Disposition
 
 from midojo.episode import Episode
 from midojo.suites import get_suite
@@ -100,6 +101,7 @@ async def test_size_limit_reports_without_relocating_payload():
     assert _texts(result) == ["result 1"]
     [outcome] = mcp.injection_outcomes
     assert outcome.status is OutcomeStatus.TOO_LARGE
+    assert outcome.scope == "evaluation-1"
     assert outcome.call_id == recorder.starts[0]["call_id"] == recorder.finishes[0]["call_id"]
 
 
@@ -325,6 +327,46 @@ async def test_concurrent_matches_are_counted_in_admission_order():
 
 
 @pytest.mark.asyncio
+async def test_admission_order_follows_start_completion_not_start_arrival():
+    class ReorderingRecorder(CapturingRecorder):
+        def __init__(self) -> None:
+            super().__init__()
+            self.first_arrived = asyncio.Event()
+            self.release_first = asyncio.Event()
+
+        async def start_call(
+            self, *, call_id: str, function: str, args: dict[str, Any], disposition: Disposition
+        ) -> None:
+            await super().start_call(call_id=call_id, function=function, args=args, disposition=disposition)
+            if args["number"] == 1:
+                self.first_arrived.set()
+                await self.release_first.wait()
+
+    plan = InjectionPlan((_instruction(occurrence=OccurrenceRule(Occurrence.FIRST)),))
+    mcp, upstream, _ = _mcp(plan)
+    recorder = ReorderingRecorder()
+    mcp._recorder = recorder
+    first = asyncio.create_task(mcp._forward_call("lookup", {"number": 1}))
+    await recorder.first_arrived.wait()
+    second = asyncio.create_task(mcp._forward_call("lookup", {"number": 2}))
+    await upstream.arrived[2].wait()
+    recorder.release_first.set()
+    await upstream.arrived[1].wait()
+    upstream.release[1].set()
+    upstream.release[2].set()
+
+    first_result, second_result = await asyncio.gather(first, second)
+
+    assert [start["args"]["number"] for start in recorder.starts] == [1, 2]
+    assert _texts(_wire_result(first_result)) == ["result 1"]
+    assert _texts(_wire_result(second_result)) == ["result 2 INJECTED"]
+    assert [(item.tool, item.admission_order, item.occurrence) for item in mcp.injection_outcomes] == [
+        ("lookup", 1, 1),
+        ("lookup", 2, 2),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_injected_recorders_use_one_counter_scope_per_bound_evaluation():
     plan = InjectionPlan((_instruction(occurrence=OccurrenceRule(Occurrence.FIRST)),))
     first_mcp, first_upstream, _ = _mcp(plan, evaluation_id="evaluation-1")
@@ -355,6 +397,19 @@ async def test_blocked_calls_are_not_admitted_for_injection():
 
 
 @pytest.mark.asyncio
+async def test_denied_calls_are_not_admitted_for_injection():
+    plan = InjectionPlan((_instruction(occurrence=OccurrenceRule(Occurrence.FIRST)),))
+    mcp, upstream, recorder = _mcp(plan)
+    mcp.deny("lookup")(lambda _args: "not allowed")
+    with pytest.raises(ToolError, match="not allowed"):
+        await mcp._forward_call("lookup", {"number": 1})
+    assert not upstream.arrived[1].is_set()
+    assert mcp.injection_outcomes == ()
+    assert recorder.starts == []
+    assert [finish["disposition"] for finish in recorder.finishes] == ["denied"]
+
+
+@pytest.mark.asyncio
 async def test_upstream_errors_consume_the_occurrence_and_name_the_recorded_call():
     class FailingUpstream:
         async def call_tool_mcp(self, name: str, args: dict[str, Any]) -> CallToolResult:
@@ -366,7 +421,7 @@ async def test_upstream_errors_consume_the_occurrence_and_name_the_recorded_call
     with pytest.raises(RuntimeError, match="upstream failed"):
         await mcp._forward_call("lookup", {"number": 1})
     [outcome] = mcp.injection_outcomes
-    assert (outcome.status, outcome.occurrence, outcome.admission_order) == (OutcomeStatus.UNMATCHED, 1, 1)
+    assert (outcome.status, outcome.occurrence, outcome.admission_order) == (OutcomeStatus.NO_RESULT, 1, 1)
     assert outcome.call_id == recorder.starts[0]["call_id"] == recorder.finishes[0]["call_id"]
     assert recorder.finishes[0]["disposition"] == "forwarded"
 
@@ -381,7 +436,7 @@ async def test_cancelled_calls_consume_the_occurrence_and_leave_the_record_unfin
     with pytest.raises(asyncio.CancelledError):
         await call
     [outcome] = mcp.injection_outcomes
-    assert (outcome.status, outcome.occurrence, outcome.admission_order) == (OutcomeStatus.UNMATCHED, 1, 1)
+    assert (outcome.status, outcome.occurrence, outcome.admission_order) == (OutcomeStatus.NO_RESULT, 1, 1)
     assert outcome.call_id == recorder.starts[0]["call_id"]
     assert recorder.finishes == []
 

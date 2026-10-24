@@ -57,6 +57,7 @@ class OutcomeStatus(enum.StrEnum):
     APPLIED = "applied"
     FALLBACK = "fallback"
     UNMATCHED = "unmatched"
+    NO_RESULT = "no_result"
     TOO_LARGE = "too_large"
     SKIPPED_OCCURRENCE = "skipped_occurrence"
 
@@ -282,6 +283,7 @@ class CapabilityError(ValueError):
 class InjectionOutcome:
     instruction_index: int
     probe_key: str | None
+    scope: str
     call_id: str
     tool: str
     occurrence: int

@@ -77,7 +77,7 @@ MIDOJO_MCP_CAPABILITY = InterceptorCapability(
 )
 """Placements the MCP forwarding interceptor implements for mirrored tool results without degradation."""
 
-type _AdmittedInstruction = tuple[int, InjectionInstruction, int, int]
+type _AdmittedInstruction = tuple[str, int, InjectionInstruction, int, int]
 
 
 class UpstreamClient:
@@ -455,7 +455,7 @@ class MidojoMCP:
         )
         raise ToolError(reason)
 
-    def _evaluation_scope(self) -> object:
+    def _evaluation_scope(self) -> str:
         """The bound evaluation or the incoming session: one counter scope."""
         if self._recorder is not None:
             assert self._evaluation_id is not None  # A non-empty plan requires it.
@@ -463,7 +463,7 @@ class MidojoMCP:
         incoming = get_http_headers().get(SESSION_HEADER.lower())
         return session_token(incoming)
 
-    async def _admit_injections(self, scope: object, call_id: str, name: str) -> list[_AdmittedInstruction]:
+    async def _admit_injections(self, scope: str, call_id: str, name: str) -> list[_AdmittedInstruction]:
         """Number matches under a lock before forwarding; that is admission order."""
         admitted: list[_AdmittedInstruction] = []
         async with self._plan_lock:
@@ -476,10 +476,11 @@ class MidojoMCP:
                 counts[index] += 1
                 occurrence = counts[index]
                 if instruction.occurrence.selects(occurrence):
-                    admitted.append((index, instruction, occurrence, order))
+                    admitted.append((scope, index, instruction, occurrence, order))
                 else:
                     self._outcomes.append(
                         _outcome(
+                            scope,
                             index,
                             instruction,
                             call_id,
@@ -493,16 +494,17 @@ class MidojoMCP:
         return admitted
 
     def _report_no_result(self, call_id: str, name: str, admitted: Sequence[_AdmittedInstruction]) -> None:
-        for index, instruction, occurrence, order in admitted:
+        for scope, index, instruction, occurrence, order in admitted:
             self._outcomes.append(
                 _outcome(
+                    scope,
                     index,
                     instruction,
                     call_id,
                     name,
                     occurrence,
                     order,
-                    OutcomeStatus.UNMATCHED,
+                    OutcomeStatus.NO_RESULT,
                     "upstream produced no tool result",
                 )
             )
@@ -571,9 +573,9 @@ class MidojoMCP:
             # but this admitted call still consumed its occurrence.
             self._report_no_result(call_id, name, admitted)
             raise
-        for index, instruction, occurrence, order in admitted:
+        for scope, index, instruction, occurrence, order in admitted:
             result, status, detail = _inject_result(result, instruction)
-            self._outcomes.append(_outcome(index, instruction, call_id, name, occurrence, order, status, detail))
+            self._outcomes.append(_outcome(scope, index, instruction, call_id, name, occurrence, order, status, detail))
         seen = _text(result.content)
         await recorder.finish_call(
             call_id=call_id,
@@ -690,6 +692,7 @@ def _inject_result(
 
 
 def _outcome(
+    scope: str,
     index: int,
     instruction: InjectionInstruction,
     call_id: str,
@@ -699,4 +702,14 @@ def _outcome(
     status: OutcomeStatus,
     detail: str,
 ) -> InjectionOutcome:
-    return InjectionOutcome(index, instruction.probe_key, call_id, tool, occurrence, admission_order, status, detail)
+    return InjectionOutcome(
+        instruction_index=index,
+        probe_key=instruction.probe_key,
+        scope=scope,
+        call_id=call_id,
+        tool=tool,
+        occurrence=occurrence,
+        admission_order=admission_order,
+        status=status,
+        detail=detail,
+    )
