@@ -26,7 +26,7 @@ from midojo.control_plane.service import ControlPlane
 from midojo.episode import Episode
 from midojo.episode_context import AgentBinding, open_episode
 from midojo.interception_host import HostInterception
-from midojo.runtimes import UnmanagedRuntime
+from midojo.runtimes import ResettableRuntime, UnmanagedRuntime
 from midojo.tool_endpoint import ToolEndpoint
 from tests.fixtures.scripted_target.upstream import scripted_upstream
 
@@ -296,3 +296,34 @@ async def test_a_snapshot_from_an_http_control_plane_grades_as_that_control_plan
     # No control plane from here on: the episode and the snapshot are all grading reads.
     del app, control
     assert midojo.grade(episode, ep.sealed).grade == served
+
+
+# --- reset: a declared capability, never implicit ---
+
+
+class ResettingRuntime(RecordingRuntime):
+    """A runtime that declares it can reset its target."""
+
+    def reset(self) -> None:
+        self.steps.append("reset")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "runtime_type,asked,outcome,steps",
+    [
+        (ResettingRuntime, True, "reset", ["reset", "setup", "observe", "teardown"]),
+        (ResettingRuntime, False, "not_requested", ["setup", "observe", "teardown"]),
+        (RecordingRuntime, True, "unsupported", ["setup", "observe", "teardown"]),
+        (RecordingRuntime, False, "not_requested", ["setup", "observe", "teardown"]),
+    ],
+)
+async def test_a_target_is_reset_only_when_asked_and_declared_and_the_result_says_which(
+    runtime_type, asked, outcome, steps
+):
+    runtime = runtime_type()
+    assert isinstance(runtime, ResettableRuntime) == (runtime_type is ResettingRuntime)
+    async with open_episode(weather_episode(), runtime=runtime, reset=asked) as ep:
+        await ep.turn("hi", _reply("rain"))
+    assert runtime.steps == steps
+    assert ep.result.reset == outcome

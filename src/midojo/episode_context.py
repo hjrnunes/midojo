@@ -41,7 +41,7 @@ from midojo_sdk.injection import Channel, InjectionOutcome
 from midojo.control_plane.client import ControlClient
 from midojo.control_plane.state import Snapshot
 from midojo.episode import DEFAULT_EPISODE_NAME, Episode
-from midojo.runtimes import AgentRuntime
+from midojo.runtimes import AgentRuntime, ResettableRuntime
 from midojo.tool_endpoint import ToolEndpoint
 from midojo.types import InterceptionMode
 
@@ -52,7 +52,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # The steps a context takes around the host's turns, in order, for a caller that shows progress.
-EpisodeStep = Literal["start_run", "interceptor", "setup", "close", "observe", "teardown", "end_run"]
+EpisodeStep = Literal["start_run", "reset", "interceptor", "setup", "close", "observe", "teardown", "end_run"]
+
+# Whether the target was reset before the episode: ``reset`` (asked, and the runtime declares the capability),
+# ``not_requested``, or ``unsupported`` (asked, but the runtime declares no reset: the target was not reset, and
+# may hold what earlier episodes left).
+ResetOutcome = Literal["reset", "not_requested", "unsupported"]
 
 
 @dataclass(frozen=True)
@@ -88,11 +93,13 @@ class EpisodeResult:
     """What one run of an episode left: its sealed snapshot, and the host-side facts about the run.
 
     ``injection_outcomes`` are the host interceptor's outcomes for the plan's
-    tool-output placements (empty in in-agent mode).
+    tool-output placements (empty in in-agent mode). ``reset`` says whether the
+    target was reset before the episode (see :data:`ResetOutcome`).
     """
 
     snapshot: Snapshot
     interception: InterceptionMode
+    reset: ResetOutcome = "not_requested"
     injection_outcomes: tuple[InjectionOutcome, ...] = ()
 
     @property
@@ -119,6 +126,7 @@ class EpisodeContext:
         interception: HostInterception | None = None,
         control: ControlPlane | ControlClient | None = None,
         run_id: str | None = None,
+        reset: bool = False,
         progress: Callable[[EpisodeStep], AbstractContextManager[object]] | None = None,
     ) -> None:
         self.episode = episode
@@ -128,6 +136,8 @@ class EpisodeContext:
         self.interception = interception
         self.run_id = run_id
         self._control_given = control
+        self._reset_requested = reset
+        self.reset_outcome: ResetOutcome = "not_requested"
         self._progress = progress or _no_progress
         self._entered = False
         self._run_started = False
@@ -175,6 +185,7 @@ class EpisodeContext:
         return EpisodeResult(
             snapshot=self.sealed,
             interception="host" if self.interception is not None else "agent",
+            reset=self.reset_outcome,
             injection_outcomes=interceptor.injection_outcomes if interceptor is not None else (),
         )
 
@@ -210,6 +221,14 @@ class EpisodeContext:
                 run_name = self.run_id or f"episode-{uuid.uuid4().hex[:12]}"
                 suite_name = episode.suite_name or DEFAULT_EPISODE_NAME
                 await asyncio.to_thread(runtime.start_run, run_name, suite_name=suite_name)
+        if self._reset_requested:
+            # Only a declared capability: an external target is never reset behind its owner's back.
+            if isinstance(runtime, ResettableRuntime):
+                with self._progress("reset"):
+                    await asyncio.to_thread(runtime.reset)
+                self.reset_outcome = "reset"
+            else:
+                self.reset_outcome = "unsupported"
         await self._open()
         assert self._session_token is not None
         if self.interception is not None:
@@ -357,6 +376,7 @@ def open_episode(
     interception: HostInterception | None = None,
     control: ControlPlane | ControlClient | None = None,
     run_id: str | None = None,
+    reset: bool = False,
     progress: Callable[[EpisodeStep], AbstractContextManager[object]] | None = None,
 ) -> EpisodeContext:
     """A context that runs ``episode`` once, and seals its evaluation when it's left.
@@ -383,9 +403,21 @@ def open_episode(
     suite, so the episode must name its ``user_task_id``. Without ``run_id``
     the episode is opened as is, outside any run.
 
+    ``reset`` asks for the target to be reset before the episode. Reset is a
+    capability the runtime declares (:class:`~midojo.runtimes.ResettableRuntime`):
+    without it nothing is reset, and the result says so (``reset`` is
+    ``unsupported``). The context never resets a target unasked; a caller that
+    needs a clean start without the capability uses a disposable runtime.
+
     ``progress``, called with each :data:`EpisodeStep`, returns a context
     manager held around that step (a spinner, say).
     """
     return EpisodeContext(
-        episode, runtime=runtime, interception=interception, control=control, run_id=run_id, progress=progress
+        episode,
+        runtime=runtime,
+        interception=interception,
+        control=control,
+        run_id=run_id,
+        reset=reset,
+        progress=progress,
     )

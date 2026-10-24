@@ -22,7 +22,7 @@ in host mode, only the tool endpoint of the interceptor the host runs
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from pydantic import BaseModel
 
@@ -68,6 +68,22 @@ class AgentRuntime(Protocol):
 
     def end_run(self) -> None:
         """Release the run's resources."""
+        ...
+
+
+@runtime_checkable
+class ResettableRuntime(Protocol):
+    """A runtime that can return its target to the initial state: a capability it declares by implementing ``reset``.
+
+    Nothing resets a target implicitly: the episode context calls ``reset``
+    only when its caller asks (``open_episode(..., reset=True)``) and the
+    runtime declares it, before the evaluation's ``setup``. Neither built-in
+    runtime declares it: an OpenShell sandbox is new for each evaluation, but
+    what the agent changed outside it (a remote account, say) isn't undone.
+    """
+
+    def reset(self) -> None:
+        """Return the target to its initial state, before an episode."""
         ...
 
 
