@@ -19,8 +19,12 @@ from langgraph.prebuilt import ToolNode
 from langgraph.types import Command
 from midojo_sdk import recorder as sdk_recorder
 from midojo_sdk.langchain import BLOCKED_REASON, MidojoMiddleware, ToolContext
+from midojo_sdk.recorder import ControlPlaneRejectedError, RejectionKind
 from midojo_sdk.session import MissingSessionError, session_context
 from pydantic import Field
+
+from midojo.control_plane.inprocess import InProcessAgentClient
+from midojo.control_plane.service import BySession
 
 
 def new_evaluation(client):
@@ -439,3 +443,156 @@ async def test_a_cancelled_call_stays_unfinished(client, session, midojo, interc
 
     [call] = function_calls(client, run, evaluation)
     assert (call["function"], call["complete"], call["result"]) == ("get_forecast", False, None)
+
+
+@pytest.mark.asyncio
+async def test_the_middleware_records_and_simulates_through_the_in_process_client(app, no_http):
+    control = app.state.control
+    created = control.create_evaluation(control.create_run("weather").id, "weather_new_york")
+    agent = InProcessAgentClient(control, created.session_token)
+    midojo = MidojoMiddleware(recorder=agent, world=agent)
+    emails_sent.clear()
+    midojo.block("send_email")
+
+    @midojo.hook("get_weather")
+    async def add_alert(ctx: ToolContext, args: dict, real_result: str) -> str:
+        revision, environment = await ctx.read()
+        alerts = [*environment["weather_alerts"], {"city": args["city"], "message": "storm"}]
+        assert await ctx.env_update("weather_alerts", alerts, expected_revision=revision)
+        return f"{real_result} (storm warning)"
+
+    weather, _ = await call_tool(midojo, [get_weather, send_email], "get_weather", {"city": "Boston"})
+    blocked, _ = await call_tool(midojo, [get_weather, send_email], "send_email", {"to": "eve", "body": "hi"})
+
+    assert weather.content == "Boston: sunny (storm warning)"
+    assert (blocked.status, blocked.content, emails_sent) == ("error", BLOCKED_REASON, [])
+    evaluation = control.evaluation(BySession(created.session_token))
+    assert [(c.function, c.disposition, c.blocked, c.complete) for c in evaluation.function_calls] == [
+        ("get_weather", "forwarded", False, True),
+        ("send_email", "blocked", True, True),
+    ]
+    assert evaluation.environment.model_dump()["weather_alerts"] == [{"city": "Boston", "message": "storm"}]
+
+
+def counting_control_http(app, sent: list[str], *, failing_path: str | None = None) -> httpx.AsyncClient:
+    """An httpx client for the control plane that notes each request's path, and never delivers ``failing_path``."""
+    control = httpx.ASGITransport(app)
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        sent.append(request.url.path)
+        if request.url.path == failing_path:
+            raise httpx.ConnectError("control plane unreachable")
+        return await control.handle_async_request(request)
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handle))
+
+
+@pytest.mark.asyncio
+async def test_a_refused_start_is_sent_once_and_answers_the_agent_with_the_refusal(app, client, session):
+    run, evaluation = session
+    emails_sent.clear()
+    assert client.post(f"/runs/{run['id']}/evaluations/{evaluation['id']}/close").status_code == 200
+    sent: list[str] = []
+    async with counting_control_http(app, sent) as http:
+        midojo = MidojoMiddleware(control_plane_url="http://control", http=http)
+        midojo.report("send_email")
+
+        message, _ = await call_tool(midojo, [send_email], "send_email", {"to": "eve@example.com", "body": "hi"})
+
+    assert sent == ["/agent/function-calls/start"]  # a refusal is never resent
+    assert message.status == "error"
+    assert message.text.startswith("closing: ")
+    assert emails_sent == []  # the tool never ran
+    late = client.get(f"/runs/{run['id']}/evaluations/{evaluation['id']}").json()["late_facts"]
+    assert len(late) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_transport_failure_is_resent_then_stops_the_agent_run(app, client, session, monkeypatch):
+    run, evaluation = session
+    monkeypatch.setattr(sdk_recorder, "RECORD_BACKOFF_SECONDS", 0)
+    emails_sent.clear()
+    sent: list[str] = []
+    async with counting_control_http(app, sent, failing_path="/agent/function-calls/start") as http:
+        midojo = MidojoMiddleware(control_plane_url="http://control", http=http)
+        midojo.report("send_email")
+
+        with pytest.raises(httpx.ConnectError):
+            await call_tool(midojo, [send_email], "send_email", {"to": "eve@example.com", "body": "hi"})
+
+    assert sent == ["/agent/function-calls/start"] * sdk_recorder.RECORD_ATTEMPTS
+    assert emails_sent == []
+    assert function_calls(client, run, evaluation) == []
+
+
+class RefusingFinish:
+    """A recorder that starts calls and refuses every finish, as a control plane past its closure wait does."""
+
+    def __init__(self) -> None:
+        self.finishes = 0
+
+    async def start_call(self, **kwargs) -> None:
+        pass
+
+    async def finish_call(self, **kwargs) -> None:
+        self.finishes += 1
+        raise ControlPlaneRejectedError(RejectionKind.CLOSING, "Evaluation is closing", late_fact=True)
+
+
+@pytest.mark.asyncio
+async def test_a_refused_finish_answers_the_agent_with_the_refusal_after_the_tool_ran():
+    recorder = RefusingFinish()
+    midojo = MidojoMiddleware(recorder=recorder)
+    emails_sent.clear()
+    midojo.report("send_email")
+
+    message, _ = await call_tool(midojo, [send_email], "send_email", {"to": "eve@example.com", "body": "hi"})
+
+    assert emails_sent == ["eve@example.com"]
+    assert (message.status, message.content) == ("error", "closing: Evaluation is closing")
+    assert recorder.finishes == 1
+
+
+@pytest.mark.asyncio
+async def test_a_tool_error_is_raised_even_when_its_finish_is_refused():
+    @tool
+    def explode(city: str) -> str:
+        """Fail."""
+        raise RuntimeError("tool exploded")
+
+    midojo = MidojoMiddleware(recorder=RefusingFinish())
+    midojo.report("explode")
+
+    with pytest.raises(RuntimeError, match="tool exploded"):
+        await call_tool(midojo, [explode], "explode", {"city": "Boston"})
+
+
+def test_the_middleware_needs_a_control_plane_or_a_recorder():
+    with pytest.raises(ValueError, match="control_plane_url or a recorder"):
+        MidojoMiddleware()
+
+
+def test_the_middleware_opens_one_http_client_per_event_loop(client, control_url, monkeypatch):
+    opened = []
+    client_class = httpx.AsyncClient
+
+    def open_client(*args, **kwargs):
+        opened.append(client_class(*args, **kwargs))
+        return opened[-1]
+
+    monkeypatch.setattr(httpx, "AsyncClient", open_client)
+    midojo = MidojoMiddleware(control_plane_url=control_url)
+    midojo.report("get_weather")
+    run, evaluation = new_evaluation(client)
+
+    async def two_calls():
+        await call_tool(midojo, [get_weather], "get_weather", {"city": "Boston"})
+        await call_tool(midojo, [get_weather], "get_weather", {"city": "Lisbon"})
+        await midojo.aclose()
+
+    with session_context(evaluation["session_token"]):
+        asyncio.run(two_calls())
+        assert len(opened) == 1 and opened[0].is_closed
+        asyncio.run(two_calls())
+    assert len(opened) == 2
+    assert len(function_calls(client, run, evaluation)) == 4
