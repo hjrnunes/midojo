@@ -48,7 +48,7 @@ from midojo_sdk.injection import (
     Transformation,
     capability_gaps,
 )
-from midojo_sdk.recorder import Disposition, Recorder, RetryingRecorder, WorldState
+from midojo_sdk.recorder import Disposition, Recorder, RetryingRecorder, WorldState, reporting
 from midojo_sdk.session import SESSION_HEADER, session_token
 
 __all__ = ["BLOCKED_REASON", "MIDOJO_MCP_CAPABILITY", "MidojoMCP", "ToolContext", "UpstreamClient"]
@@ -223,9 +223,13 @@ class MidojoMCP:
     requests of one connection, so it isn't unique per evaluation. When the
     start fails the tool doesn't run; when the finish never reaches the
     control plane, the call stays there as unfinished. A refused call never
-    runs, so it's recorded once. A record, a simulated tool's environment
-    changes and a forwarded call's effect on the real tool's system are
-    separate: none of them waits for or undoes another.
+    runs, so it's recorded once. A start or finish that fails for good
+    (after its resends, or refused other than as a late fact) is reported as
+    a capture failure, which marks the evaluation's ``function_calls``
+    incomplete (see ``ReportingRecorder``), and its error is raised as
+    before. A record, a simulated tool's environment changes and a forwarded
+    call's effect on the real tool's system are separate: none of them waits
+    for or undoes another.
 
     ``recorder`` records every call, with its disposition, and ``world`` is the
     environment simulated tools get through their ``ToolContext``. Without
@@ -354,7 +358,7 @@ class MidojoMCP:
         return AgentControlPlaneClient(self._control_plane_url, session_token(incoming), http=self._http)
 
     def _bindings(self, *, world: bool) -> tuple[Recorder, WorldState | None]:
-        """The recorder for the request being handled, and its environment when ``world`` asks for one."""
+        """The recorder for the request being handled, reporting the records it loses, and its environment."""
         client = None
         if self._recorder is None or (world and self._world is None and self._control_plane_url is not None):
             client = self._session_client()
@@ -362,6 +366,7 @@ class MidojoMCP:
         if recorder is None:
             assert client is not None
             recorder = RetryingRecorder(client, retryable=transient)
+        recorder = reporting(recorder)
         if not world:
             return recorder, None
         return recorder, self._world or client

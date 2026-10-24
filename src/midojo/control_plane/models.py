@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny
 
@@ -185,6 +185,45 @@ class CloseResponse(BaseModel):
     )
 
 
+CapturePhase = Literal["start", "finish"]
+"""Which record of a call an interception layer couldn't deliver."""
+
+CAPTURE_REASON_MAX_LENGTH = 2048
+
+
+class ReportCaptureFailureRequest(BaseModel):
+    """Request body for reporting a call record the interception layer couldn't deliver, after its resends."""
+
+    call_id: str = Field(
+        min_length=1,
+        max_length=CALL_ID_MAX_LENGTH,
+        description=(
+            "The call_id of the record that was lost. Reporting the same call_id, function and phase again, "
+            "with any reason, returns the stored report (a 200) instead of keeping another, when it was kept "
+            "before the seal. One first received after the seal is only a late fact, and stays refused."
+        ),
+    )
+    function: str
+    phase: CapturePhase = Field(
+        description="start: the call's start was lost, so the call may be missing. finish: its finish was lost."
+    )
+    reason: str = Field(default="", max_length=CAPTURE_REASON_MAX_LENGTH, description="The last error the layer got.")
+
+
+class CaptureFailureResponse(BaseModel):
+    """A call record the interception layer couldn't deliver. It marks function_calls incomplete."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    call_id: str
+    function: str
+    phase: CapturePhase
+    reason: str
+    stage: str = Field(description="The evaluation's stage when the report arrived.")
+    by: str = Field(description="agent (an /agent route) or host.")
+    at: str
+
+
 class LateFactResponse(BaseModel):
     """A write that closure refused. It never changes the evaluation's records; it marks their evidence incomplete."""
 
@@ -192,8 +231,8 @@ class LateFactResponse(BaseModel):
 
     event: str = Field(
         description=(
-            "What was refused: start_call, finish_call, replace_environment, change_environment, "
-            "record_observations, start_turn, reply_turn or seal."
+            "What was refused: start_call, finish_call, report_capture_failure, replace_environment, "
+            "change_environment, record_observations, start_turn, reply_turn or seal."
         )
     )
     stage: str = Field(description="The evaluation's stage when it arrived.")
@@ -292,6 +331,13 @@ class EvaluationResponse(BaseModel):
         description=(
             "Writes that closure refused, in arrival order. They never change the records above; each marks the "
             "evidence it carries incomplete in evidence_status."
+        ),
+    )
+    capture_failures: list[CaptureFailureResponse] = Field(
+        default_factory=list,
+        description=(
+            "Call records the interception layer reported it couldn't deliver, in arrival order. Each marks "
+            "function_calls incomplete in evidence_status, so a check that depends on a call's absence is unknown."
         ),
     )
 

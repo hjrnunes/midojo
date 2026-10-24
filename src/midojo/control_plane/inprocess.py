@@ -1,7 +1,7 @@
 """The interception layer's seams, in the control plane's own process: no HTTP layer, the same single writer.
 
-:class:`InProcessAgentClient` is a ``midojo_sdk.recorder.Recorder`` and
-``WorldState`` for the evaluation a session token is bound to, as
+:class:`InProcessAgentClient` is a ``midojo_sdk.recorder.Recorder`` (and
+``CaptureReporter``) and ``WorldState`` for the evaluation a session token is bound to, as
 ``midojo_sdk.client.AgentControlPlaneClient`` is over HTTP. It calls
 :class:`~midojo.control_plane.service.ControlPlane` directly, so every event
 goes through the same lifecycle transitions, under the same lock, as the
@@ -21,7 +21,9 @@ from __future__ import annotations
 from typing import Any, TypeVar
 
 from midojo_sdk.recorder import (
+    CAPTURE_REASON_MAX_LENGTH,
     REFUSED,
+    CapturePhase,
     ControlPlaneRejectedError,
     Disposition,
     EnvironmentRevision,
@@ -31,7 +33,12 @@ from midojo_sdk.recorder import (
 from pydantic import BaseModel, ValidationError
 
 from .lifecycle import RejectedError, Rejection
-from .models import ChangeEnvironmentRequest, CreateFunctionCallRecord, CreateFunctionCallStart
+from .models import (
+    ChangeEnvironmentRequest,
+    CreateFunctionCallRecord,
+    CreateFunctionCallStart,
+    ReportCaptureFailureRequest,
+)
 from .service import BySession, ControlPlane
 
 RequestT = TypeVar("RequestT", bound=BaseModel)
@@ -95,6 +102,20 @@ class InProcessAgentClient:
         )
         try:
             self._control.finish_call(self._target, req)
+        except RejectedError as e:
+            raise sdk_error(e) from e
+
+    # --- CaptureReporter ---
+
+    async def report_capture_failure(self, *, call_id: str, function: str, phase: CapturePhase, reason: str) -> None:
+        """Report a record that never reached the control plane: the evaluation's ``function_calls`` is incomplete."""
+        # Cut as the HTTP client cuts it.
+        reason = reason[:CAPTURE_REASON_MAX_LENGTH]
+        req = _request(ReportCaptureFailureRequest, call_id=call_id, function=function, phase=phase, reason=reason)
+        try:
+            self._control.report_capture_failure(
+                self._target, call_id=req.call_id, function=req.function, phase=req.phase, reason=req.reason
+            )
         except RejectedError as e:
             raise sdk_error(e) from e
 

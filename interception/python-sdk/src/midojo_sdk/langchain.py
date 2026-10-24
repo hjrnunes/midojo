@@ -23,7 +23,14 @@ from langgraph.types import Command
 
 from midojo_sdk.client import AgentControlPlaneClient, CallIds, transient
 from midojo_sdk.context import ToolContext
-from midojo_sdk.recorder import ControlPlaneRejectedError, Disposition, Recorder, RetryingRecorder, WorldState
+from midojo_sdk.recorder import (
+    ControlPlaneRejectedError,
+    Disposition,
+    Recorder,
+    RetryingRecorder,
+    WorldState,
+    reporting,
+)
 from midojo_sdk.session import session_token
 
 __all__ = ["BLOCKED_REASON", "MidojoMiddleware", "ToolContext"]
@@ -135,7 +142,10 @@ class MidojoMiddleware(AgentMiddleware):
     A blocked call never runs, so it's recorded once. Resends after a lost
     response create at most one record per ``call_id``; a record that never
     reaches the control plane is still missing, and the agent run stops with
-    the last error.
+    the last error. A start or finish that fails for good (after its resends,
+    or refused other than as a late fact) is first reported as a capture
+    failure, which marks the evaluation's ``function_calls`` incomplete (see
+    ``ReportingRecorder``).
 
     A refusal by the control plane (a ``ControlPlaneRejectedError``, such as
     an evaluation that's closing) is never resent and doesn't stop the agent
@@ -155,7 +165,7 @@ class MidojoMiddleware(AgentMiddleware):
         if control_plane_url is None and recorder is None:
             raise ValueError("MidojoMiddleware needs a control_plane_url or a recorder.")
         self._control_plane_url = control_plane_url
-        self._recorder = recorder
+        self._recorder = reporting(recorder) if recorder is not None else None
         self._world = world
         self._shared: _Connection | None = _Connection(http) if http is not None else None
         self._per_loop: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, _Connection] = weakref.WeakKeyDictionary()
@@ -264,13 +274,13 @@ class MidojoMiddleware(AgentMiddleware):
         return self._recorder or recorder, self._world or client
 
     def _session(self) -> tuple[Recorder, AgentControlPlaneClient]:
-        """The resending recorder and the client of the current session, on the control plane, built once."""
+        """The resending, reporting recorder and the client of the current session, on the control plane, built once."""
         assert self._control_plane_url is not None
         token = session_token()
         connection = self._connection()
         if token not in connection.sessions:
             client = AgentControlPlaneClient(self._control_plane_url, token, http=connection.http)
-            connection.sessions[token] = (RetryingRecorder(client, retryable=transient), client)
+            connection.sessions[token] = (reporting(RetryingRecorder(client, retryable=transient)), client)
         return connection.sessions[token]
 
     def _connection(self) -> _Connection:

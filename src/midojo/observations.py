@@ -14,8 +14,11 @@ Evidence status:
   A source reports how completely it collected each part of its evidence, as an
   ``evidence_status`` field on its model (e.g. OpenShell's ``ocsf`` and
   ``workdir``). :func:`evidence_status` flattens these into one map keyed by
-  ``<source>.<part>`` (``openshell.ocsf``). The map is open to other evidence,
-  such as ``function_calls``, that isn't a runtime observation.
+  ``<source>.<part>`` (``openshell.ocsf``). The map is open to other evidence
+  that isn't a runtime observation, such as :data:`FUNCTION_CALLS`: the
+  control plane marks it ``incomplete`` when a call record may be missing (an
+  interception layer reported a record it couldn't deliver, or closure refused
+  one), and a key that's absent has no known gap.
 """
 
 from __future__ import annotations
@@ -31,6 +34,9 @@ from pydantic import BaseModel
 #   failed         collection was attempted and nothing usable came back
 #   not_collected  collection never ran (e.g. no observations were recorded)
 EvidenceStatus = Literal["complete", "incomplete", "failed", "not_collected"]
+
+FUNCTION_CALLS = "function_calls"
+"""The evidence-status key of the recorded tool calls."""
 
 _OBSERVATION_TYPES: dict[str, type[BaseModel]] = {}
 

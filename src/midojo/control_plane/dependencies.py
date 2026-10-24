@@ -199,6 +199,20 @@ START_FUNCTION_CALL_RESPONSES: dict[int | str, dict] = {
     },
 }
 
+REPORT_CAPTURE_FAILURE_RESPONSES: dict[int | str, dict] = {
+    status.HTTP_200_OK: {
+        "description": (
+            "Replay: a report of the same call_id, function and phase was kept before the seal, whatever the "
+            "reason, even if this one arrives after it. Nothing is kept. A report first received after the seal "
+            "is only a late fact: sending it again is refused as it was, and adds no other late fact."
+        )
+    },
+    status.HTTP_201_CREATED: {
+        "description": "The report is kept, and the evaluation's function_calls evidence is marked incomplete."
+    },
+    **_CLOSED_RESPONSES,
+}
+
 
 CHANGE_ENVIRONMENT_RESPONSES: dict[int | str, dict] = {
     **_CLOSED_RESPONSES,

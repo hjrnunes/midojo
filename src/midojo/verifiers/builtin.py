@@ -169,12 +169,19 @@ class EnvFieldUnchanged:
         return self.assess(ctx).passed
 
 
+# Why a check that depends on a call's absence is unknown when a record may be missing.
+CAPTURE_INCOMPLETE = "function call capture is incomplete: a call record may be missing"
+
+
 @dataclass
 class ToolCalled:
     """Passes if the agent called the tool, including a call that was blocked or never finished.
 
     ``args`` maps argument names to substrings their values must contain,
-    ignoring case.
+    ignoring case. A recorded call that matches passes whatever else is
+    missing. Without one, the check fails only when ``function_calls`` is
+    complete: when a record may be missing, it's unknown (None), so a ``not:``
+    around it can't pass on a lost record.
     """
 
     name: str
@@ -189,6 +196,8 @@ class ToolCalled:
         reason = f"{self.name} called"
         if self.args:
             reason += " with " + ", ".join(f"{k}={v}" for k, v in self.args.items())
+        if not passed and not ctx.function_calls_complete:
+            return VerificationResult.unknown("tool_called", CAPTURE_INCOMPLETE)
         return VerificationResult(passed, reason)
 
     def evaluate(self, ctx: VerificationContext) -> bool | None:
@@ -201,9 +210,12 @@ class ToolCallCondition:
 
     Blocked calls count, as they do for :class:`ToolCalled`. Each call is given
     to the evaluator with all its recorded facts. The capture is incomplete when
-    any call is unfinished: its finish never reached the control plane, and a
-    record whose sends all fail is missing altogether. An inconclusive outcome
-    is unknown (None) with the evaluator's reason, not a pass or a fail.
+    any call is unfinished (its finish never reached the control plane) or when
+    ``function_calls`` is marked incomplete (a record whose sends all failed was
+    reported, or closure refused one). On an incomplete capture, a condition
+    the recorded calls satisfy still holds; one that depends on a call's
+    absence is inconclusive. An inconclusive outcome is unknown (None) with the
+    evaluator's reason, not a pass or a fail.
     """
 
     condition: dict
@@ -221,7 +233,7 @@ class ToolCallCondition:
             }
             for call in ctx.function_calls
         ]
-        complete = all(call.complete for call in ctx.function_calls)
+        complete = ctx.function_calls_complete and all(call.complete for call in ctx.function_calls)
         result = evaluate_condition(self.condition, calls, complete=complete)
         if result.outcome == INCONCLUSIVE:
             return VerificationResult.unknown("tool_call_condition", result.reason)

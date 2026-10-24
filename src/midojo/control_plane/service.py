@@ -50,8 +50,14 @@ from . import lifecycle
 from .config import AppConfig
 from .grading import grade_snapshot
 from .lifecycle import HOST, Accepted, AgentSession, Event, Late, Rejected, RejectedError, Rejection
-from .models import CreateEvaluationResponse, CreateFunctionCallRecord, CreateFunctionCallStart, GradeResponse
-from .state import Evaluation, Run, Snapshot, Stage, Turn
+from .models import (
+    CapturePhase,
+    CreateEvaluationResponse,
+    CreateFunctionCallRecord,
+    CreateFunctionCallStart,
+    GradeResponse,
+)
+from .state import CaptureFailure, Evaluation, Run, Snapshot, Stage, Turn
 from .store import InMemoryStore, Store, detached
 
 # How often the closure wait checks for unfinished calls, in seconds.
@@ -269,6 +275,23 @@ class ControlPlane:
     def finish_call(self, target: Target, req: CreateFunctionCallRecord) -> tuple[FunctionCallRecord, bool]:
         """Record a call, or finish a started one: ``(record, created)``, created False on a replay."""
         return self.apply(target, lifecycle.FinishCall(req, _now()))
+
+    def report_capture_failure(
+        self, target: Target, *, call_id: str, function: str, phase: CapturePhase, reason: str = ""
+    ) -> tuple[CaptureFailure, bool]:
+        """Report a call record the interception layer couldn't deliver: ``(failure, created)``.
+
+        Before the seal, the report marks ``function_calls`` incomplete in the
+        snapshot, so a check that depends on a call's absence grades unknown.
+        ``created`` is False when the same ``call_id``, function and phase were
+        kept before the seal, whatever the reason or sender, even when the
+        repeat arrives after it. A new report after the seal is refused and
+        recorded as a late fact: it marks only the evaluation's evidence
+        status, never the grade. Repeating one is refused the same way, and
+        adds no other late fact.
+        """
+        event = lifecycle.ReportCaptureFailure(call_id, function, phase, reason, _now())
+        return self.apply(target, event)
 
     def replace_environment(self, target: Target, environment: Environment) -> Environment:
         """Install ``environment``, already validated against the evaluation's episode (``environment_type``)."""
