@@ -249,3 +249,23 @@ async def test_interceptors_leave_the_process_signal_handlers_and_event_streams_
             assert (await target.call_tool("list_alerts", {})).content
     finally:
         await later.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("observe", [False, True])
+async def test_requests_are_observed_only_when_asked_and_then_with_every_body(control, serve, observe):
+    _, evaluation = open_evaluation(control)
+    interceptor = interceptor_for(control, evaluation.session_token, evaluation.id, observe_requests=observe)
+    endpoint = await serve(interceptor)
+    async with httpx.AsyncClient() as http:
+        assert (await http.post(endpoint.url, content=b"no token")).status_code == 401
+        other = endpoint.url.replace("/mcp", "/other")
+        assert (await http.post(other, content=b"wrong path", headers=endpoint.headers)).status_code == 404
+    if not observe:
+        # Off by default: a production interceptor keeps no request, and so none of the target's credentials.
+        assert interceptor.requests == []
+    else:
+        assert [(r.path, r.status, r.body) for r in interceptor.requests] == [
+            ("/mcp", 401, b"no token"),
+            ("/other", 404, b"wrong path"),
+        ]

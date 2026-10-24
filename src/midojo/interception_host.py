@@ -95,7 +95,8 @@ class HostInterceptor:
     ``upstream`` is the real MCP server: a URL, or anything a fastmcp
     ``Client`` connects to (a ``FastMCP`` server in this process). ``plan`` is
     the tool-output part of the episode's plan; ``evaluation_id`` scopes its
-    occurrence counters and never leaves the host.
+    occurrence counters and never leaves the host. ``observe_requests`` keeps
+    each request it receives, refused ones included, in ``requests``.
     """
 
     def __init__(
@@ -109,6 +110,7 @@ class HostInterceptor:
         port: int = 0,
         advertise_host: str | None = None,
         name: str = "midojo-interceptor",
+        observe_requests: bool = False,
     ) -> None:
         url, transport = (upstream, None) if isinstance(upstream, str) else (None, upstream)
         self.mcp = MidojoMCP(
@@ -123,7 +125,9 @@ class HostInterceptor:
         self._bind_host = bind_host
         self._port = port
         self._advertise_host = advertise_host or (bind_host if bind_host not in _WILDCARD_HOSTS else "127.0.0.1")
-        # Every request the interceptor received, in full: what the target sent, for checking it.
+        # With observe_requests, every request the interceptor received, in full (credentials included): what
+        # the target sent, for checking it. Off by default, so a long run keeps none of it.
+        self._observe_requests = observe_requests
         self.requests: list[ObservedRequest] = []
         self._server: _Server | None = None
         self._serving: asyncio.Task[None] | None = None
@@ -147,7 +151,8 @@ class HostInterceptor:
                 query=scope["query_string"].decode("latin-1"),
                 headers=[(name.decode("latin-1"), value.decode("latin-1")) for name, value in scope["headers"]],
             )
-            self.requests.append(request)
+            if self._observe_requests:
+                self.requests.append(request)
 
             async def receive_and_keep():
                 message = await receive()
@@ -161,12 +166,18 @@ class HostInterceptor:
                     request.status = message["status"]
                 await send(message)
 
+            async def refuse(status: int, body: bytes) -> None:
+                # Read the refused request's body first, so an observed request keeps all the target sent.
+                while (await receive_and_keep()).get("more_body", False):
+                    pass
+                await _respond(send_and_note, status, body)
+
             if scope["path"].rstrip("/") != TOOL_PATH:
-                await _respond(send_and_note, 404, b"Not found")
+                await refuse(404, b"Not found")
                 return
             authorization = next((value for name, value in scope["headers"] if name.lower() == b"authorization"), b"")
             if not secrets.compare_digest(authorization, expected):
-                await _respond(send_and_note, 401, b"This interceptor's bearer token is required")
+                await refuse(401, b"This interceptor's bearer token is required")
                 return
             await mcp_app(scope, receive_and_keep, send_and_note)
 
@@ -227,13 +238,15 @@ class HostInterception:
 
     ``port`` 0 picks a free port for each evaluation. ``advertise_host`` is the
     host the target connects to; by default the bind host, or ``127.0.0.1``
-    for a wildcard bind.
+    for a wildcard bind. ``observe_requests`` makes each interceptor keep the
+    requests it receives (see :class:`HostInterceptor`), for tests.
     """
 
     upstream: Any
     bind_host: str = "127.0.0.1"
     port: int = 0
     advertise_host: str | None = None
+    observe_requests: bool = False
 
     def interceptor(self, recorder: Recorder, *, evaluation_id: str, plan: InjectionPlan) -> HostInterceptor:
         """A new interceptor for one evaluation, recording with ``recorder``."""
@@ -245,4 +258,5 @@ class HostInterception:
             bind_host=self.bind_host,
             port=self.port,
             advertise_host=self.advertise_host,
+            observe_requests=self.observe_requests,
         )

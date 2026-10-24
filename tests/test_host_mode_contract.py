@@ -6,14 +6,18 @@ target is the scripted one (tests/fixtures/scripted_target/target.py), a
 separate process: launched as the PI binary for an unmanaged agent, and by a
 faked OpenShell gateway's exec for the openshell runtime. Everything the target
 was given or sent is then searched for what must never reach it: its arguments,
-environment, files, and the request lines, headers and bodies the interceptor
-received. Planted leaks prove the search finds a secret in each channel.
+environment, files, its sandbox's name and labels, and the request lines,
+headers and bodies the interceptor received, refused requests' included. The
+host's environment and the suite's ``env_vars`` name the control plane and the
+real MCP server, which the target must not learn either. Planted leaks prove the
+search finds a secret in each channel, end to end.
 
 No model, no gateway, no network beyond loopback.
 """
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import stat
@@ -34,6 +38,7 @@ from midojo.control_plane.service import ById, ControlPlane
 from midojo.interception_host import HostInterception, HostInterceptor, ObservedRequest
 from midojo.orchestrator import run_benchmark
 from midojo.runtimes import UnmanagedRuntime
+from midojo.runtimes import openshell as openshell_runtime
 from midojo.runtimes.openshell import OpenShellRuntime
 from midojo.tool_endpoint import TOOL_TOKEN_ENV, TOOL_URL_ENV
 from tests.fixtures.scripted_target.target import SCRIPT
@@ -42,6 +47,9 @@ from tests.fixtures.scripted_target.upstream import scripted_upstream
 TARGET = Path(__file__).parent / "fixtures" / "scripted_target" / "target.py"
 CONTROL_TOKEN = "control-secret-7f3a"
 CONTROL_URL = "http://control.example:8090"
+# The real MCP server, as the host's environment names it: a target that knew it could bypass the interceptor.
+UPSTREAM_URL = "http://upstream.example:9000/mcp"
+UPSTREAM_ENV = {"UPSTREAM_MCP_URL": UPSTREAM_URL, "MCP_SERVER_URL": UPSTREAM_URL}
 SANDBOX_WORKDIR = "/sandbox/workdir"
 
 
@@ -57,11 +65,15 @@ def leaks(channels: dict[str, list[str]], forbidden: dict[str, str]) -> list[tup
     )
 
 
-def target_channels(workdir: Path, requests: list[ObservedRequest]) -> dict[str, list[str]]:
-    """Everything the target was given or sent, by channel: arguments, environment, files and requests.
+def target_channels(
+    workdir: Path, requests: list[ObservedRequest], sandboxes: list[tuple[str, dict[str, str]]]
+) -> dict[str, list[str]]:
+    """Everything the target was given or sent, by channel: arguments, environment, files, sandbox and requests.
 
     The files are those in the target's working directory but its transcript,
-    which only repeats its arguments and environment.
+    which only repeats its arguments and environment. The sandbox channel is
+    each sandbox's name and labels, which a target may read from its hostname
+    or its runtime's metadata.
     """
     transcript = json.loads((workdir / "transcript.json").read_text())
     files = [path for path in workdir.rglob("*") if path.is_file() and path.name != "transcript.json"]
@@ -71,6 +83,7 @@ def target_channels(workdir: Path, requests: list[ObservedRequest]) -> dict[str,
         "env value": list(transcript["env"].values()),
         "file name": [str(path.relative_to(workdir)) for path in files],
         "file content": [path.read_text(errors="replace") for path in files],
+        "sandbox": [text for name, labels in sandboxes for text in (name, *labels, *labels.values())],
         "request line": [f"{r.method} {r.path}?{r.query}" for r in requests],
         "header name": [name for r in requests for name, _ in r.headers],
         "header value": [value for r in requests for _, value in r.headers],
@@ -84,6 +97,7 @@ CLEAN = {
     "env value": ["/usr/bin", "http://127.0.0.1:1/mcp"],
     "file name": ["notes.md"],
     "file content": ["{}"],
+    "sandbox": ["sbx-0a1b2c3d4e5f", "midojo.suite", "weather"],
     "request line": ["POST /mcp?"],
     "header name": ["host", "authorization"],
     "header value": ["127.0.0.1:1", "Bearer abc"],
@@ -95,6 +109,7 @@ FORBIDDEN = {
     "control URL": CONTROL_URL,
     "run ID": "a" * 32,
     "evaluation ID": "0123456789",
+    "upstream URL": UPSTREAM_URL,
 }
 
 
@@ -108,8 +123,9 @@ def test_the_leak_check_catches_any_sentinel_in_any_channel(channel, sentinel):
 
 @dataclass(frozen=True)
 class KeptInterception(HostInterception):
-    """Host-mode settings that keep each interceptor they build, to read what it received."""
+    """Host-mode settings that keep each interceptor they build, observing its requests to read what it received."""
 
+    observe_requests: bool = True
     built: list[HostInterceptor] = field(default_factory=list)
 
     def interceptor(self, recorder, *, evaluation_id, plan) -> HostInterceptor:
@@ -168,6 +184,8 @@ class Harness:
     plant_env: object  # (name, value) -> None
     interception: KeptInterception
     specs: list = field(default_factory=list)
+    # Each sandbox's name and labels, as created.
+    sandboxes: list[tuple[str, dict[str, str]]] = field(default_factory=list)
 
 
 @pytest.fixture
@@ -196,18 +214,21 @@ def openshell(tmp_path, monkeypatch) -> Harness:
     """The openshell runtime on a faked gateway, whose exec runs the scripted target on this machine.
 
     The fake sandbox's working directory is a local directory, its environment
-    the sandbox spec's plus the run's, and its network maps
-    host.openshell.internal to this machine's loopback.
+    the sandbox spec's plus the run's and its hostname (``HOSTNAME``, the
+    sandbox's name), and its network maps host.openshell.internal to this
+    machine's loopback.
     """
     workdir = tmp_path / "sandbox"
     workdir.mkdir()
     planted: dict[str, str] = {}
     specs: list = []
+    created: list[tuple[str, dict[str, str]]] = []
     sandboxes = MagicMock()
     sandboxes.list_ids.return_value = []
 
     def create(**kwargs):
         specs.append(kwargs["spec"])
+        created.append((kwargs["name"], dict(kwargs.get("labels") or {})))
         return SimpleNamespace(name=kwargs["name"], id=kwargs["name"])
 
     def exec_in_sandbox(sandbox, command, **kwargs):
@@ -216,7 +237,7 @@ def openshell(tmp_path, monkeypatch) -> Harness:
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(kwargs["stdin"])
         elif command[:2] == ["agent", "-p"]:
-            env = {**specs[-1].environment, **(kwargs.get("env") or {}), **planted}
+            env = {**specs[-1].environment, **(kwargs.get("env") or {}), **planted, "HOSTNAME": sandbox}
             if TOOL_URL_ENV in env:
                 env[TOOL_URL_ENV] = env[TOOL_URL_ENV].replace("host.openshell.internal", "127.0.0.1")
             ran = subprocess.run(
@@ -242,8 +263,13 @@ def openshell(tmp_path, monkeypatch) -> Harness:
         image="base",
         agent_command=["agent", "-p"],
         files={"notes.md": "Trip notes.\n"},
-        # A suite's own env_vars may name the control plane: host mode drops them.
-        env_vars={"MIDOJO_URL": CONTROL_URL, "MIDOJO_SESSION_TOKEN": "stale", CONTROL_TOKEN_ENV: CONTROL_TOKEN},
+        # A suite's own env_vars may name the control plane or the real tools: host mode drops them.
+        env_vars={
+            "MIDOJO_URL": CONTROL_URL,
+            "MIDOJO_SESSION_TOKEN": "stale",
+            CONTROL_TOKEN_ENV: CONTROL_TOKEN,
+            **UPSTREAM_ENV,
+        },
     )
     monkeypatch.setattr(runtime, "_sync_ocsf_messages", lambda: ([], True))
     runtime.configure(cluster="test", interceptor_url="http://host.openshell.internal:8765/mcp")
@@ -255,6 +281,7 @@ def openshell(tmp_path, monkeypatch) -> Harness:
         plant_env=planted.__setitem__,
         interception=KeptInterception(upstream=scripted_upstream(), advertise_host="host.openshell.internal"),
         specs=specs,
+        sandboxes=created,
     )
 
 
@@ -271,6 +298,8 @@ async def run_host_mode(harness: Harness, suite, monkeypatch, tmp_path, plant=No
     # The host's own environment holds everything a target must not see.
     monkeypatch.setenv(CONTROL_TOKEN_ENV, CONTROL_TOKEN)
     monkeypatch.setenv("MIDOJO_URL", CONTROL_URL)
+    for name, value in UPSTREAM_ENV.items():
+        monkeypatch.setenv(name, value)
     control = ControlPlane({"weather": suite}, config=AppConfig(control_token=CONTROL_TOKEN, closure_wait_seconds=0))
     run_ids: list[str] = []
     original_create_run = control.create_run
@@ -314,9 +343,12 @@ async def run_host_mode(harness: Harness, suite, monkeypatch, tmp_path, plant=No
         "control host": "control.example",
         "run ID": run_ids[0],
         "evaluation ID": evaluation.id,
+        "user task": "weather_new_york",
+        "upstream URL": UPSTREAM_URL,
+        "upstream host": "upstream.example",
     }
     stored = control.evaluation(ById(run_ids[0], evaluation.id))
-    return stored, sentinels, target_channels(harness.workdir, interceptor.requests), interceptor
+    return stored, sentinels, target_channels(harness.workdir, interceptor.requests, harness.sandboxes), interceptor
 
 
 @pytest.mark.asyncio
@@ -326,11 +358,13 @@ async def test_a_host_mode_target_gets_only_its_tool_endpoint(harness, suite, mo
     assert leaks(channels, sentinels) == []
     midojo_env = {name for name in channels["env name"] if name.upper().startswith("MIDOJO")}
     assert midojo_env == {TOOL_URL_ENV, TOOL_TOKEN_ENV}
-    assert interceptor.requests
+    assert interceptor.requests and all(request.status in (200, 202) for request in interceptor.requests)
     for request in interceptor.requests:
         assert "x-midojo-session" not in {name.lower() for name, _ in request.headers}
     for spec in harness.specs:
-        assert {"MIDOJO_SESSION_TOKEN", "MIDOJO_URL", CONTROL_TOKEN_ENV}.isdisjoint(spec.environment)
+        assert {"MIDOJO_SESSION_TOKEN", "MIDOJO_URL", CONTROL_TOKEN_ENV, *UPSTREAM_ENV}.isdisjoint(spec.environment)
+    for _, labels in harness.sandboxes:
+        assert labels == {"midojo.suite": "weather"}
 
     # The target ran its whole script through the interceptor, recorded in its evaluation by the interceptor.
     assert stored.interception == "host"
@@ -338,12 +372,21 @@ async def test_a_host_mode_target_gets_only_its_tool_endpoint(harness, suite, mo
     assert (stored.stage.value, stored.graded) == ("sealed", True)
 
 
+def _encoded(text: str) -> str:
+    return base64.b64encode(text.encode()).decode()
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("channel", ["env", "argv", "file"])
+@pytest.mark.parametrize("channel", ["env", "argv", "file", "unauthorized", "wrong path", "sandbox"])
 async def test_a_planted_leak_fails_the_contract(harness, suite, monkeypatch, tmp_path, channel):
+    if channel == "sandbox" and harness.protocol != "openshell":
+        pytest.skip("an unmanaged agent has no sandbox")
     created: list = []
     if channel == "argv":
         harness.agent_client = ArgvLeakingClient(harness.agent_client, lambda: created[-1].session_token)
+    elif channel == "sandbox":
+        # A sandbox named after its evaluation, as an in-agent run names it: the target reads it as its hostname.
+        monkeypatch.setattr(openshell_runtime, "_opaque_sandbox_name", lambda: f"eval-{created[-1].id}")
 
     def plant(evaluation, run_id):
         created.append(evaluation)
@@ -352,11 +395,21 @@ async def test_a_planted_leak_fails_the_contract(harness, suite, monkeypatch, tm
             harness.plant_env("TARGET_DEBUG", f"run={run_id}")
         elif channel == "file":
             (harness.workdir / "leak.txt").write_text(f"eval {evaluation.id}")
+        elif channel == "unauthorized":
+            harness.plant_env("TARGET_STRAY_UNAUTHORIZED", _encoded(f"eval {evaluation.id}"))
+        elif channel == "wrong path":
+            harness.plant_env("TARGET_STRAY_PATH", _encoded(f"eval {evaluation.id}"))
 
-    _, sentinels, channels, _ = await run_host_mode(harness, suite, monkeypatch, tmp_path, plant)
+    _, sentinels, channels, interceptor = await run_host_mode(harness, suite, monkeypatch, tmp_path, plant)
     expected = {
         "env": [("env value", "run ID"), ("header value", "run ID")],
         "argv": [("argv", "session token")],
         "file": [("file content", "evaluation ID")],
+        # A refused request's body and headers are searched too.
+        "unauthorized": [("request body", "evaluation ID")],
+        "wrong path": [("header value", "evaluation ID"), ("request body", "evaluation ID")],
+        "sandbox": [("env value", "evaluation ID"), ("sandbox", "evaluation ID")],
     }[channel]
     assert leaks(channels, sentinels) == expected
+    refused = sorted(r.status or 0 for r in interceptor.requests if r.status is None or r.status >= 400)
+    assert refused == {"unauthorized": [401], "wrong path": [404]}.get(channel, [])
