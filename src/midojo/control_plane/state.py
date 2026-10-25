@@ -11,6 +11,7 @@ store keeps.
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import enum
 import hashlib
@@ -131,6 +132,9 @@ class Snapshot:
     changing what a read returned changes nothing here. Copying a snapshot
     returns the snapshot itself. The private ``_``-prefixed copies are not
     part of that contract: they are shared, and only the snapshot reads them.
+    A holder that changes one anyway (or sets a field with
+    ``object.__setattr__``) leaves content that ``snapshot_id`` no longer
+    names, and grading refuses it (:meth:`verified`).
     """
 
     evaluation_id: str
@@ -205,6 +209,37 @@ class Snapshot:
     def observations(self) -> Mapping[str, BaseModel]:
         """The runtime observations by source (new copies)."""
         return {source: observed.model_copy(deep=True) for source, observed in self._observations.items()}
+
+    def verified(self) -> Snapshot:
+        """A new snapshot of this one's content, shared with no one, once that content is what ``snapshot_id`` names.
+
+        The content is read once, through the copying reads, and digested
+        again: a snapshot whose content no longer has its ID (one of its
+        private copies, or a field, was changed after it was made) raises
+        ValueError. What is returned is checked, and nothing else holds it.
+        """
+        turns, capture_failures = copy.deepcopy((self.turns, self.capture_failures))
+        held = Snapshot(
+            evaluation_id=self.evaluation_id,
+            run_id=self.run_id,
+            user_task_id=self.user_task_id,
+            injection_task_id=self.injection_task_id,
+            agent_output=self.agent_output,
+            pre_environment=self.pre_environment,
+            environment=self.environment,
+            function_calls=self.function_calls,
+            turns=turns,
+            observations=self.observations,
+            evidence_status=self.evidence_status,
+            sealed_at=self.sealed_at,
+            capture_failures=capture_failures,
+        )
+        if held.snapshot_id != self.snapshot_id:
+            raise ValueError(
+                f"Snapshot {self.snapshot_id} of evaluation {self.evaluation_id} was changed after it was made: "
+                f"its content differs from its snapshot_id"
+            )
+        return held
 
     def __hash__(self) -> int:
         return hash(self.snapshot_id)
