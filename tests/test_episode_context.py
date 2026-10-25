@@ -8,6 +8,7 @@ scripted MCP server, and the agent a scripted MCP client on loopback.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import dataclasses
 import datetime
@@ -49,9 +50,9 @@ from midojo.control_plane.lifecycle import (
 from midojo.control_plane.main import create_app
 from midojo.control_plane.models import CreateFunctionCallRecord, CreateFunctionCallStart
 from midojo.control_plane.service import ById, ControlPlane
-from midojo.control_plane.state import Stage, snapshot_digest
+from midojo.control_plane.state import Stage, snapshot_digest, unsupported_value
 from midojo.episode import Episode
-from midojo.episode_context import AgentBinding, open_episode
+from midojo.episode_context import AgentBinding, EpisodeContext, _refused, open_episode
 from midojo.interception_host import HostInterception, HostInterceptor
 from midojo.runtimes import ResettableRuntime, UnmanagedRuntime
 from midojo.runtimes.openshell import OpenShellObservations
@@ -483,6 +484,334 @@ async def test_a_failed_setup_is_torn_down_and_its_evaluation_sealed_incomplete(
     assert_sealed_as_interrupted(plane, ep, ep.episode)
 
 
+class NoSnapshotTransport(httpx.AsyncBaseTransport):
+    """The control plane's app, except that every snapshot fetch gets a 503."""
+
+    def __init__(self, app) -> None:
+        self.app = httpx.ASGITransport(app)
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path.endswith("/snapshot"):
+            return httpx.Response(503, request=request)
+        return await self.app.handle_async_request(request)
+
+
+@pytest.mark.asyncio
+async def test_a_sealed_evaluation_whose_snapshot_fetch_fails_is_sealed_not_interrupted(suite):
+    app = create_app({"weather": suite}, config=AppConfig(closure_wait_seconds=0))
+    plane: ControlPlane = app.state.control
+    run = plane.create_run("weather")
+    runtime = RecordingRuntime()
+    async with httpx.AsyncClient(transport=NoSnapshotTransport(app)) as http:
+        control = ControlPlaneClient("http://control", http=http)
+        ep = open_episode(suite.episode("weather_new_york"), runtime=runtime, control=control, run_id=run.id)
+        with pytest.raises(httpx.HTTPStatusError) as fetch:
+            async with ep:
+                await ep.turn("hi", _reply("rain"))
+    # The fetch's own error is raised, and the result says what happened: sealed, its snapshot not read back.
+    assert fetch.value.response.status_code == 503
+    result = ep.result
+    assert result.snapshot is None and result.snapshot_id is None and result.snapshot_error is fetch.value
+    assert result.evaluation_id == ep.evaluation_id and result.interrupted is False and not ep.interrupted
+    with pytest.raises(RuntimeError, match="couldn't be read back") as unread:
+        ep.sealed
+    assert unread.value.__cause__ is fetch.value
+    # Sealed once, with the agent's output and no incomplete marks; the session stays bound, as after any seal.
+    evaluation = plane.evaluation(ById(run.id, ep.evaluation_id))
+    assert evaluation.stage is Stage.SEALED and evaluation.snapshot is not None
+    assert evaluation.snapshot.agent_output == "rain" and evaluation.late_facts == ()
+    # (function_calls is incomplete for another reason: intercepted in the agent, and no call recorded.)
+    status = evaluation.snapshot.evidence_status
+    assert "incomplete" not in (status.get("turns"), status.get("agent_output"))
+    assert evaluation.session is not None
+    assert runtime.steps == ["setup", "observe", "teardown"]
+
+
+class LostCompletionTransport(httpx.AsyncBaseTransport):
+    """The control plane's app, except that the first completion is lost: its request, or its response.
+
+    ``lost`` is ``request`` (it never reaches the app), ``response`` (the app
+    seals, and the client gets a transport error) or ``hang`` (the app seals,
+    and the client waits for a response that never comes, until cancelled).
+    """
+
+    def __init__(self, app, lost: str) -> None:
+        self.app = httpx.ASGITransport(app)
+        self.lost = lost
+        self.completions = 0
+        self.committed = asyncio.Event()
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        if not (request.method == "POST" and request.url.path.endswith("/complete")):
+            return await self.app.handle_async_request(request)
+        self.completions += 1
+        if self.completions > 1:
+            return await self.app.handle_async_request(request)
+        if self.lost == "request":
+            raise httpx.ConnectError("the request was lost", request=request)
+        response = await self.app.handle_async_request(request)
+        await response.aread()
+        self.committed.set()
+        if self.lost == "hang":
+            await asyncio.Event().wait()
+        raise httpx.ReadError("the response was lost", request=request)
+
+
+async def run_with_lost_completion(suite, lost: str):
+    """An episode over HTTP whose host seals with an explicit output and loses the first completion."""
+    app = create_app({"weather": suite}, config=AppConfig(closure_wait_seconds=0))
+    plane: ControlPlane = app.state.control
+    run = plane.create_run("weather")
+    transport = LostCompletionTransport(app, lost)
+    async with httpx.AsyncClient(transport=transport) as http:
+        control = ControlPlaneClient("http://control", http=http)
+        ep = open_episode(suite.episode("weather_new_york"), runtime=RecordingRuntime(), control=control, run_id=run.id)
+
+        async def run_it() -> None:
+            async with ep:
+                await ep.turn("hi", _reply("rain"))
+                await ep.seal("an explicit output")
+
+        task = asyncio.create_task(run_it())
+        if lost == "hang":
+            await asyncio.wait_for(transport.committed.wait(), timeout=10)
+            task.cancel()
+        with pytest.raises((httpx.TransportError, asyncio.CancelledError)) as raised:
+            await task
+    return plane, run, ep, transport, raised.value
+
+
+def assert_sealed_once_with(plane: ControlPlane, run, ep, output: str) -> None:
+    """Sealed once, with the host's output: not interrupted, nothing late, the session still bound."""
+    assert not ep.interrupted and ep.result.interrupted is False
+    assert ep.sealed.agent_output == output and ep.result.snapshot is ep.sealed
+    evaluation = plane.evaluation(ById(run.id, ep.evaluation_id))
+    assert evaluation.stage is Stage.SEALED and evaluation.snapshot == ep.sealed
+    assert evaluation.late_facts == () and evaluation.session is not None
+    status = ep.sealed.evidence_status
+    assert "incomplete" not in (status.get("turns"), status.get("agent_output"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lost", ["request", "response"])
+async def test_a_seal_whose_completion_was_lost_over_http_is_sent_again_and_sealed_once(suite, lost):
+    plane, run, ep, transport, raised = await run_with_lost_completion(suite, lost)
+    # The lost completion's own error is raised; the seal it carried was sent again, as is.
+    assert isinstance(raised, httpx.TransportError) and transport.completions == 2
+    assert_sealed_once_with(plane, run, ep, "an explicit output")
+
+
+@pytest.mark.asyncio
+async def test_a_cancellation_after_the_control_plane_sealed_leaves_it_sealed_not_interrupted(suite):
+    plane, run, ep, transport, raised = await run_with_lost_completion(suite, "hang")
+    assert isinstance(raised, asyncio.CancelledError) and transport.completions == 2
+    assert_sealed_once_with(plane, run, ep, "an explicit output")
+
+
+class InterruptedOnceSealed(EpisodeContext):
+    """A context interrupted (KeyboardInterrupt) at the first change to its seal markers once a completion is accepted.
+
+    That is the boundary between the control plane accepting the seal and the
+    context noting it: whichever marker is changed first, the interrupt lands
+    right after it.
+    """
+
+    accepted = False
+    interrupted_at: str | None = None
+
+    def __setattr__(self, name: str, value) -> None:
+        super().__setattr__(name, value)
+        if name in ("_seal_request", "_control_sealed") and self.accepted and self.interrupted_at is None:
+            object.__setattr__(self, "interrupted_at", name)
+            raise KeyboardInterrupt
+
+
+def test_an_interrupt_right_after_the_control_plane_accepts_the_seal_leaves_it_sealed_not_interrupted():
+    plane = ControlPlane({}, config=AppConfig(closure_wait_seconds=0))
+    control = InProcessControlClient(plane)
+    ep = InterruptedOnceSealed(weather_episode(), runtime=RecordingRuntime(), control=control)
+    outputs = []
+    real = control.complete_evaluation
+
+    async def accepting(run_id, eval_id, agent_output, *rest, **kwargs):
+        outputs.append(agent_output)
+        await real(run_id, eval_id, agent_output, *rest, **kwargs)
+        object.__setattr__(ep, "accepted", True)
+
+    control.complete_evaluation = accepting  # type: ignore[method-assign]
+
+    async def run() -> None:
+        async with ep:
+            await ep.turn("hi", _reply("rain"))
+            await ep.seal("an explicit output")
+
+    # An interrupt leaves the event loop, so the episode runs in a loop of its own.
+    with pytest.raises(KeyboardInterrupt):
+        asyncio.run(run())
+    assert ep.interrupted_at is not None
+    assert outputs == ["an explicit output"]  # sealed once: nothing sent again, nothing sealed as interrupted
+    assert not ep.interrupted and ep.result.interrupted is False
+    assert ep.sealed.agent_output == "an explicit output"
+    evaluation = plane.evaluation(ById(None, ep.evaluation_id))
+    assert evaluation.stage is Stage.SEALED and evaluation.snapshot == ep.sealed
+    assert evaluation.late_facts == () and evaluation.session is not None
+
+
+@contextlib.asynccontextmanager
+async def counted_seals(suite, over: str):
+    """An episode's control plane, client and context, ``over`` HTTP or in process; and each output it seals with."""
+    app = create_app({"weather": suite}, config=AppConfig(closure_wait_seconds=0))
+    plane: ControlPlane = app.state.control
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app)) as http:
+        if over == "http":
+            run_id: str | None = plane.create_run("weather").id
+            control = ControlPlaneClient("http://control", http=http)
+            episode = suite.episode("weather_new_york")
+        else:
+            run_id, control, episode = None, InProcessControlClient(plane), weather_episode()
+        outputs = []
+        real = control.complete_evaluation
+
+        async def counting(run, eval_id, agent_output, *rest, **kwargs):
+            outputs.append(agent_output)
+            return await real(run, eval_id, agent_output, *rest, **kwargs)
+
+        control.complete_evaluation = counting  # type: ignore[method-assign]
+        ep = open_episode(episode, runtime=RecordingRuntime(), control=control, run_id=run_id)
+        yield plane, ep, outputs
+
+
+# A seal the control plane refuses outright: over HTTP a 422, in process pydantic's ValidationError.
+REFUSED_SEAL = (httpx.HTTPStatusError, pydantic.ValidationError)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("over", ["in_process", "http"])
+async def test_a_seal_refused_outright_is_forgotten_so_a_corrected_seal_goes_through(suite, over):
+    async with counted_seals(suite, over) as (plane, ep, outputs):
+        async with ep:
+            await ep.turn("hi", _reply("rain"))
+            with pytest.raises(REFUSED_SEAL):
+                await ep.seal(5)  # type: ignore[arg-type]
+            snapshot = await ep.seal("a corrected output")
+    assert outputs == [5, "a corrected output"]
+    assert snapshot.agent_output == "a corrected output" and ep.sealed is snapshot and not ep.interrupted
+    evaluation = plane.evaluation(ById(ep.run_id, ep.evaluation_id))
+    assert evaluation.late_facts == () and evaluation.session is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("over", ["in_process", "http"])
+async def test_a_seal_refused_outright_is_never_sent_again_when_the_context_is_left(suite, over):
+    async with counted_seals(suite, over) as (plane, ep, outputs):
+        with pytest.raises(REFUSED_SEAL) as refused:
+            async with ep:
+                await ep.turn("hi", _reply("rain"))
+                await ep.seal(5)  # type: ignore[arg-type]
+    # Not resent: the context seals as interrupted, with the last reply, and no cleanup step failed.
+    assert outputs == [5, "rain"]
+    assert not getattr(refused.value, "__notes__", None)
+    assert ep.interrupted and ep.sealed.agent_output == "rain"
+    assert_sealed_as_interrupted_on(plane, ep)
+
+
+def assert_sealed_as_interrupted_on(plane: ControlPlane, ep) -> None:
+    evaluation = plane.evaluation(ById(ep.run_id, ep.evaluation_id))
+    assert evaluation.stage is Stage.SEALED and evaluation.session is None
+    assert {key: ep.sealed.evidence_status[key] for key in INTERRUPTED} == INTERRUPTED
+
+
+def _status_error(code: int) -> httpx.HTTPStatusError:
+    request = httpx.Request("POST", "http://control/runs/r/evaluations/e/complete")
+    return httpx.HTTPStatusError(f"{code}", request=request, response=httpx.Response(code, request=request))
+
+
+def _validation_error() -> pydantic.ValidationError:
+    try:
+        CreateFunctionCallStart.model_validate({})
+    except pydantic.ValidationError as error:
+        return error
+    raise AssertionError("unreachable")
+
+
+_REQUEST = httpx.Request("POST", "http://control/complete")
+
+
+@pytest.mark.parametrize(
+    ("error", "refused"),
+    [
+        *(pytest.param(_status_error(code), True, id=f"http_{code}") for code in (401, 404, 409, 422)),
+        *(pytest.param(_status_error(code), False, id=f"http_{code}") for code in (500, 503)),
+        pytest.param(RejectedError(lifecycle.Rejected(Rejection.UNSUPPORTED_VALUE, "no")), True, id="rejected"),
+        pytest.param(_validation_error(), True, id="validation_error"),
+        pytest.param(ValueError("refused before it was sent"), True, id="value_error"),
+        pytest.param(httpx.ConnectError("lost", request=_REQUEST), False, id="connect_error"),
+        pytest.param(httpx.ReadError("lost", request=_REQUEST), False, id="read_error"),
+        pytest.param(httpx.ReadTimeout("slow", request=_REQUEST), False, id="timeout"),
+        pytest.param(asyncio.CancelledError(), False, id="cancelled"),
+        pytest.param(KeyboardInterrupt(), False, id="keyboard_interrupt"),
+    ],
+)
+def test_only_an_outright_refusal_is_taken_for_one_and_an_unknown_outcome_never_is(error, refused):
+    assert _refused(error) is refused
+
+
+@pytest.mark.asyncio
+async def test_a_snapshot_that_fails_its_digest_check_after_the_seal_is_not_taken_for_a_refused_seal(suite):
+    async with counted_seals(suite, "http") as (plane, ep, outputs):
+        with pytest.raises(ValueError, match="didn't survive the round trip") as mismatch:
+            async with ep:
+                # A date in a call's args comes back over JSON as a string: the rebuilt snapshot's digest differs.
+                target = ById(ep.run_id, ep.evaluation_id)
+                plane.finish_call(
+                    target,
+                    CreateFunctionCallRecord(
+                        call_id="d", function="f", args={"on": datetime.date(2026, 1, 1)}, result="ok"
+                    ),
+                )
+                await ep.turn("hi", _reply("rain"))
+    # The read failed after an accepted seal: sealed once, never sent again, not interrupted.
+    assert outputs == ["rain"]
+    assert not ep.interrupted and ep.result.snapshot is None and ep.result.snapshot_error is mismatch.value
+    with pytest.raises(RuntimeError, match="couldn't be read back"):
+        ep.sealed
+    evaluation = plane.evaluation(ById(ep.run_id, ep.evaluation_id))
+    assert evaluation.stage is Stage.SEALED and evaluation.snapshot is not None
+    assert evaluation.snapshot.agent_output == "rain" and evaluation.late_facts == ()
+    assert evaluation.session is not None
+
+
+@pytest.mark.asyncio
+async def test_a_host_retries_a_failed_snapshot_fetch_by_sealing_again_and_nothing_is_sealed_twice(monkeypatch):
+    plane = ControlPlane({}, config=AppConfig(closure_wait_seconds=0))
+    real = InProcessControlClient.snapshot
+    failures = [OSError("the read failed")]
+
+    async def snapshot_failing_once(self, run_id, eval_id, *, environment_type):
+        if failures:
+            raise failures.pop()
+        return await real(self, run_id, eval_id, environment_type=environment_type)
+
+    monkeypatch.setattr(InProcessControlClient, "snapshot", snapshot_failing_once)
+    interception = HostInterception(upstream=scripted_upstream())
+    async with open_episode(
+        weather_episode(), runtime=RecordingRuntime(), interception=interception, control=plane
+    ) as ep:
+        await ep.turn("weather?", _reply("rain"))
+        with pytest.raises(OSError, match="the read failed") as fetch:
+            await ep.seal("an explicit output")
+        assert ep.result.snapshot is None and ep.result.snapshot_error is fetch.value
+        # The interceptor is still up, and the session bound: a call after the seal is a late fact.
+        assert ep.binding.tool_endpoint is not None
+        await call_tools(ep.binding.tool_endpoint, ("get_weather", {"city": "Boston"}))
+        snapshot = await ep.seal()
+    assert ep.sealed is snapshot and ep.result.snapshot is snapshot and ep.result.snapshot_error is None
+    assert snapshot.agent_output == "an explicit output" and not ep.interrupted
+    evaluation = plane.evaluation(ById(None, ep.evaluation_id))
+    assert [(fact.event, fact.by) for fact in evaluation.late_facts] == [("start_call", "interceptor")]
+    assert snapshot.function_calls == ()
+
+
 @pytest.mark.asyncio
 async def test_a_runtime_whose_run_fails_to_start_is_ended_and_no_evaluation_is_opened(monkeypatch):
     class FailingStart(RecordingRuntime):
@@ -739,6 +1068,55 @@ async def test_nothing_a_holder_does_to_a_sealed_snapshot_changes_it_or_its_grad
     assert copy.deepcopy(snapshot) is snapshot and hash(snapshot) == hash(snapshot_id)
 
 
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        lambda snapshot: setattr(snapshot._function_calls[0], "function", "book_shelter"),
+        lambda snapshot: setattr(snapshot._environment, "counter", 5),
+        lambda snapshot: object.__setattr__(snapshot, "_function_calls", ()),
+        lambda snapshot: object.__setattr__(snapshot, "agent_output", "no rain"),
+        # Edits that leave content the snapshot can't even read back.
+        lambda snapshot: object.__setattr__(snapshot, "_function_calls", 5),
+        lambda snapshot: object.__delattr__(snapshot, "_environment"),
+        lambda snapshot: setattr(snapshot._function_calls[0], "args", {"x": SameRepr()}),
+        lambda snapshot: object.__setattr__(snapshot, "evidence_status", 5),
+    ],
+    ids=[
+        "call_record",
+        "environment",
+        "private_field",
+        "public_field",
+        "not_iterable",
+        "deleted",
+        "unsupported_value",
+        "not_a_mapping",
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_snapshot_whose_content_was_changed_behind_its_id_is_never_graded(tamper):
+    plane = ControlPlane({}, config=AppConfig(closure_wait_seconds=0))
+    episode = weather_episode(
+        environment={"counter": 0},
+        utility={"all_of": [{"output_contains": "rain"}, {"env_field_equals": {"field": "counter", "value": 0}}]},
+        security={"tool_called": {"name": "book_shelter"}},
+    )
+    async with open_episode(episode, runtime=UnmanagedRuntime(), control=plane) as ep:
+        assert ep.binding.session_token is not None
+        recorder = ep.control.recorder(ep.binding.session_token)
+        await recorder.finish_call(call_id="c", function="get_weather", args={}, result="ok", disposition="forwarded")
+        await ep.turn("weather?", _reply("rain"))
+    snapshot = ep.sealed
+    verdict = midojo.grade(episode, snapshot)
+    tamper(snapshot)
+    # The snapshot the control plane keeps is the same object, so its grade is refused too.
+    assert plane.snapshot(None, ep.evaluation_id) is snapshot
+    with pytest.raises(ValueError, match="was changed after it was made"):
+        midojo.grade(episode, snapshot)
+    with pytest.raises(ValueError, match="was changed after it was made"):
+        plane.grade(None, ep.evaluation_id)
+    assert (verdict.grade.utility, verdict.grade.security) == (True, False)
+
+
 def test_a_snapshots_id_is_its_content_digest_and_no_caller_chooses_it(suite):
     plane = ControlPlane({"weather": suite}, config=AppConfig(closure_wait_seconds=0))
     run = plane.create_run("weather")
@@ -763,6 +1141,98 @@ async def test_a_seal_names_any_data_an_episode_accepts_in_its_environment_and_c
     assert snapshot.environment.raw == b"\xff\x00"  # type: ignore[attr-defined]
     assert snapshot.function_calls[0].args["raw"] == b"\xff\x00"
     assert snapshot.snapshot_id == snapshot_digest(snapshot)
+
+
+def test_bytes_that_arent_utf8_in_call_args_replay_and_become_late_facts_without_raising():
+    plane = ControlPlane({}, config=AppConfig(closure_wait_seconds=0))
+    opened = plane.open_evaluation(weather_episode())
+    target = ById(None, opened.id)
+    args = {"raw": b"\xff\x00", "nested": [bytearray(b"\xfe")]}
+
+    def start(call_id: str, **changes):
+        return plane.start_call(
+            target, CreateFunctionCallStart(call_id=call_id, function="f", args={**args, **changes})
+        )
+
+    def finish(call_id: str, **changes):
+        req = CreateFunctionCallRecord(call_id=call_id, function="f", args={**args, **changes}, result="ok")
+        return plane.finish_call(target, req)
+
+    assert start("c1")[1] is True
+    assert start("c1")[1] is False  # a replay of the start
+    assert finish("c1")[1] is True  # finishes the started call
+    assert finish("c1")[1] is False  # a replay of the finish
+    # Bytes and a str that decode alike are different args: a conflict, not a replay.
+    with pytest.raises(RejectedError) as conflict:
+        start("c1", raw="\xff\x00")
+    assert conflict.value.kind is Rejection.CALL_CONFLICT
+    asyncio.run(plane.close(None, opened.id))
+    with pytest.raises(RejectedError) as late_start:
+        start("c2")
+    assert late_start.value.late
+    snapshot = asyncio.run(plane.complete(None, opened.id, "done"))
+    with pytest.raises(RejectedError) as late_finish:
+        finish("c3")
+    assert late_finish.value.late
+    with pytest.raises(RejectedError) as late_replay:
+        finish("c3")
+    assert late_replay.value.late
+    facts = plane.evaluation(target).late_facts
+    assert [(fact.event, fact.call_id) for fact in facts] == [("start_call", "c2"), ("finish_call", "c3")]
+    assert json.loads(json.dumps(dict(facts[0].payload))) == dict(facts[0].payload)
+    assert [call.args for call in snapshot.function_calls] == [args]
+    assert snapshot.snapshot_id == snapshot_digest(snapshot)
+
+
+class Text(str):
+    """A str subclass: not exactly a str."""
+
+
+NOT_TEXT = [5, b"rain", None, ["rain"], Text("rain")]
+
+
+def test_a_turn_message_reply_or_agent_output_that_isnt_exactly_a_str_is_refused_as_unsupported():
+    plane = ControlPlane({}, config=AppConfig(closure_wait_seconds=0))
+    opened = plane.open_evaluation(weather_episode())
+    target = ById(None, opened.id)
+    refusals = []
+    for value in NOT_TEXT:
+        with pytest.raises(RejectedError) as started:
+            plane.start_turn(None, opened.id, value)  # type: ignore[arg-type]
+        refusals.append(started.value)
+    plane.start_turn(None, opened.id, "weather?")
+    for value in NOT_TEXT:
+        with pytest.raises(RejectedError) as replied:
+            plane.record_turn_reply(None, opened.id, 0, value)  # type: ignore[arg-type]
+        refusals.append(replied.value)
+        with pytest.raises(RejectedError) as sealed:
+            asyncio.run(plane.complete(None, opened.id, value))  # type: ignore[arg-type]
+        refusals.append(sealed.value)
+    # A refused seal leaves the evaluation as it was: still open.
+    assert plane.evaluation(target).stage is Stage.OPEN
+    plane.record_turn_reply(None, opened.id, 0, "rain")
+    asyncio.run(plane.close(None, opened.id))
+    # Once closing, still refused outright: never kept as a late fact.
+    with pytest.raises(RejectedError) as late:
+        plane.start_turn(None, opened.id, 5)  # type: ignore[arg-type]
+    refusals.append(late.value)
+    assert {(refused.kind, refused.late) for refused in refusals} == {(Rejection.UNSUPPORTED_VALUE, False)}
+    snapshot = asyncio.run(plane.complete(None, opened.id, "rain"))
+    assert [(turn.message, turn.reply) for turn in snapshot.turns] == [("weather?", "rain")]
+    assert snapshot.agent_output == "rain" and plane.evaluation(target).late_facts == ()
+
+
+@pytest.mark.asyncio
+async def test_an_agent_reply_that_isnt_a_str_fails_its_turn_and_is_never_recorded():
+    async def send(message: str):
+        return 5
+
+    # The client validates it as the routes do (a pydantic ValidationError); the lifecycle would refuse it too.
+    with pytest.raises(ValueError, match="valid string"):
+        async with open_episode(weather_episode(), runtime=UnmanagedRuntime()) as ep:
+            await ep.turn("weather?", send)  # type: ignore[arg-type]
+    assert ep.interrupted and [(turn.message, turn.reply) for turn in ep.sealed.turns] == [("weather?", None)]
+    assert ep.sealed.agent_output == ""
 
 
 def snapshot_with_args(args: dict) -> midojo.Snapshot:
@@ -907,6 +1377,50 @@ def test_a_read_only_mapping_view_is_refused_cleanly_wherever_it_would_enter():
     snapshot = asyncio.run(plane.complete(None, opened.id, "done"))
     assert [call.call_id for call in snapshot.function_calls] == ["ok"] and snapshot.observations == {}
     assert snapshot.environment.blob == b"x" and snapshot.snapshot_id == snapshot_digest(snapshot)  # type: ignore[attr-defined]
+
+
+def looped_values() -> list:
+    """A list, a dict and a tuple that each contain themselves."""
+    looped_list: list = []
+    looped_list.append(looped_list)
+    looped_dict: dict = {}
+    looped_dict["self"] = looped_dict
+    looped_tuple: tuple = ([],)
+    looped_tuple[0].append(looped_tuple)
+    return [looped_list, looped_dict, looped_tuple]
+
+
+def test_a_value_that_contains_itself_is_unsupported_not_a_recursion_error():
+    for looped in looped_values():
+        problem = unsupported_value({"x": {"y": looped}})
+        assert problem is not None and "contains itself" in problem
+    # A value held twice, but never inside itself, is no loop.
+    shared = [1]
+    assert unsupported_value({"a": shared, "b": [shared, (shared,)]}) is None
+
+
+def test_a_call_or_change_holding_a_value_that_contains_itself_is_refused_where_it_enters():
+    plane = ControlPlane({}, config=AppConfig(closure_wait_seconds=0))
+    opened = plane.open_evaluation(weather_episode(environment={"blob": b""}))
+    target = ById(None, opened.id)
+    for looped in looped_values():
+        with pytest.raises(RejectedError) as started:
+            plane.start_call(target, CreateFunctionCallStart(call_id="s", function="f", args={"x": looped}))
+        assert started.value.kind is Rejection.UNSUPPORTED_VALUE and not started.value.late
+        with pytest.raises(RejectedError) as finished:
+            plane.finish_call(
+                target, CreateFunctionCallRecord(call_id="f", function="f", args={"x": looped}, result="ok")
+            )
+        assert finished.value.kind is Rejection.UNSUPPORTED_VALUE
+        with pytest.raises(RejectedError) as changed:
+            plane.change_environment(target, {"blob": looped})
+        assert changed.value.kind is Rejection.INVALID_ENVIRONMENT
+        with pytest.raises(RejectedError) as observed:
+            plane.apply(target, RecordObservations("openshell", Observed(value=looped), AT))
+        assert observed.value.kind is Rejection.UNSUPPORTED_VALUE
+    snapshot = asyncio.run(plane.complete(None, opened.id, "done"))
+    assert snapshot.function_calls == () and snapshot.observations == {}
+    assert snapshot.environment.blob == b"" and snapshot.snapshot_id == snapshot_digest(snapshot)  # type: ignore[attr-defined]
 
 
 class Observed(pydantic.BaseModel):

@@ -16,7 +16,6 @@ from midojo.verifiers import ConversationTurn
 
 from .models import GradeResponse
 from .state import Snapshot
-from .store import detached
 
 
 def grade_snapshot(episode: Episode, snapshot: Snapshot) -> GradeResponse:
@@ -27,8 +26,12 @@ def grade_snapshot(episode: Episode, snapshot: Snapshot) -> GradeResponse:
     evidence status is the episode's, with every key the snapshot marks (a late
     fact or a capture failure recorded before the seal, or a call capture the
     seal found incomplete) taken from the snapshot.
+
+    It grades only the content ``snapshot.snapshot_id`` names, read once
+    (:meth:`Snapshot.verified`): a snapshot changed after it was made (its
+    private copies, say) raises ValueError, and is never graded.
     """
-    snapshot = detached(snapshot)
+    snapshot = snapshot.verified()
     result = episode.grade(
         agent_output=snapshot.agent_output,
         pre_environment=snapshot.pre_environment,
