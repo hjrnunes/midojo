@@ -740,6 +740,11 @@ def _float(bits: str) -> float:
     return struct.unpack(">d", bytes.fromhex(bits))[0]
 
 
+def test_a_set_and_a_frozenset_with_equal_members_get_different_digests():
+    assert snapshot_with_args({"x": {1, 2}}).snapshot_id != snapshot_with_args({"x": frozenset({1, 2})}).snapshot_id
+    assert snapshot_with_args({"x": set()}).snapshot_id != snapshot_with_args({"x": frozenset()}).snapshot_id
+
+
 def test_a_float_is_digested_by_its_bits_so_nans_with_different_payloads_or_signs_differ():
     nans = [_float(bits) for bits in ("7ff8000000000000", "7ff8000000000001", "fff8000000000000", "7ff0000000000001")]
     assert all(math.isnan(nan) for nan in nans)

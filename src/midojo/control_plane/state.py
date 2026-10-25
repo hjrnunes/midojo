@@ -277,10 +277,10 @@ def _canonical(value: Any, path: str = "") -> Any:
     Exactly ``str``, ``int`` and ``bool``, and None, are themselves; any other
     value is a ``[tag, content]`` pair, so no value is mistaken for another:
     a float by its IEEE-754 bits (so every NaN payload and sign too), bytes
-    as hex, a list or a tuple by its items, a mapping by its ``[key, value]``
-    items and a set by its items, both sorted by their encoding, a date,
-    datetime or time in ISO format, and a timedelta as days, seconds and
-    microseconds.
+    as hex, a list or a tuple by its items, a set or a frozenset by its items
+    sorted by their encoding (each tagged with its own type), a mapping by
+    its ``[key, value]`` items sorted by their encoding, a date, datetime or
+    time in ISO format, and a timedelta as days, seconds and microseconds.
     """
     kind = type(value)
     if value is None or kind in (str, int, bool):
@@ -298,7 +298,7 @@ def _canonical(value: Any, path: str = "") -> Any:
             items.append([encoded, _canonical(item, f"{path}[{_dumps(encoded)}]")])
         return ["mapping", sorted(items, key=_dumps)]
     if kind in (set, frozenset):
-        return ["set", sorted((_canonical(item, f"{path}<item>") for item in value), key=_dumps)]
+        return [kind.__name__, sorted((_canonical(item, f"{path}<item>") for item in value), key=_dumps)]
     if kind in (datetime, time) and (value.tzinfo is None or type(value.tzinfo) in _FIXED_OFFSETS):
         return [kind.__name__, value.isoformat()]
     if kind is date:
