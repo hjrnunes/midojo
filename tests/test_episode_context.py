@@ -359,6 +359,33 @@ async def test_a_target_is_reset_only_when_asked_and_declared_and_the_result_say
     assert ep.result.reset == outcome
 
 
+@pytest.mark.asyncio
+async def test_a_reset_that_succeeds_while_a_cancellation_waits_is_reported_as_done():
+    started, release = threading.Event(), threading.Event()
+
+    class SlowReset(ResettingRuntime):
+        def reset(self) -> None:
+            started.set()
+            release.wait(10)
+            super().reset()
+
+    runtime = SlowReset()
+    ep = open_episode(weather_episode(), runtime=runtime, reset=True)
+
+    async def run() -> None:
+        async with ep:
+            raise AssertionError("never entered")
+
+    task = asyncio.create_task(run())
+    await asyncio.to_thread(started.wait, 10)
+    task.cancel()
+    await asyncio.sleep(0.05)
+    release.set()  # the reset succeeds, with the cancellation pending
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert runtime.steps == ["reset"] and ep.reset_outcome == "reset"
+
+
 # --- failure and cancellation: released, and sealed with incomplete evidence, never open ---
 
 

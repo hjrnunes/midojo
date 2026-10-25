@@ -241,9 +241,16 @@ class EpisodeContext:
         if self._reset_requested:
             # Only a declared capability: an external target is never reset behind its owner's back.
             if isinstance(runtime, ResettableRuntime):
+                resettable = runtime
+
+                def reset() -> None:
+                    resettable.reset()
+                    # Set in the step itself, as for setup: a reset that succeeds while a cancellation waits for it
+                    # still happened.
+                    self.reset_outcome = "reset"
+
                 with self._progress("reset"):
-                    await _in_thread(runtime.reset)
-                self.reset_outcome = "reset"
+                    await _in_thread(reset)
             else:
                 self.reset_outcome = "unsupported"
         await self._open()
