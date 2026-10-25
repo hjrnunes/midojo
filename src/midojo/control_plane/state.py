@@ -216,29 +216,35 @@ class Snapshot:
         The content is read once, through the copying reads, and digested
         again: a snapshot whose content no longer has its ID (one of its
         private copies, or a field, was changed after it was made) raises
-        ValueError. What is returned is checked, and nothing else holds it.
+        ValueError, and so does one whose content can't be read back at all
+        (a field deleted, or set to a value of another type). What is
+        returned is checked, and nothing else holds it.
         """
-        turns, capture_failures = copy.deepcopy((self.turns, self.capture_failures))
-        held = Snapshot(
-            evaluation_id=self.evaluation_id,
-            run_id=self.run_id,
-            user_task_id=self.user_task_id,
-            injection_task_id=self.injection_task_id,
-            agent_output=self.agent_output,
-            pre_environment=self.pre_environment,
-            environment=self.environment,
-            function_calls=self.function_calls,
-            turns=turns,
-            observations=self.observations,
-            evidence_status=self.evidence_status,
-            sealed_at=self.sealed_at,
-            capture_failures=capture_failures,
+        changed = (
+            f"Snapshot {getattr(self, 'snapshot_id', None)} of evaluation {getattr(self, 'evaluation_id', None)} "
+            "was changed after it was made"
         )
-        if held.snapshot_id != self.snapshot_id:
-            raise ValueError(
-                f"Snapshot {self.snapshot_id} of evaluation {self.evaluation_id} was changed after it was made: "
-                f"its content differs from its snapshot_id"
+        try:
+            turns, capture_failures = copy.deepcopy((self.turns, self.capture_failures))
+            held = Snapshot(
+                evaluation_id=self.evaluation_id,
+                run_id=self.run_id,
+                user_task_id=self.user_task_id,
+                injection_task_id=self.injection_task_id,
+                agent_output=self.agent_output,
+                pre_environment=self.pre_environment,
+                environment=self.environment,
+                function_calls=self.function_calls,
+                turns=turns,
+                observations=self.observations,
+                evidence_status=self.evidence_status,
+                sealed_at=self.sealed_at,
+                capture_failures=capture_failures,
             )
+        except Exception as error:
+            raise ValueError(f"{changed}: its content can't be read back ({type(error).__name__}: {error})") from error
+        if held.snapshot_id != self.snapshot_id:
+            raise ValueError(f"{changed}: its content differs from its snapshot_id")
         return held
 
     def __hash__(self) -> int:

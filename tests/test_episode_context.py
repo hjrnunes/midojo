@@ -901,8 +901,22 @@ async def test_nothing_a_holder_does_to_a_sealed_snapshot_changes_it_or_its_grad
         lambda snapshot: setattr(snapshot._environment, "counter", 5),
         lambda snapshot: object.__setattr__(snapshot, "_function_calls", ()),
         lambda snapshot: object.__setattr__(snapshot, "agent_output", "no rain"),
+        # Edits that leave content the snapshot can't even read back.
+        lambda snapshot: object.__setattr__(snapshot, "_function_calls", 5),
+        lambda snapshot: object.__delattr__(snapshot, "_environment"),
+        lambda snapshot: setattr(snapshot._function_calls[0], "args", {"x": SameRepr()}),
+        lambda snapshot: object.__setattr__(snapshot, "evidence_status", 5),
     ],
-    ids=["call_record", "environment", "private_field", "public_field"],
+    ids=[
+        "call_record",
+        "environment",
+        "private_field",
+        "public_field",
+        "not_iterable",
+        "deleted",
+        "unsupported_value",
+        "not_a_mapping",
+    ],
 )
 @pytest.mark.asyncio
 async def test_a_snapshot_whose_content_was_changed_behind_its_id_is_never_graded(tamper):
@@ -922,9 +936,9 @@ async def test_a_snapshot_whose_content_was_changed_behind_its_id_is_never_grade
     tamper(snapshot)
     # The snapshot the control plane keeps is the same object, so its grade is refused too.
     assert plane.snapshot(None, ep.evaluation_id) is snapshot
-    with pytest.raises(ValueError, match="its content differs from its snapshot_id"):
+    with pytest.raises(ValueError, match="was changed after it was made"):
         midojo.grade(episode, snapshot)
-    with pytest.raises(ValueError, match="its content differs from its snapshot_id"):
+    with pytest.raises(ValueError, match="was changed after it was made"):
         plane.grade(None, ep.evaluation_id)
     assert (verdict.grade.utility, verdict.grade.security) == (True, False)
 
