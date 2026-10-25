@@ -12,24 +12,28 @@ import copy
 import dataclasses
 import datetime
 import json
+import math
 import os
+import struct
 import sys
 import threading
 import uuid
 from pathlib import Path
 
 import httpx
+import pydantic
 import pytest
 from fastapi.testclient import TestClient
 from fastmcp import Client
 from midojo_sdk.injection import Channel, InjectionInstruction, InjectionPlan, InjectionTarget
 from midojo_sdk.mcp import MidojoMCP
+from midojo_sdk.recorder import ControlPlaneRejectedError, RejectionKind
 
 import midojo
 from midojo.control_plane.client import ControlPlaneClient
 from midojo.control_plane.config import AppConfig
 from midojo.control_plane.inprocess_control import InProcessControlClient
-from midojo.control_plane.lifecycle import RejectedError, Rejection, Seal
+from midojo.control_plane.lifecycle import RecordObservations, RejectedError, Rejection, Seal
 from midojo.control_plane.main import create_app
 from midojo.control_plane.models import CreateFunctionCallStart
 from midojo.control_plane.service import ById, ControlPlane
@@ -664,6 +668,79 @@ def test_different_values_never_share_a_snapshot_id():
     assert (
         snapshot_with_args({"a": 1, "b": {2, 3}}).snapshot_id == snapshot_with_args({"b": {3, 2}, "a": 1}).snapshot_id
     )
+
+
+def _float(bits: str) -> float:
+    return struct.unpack(">d", bytes.fromhex(bits))[0]
+
+
+def test_a_float_is_digested_by_its_bits_so_nans_with_different_payloads_or_signs_differ():
+    nans = [_float(bits) for bits in ("7ff8000000000000", "7ff8000000000001", "fff8000000000000", "7ff0000000000001")]
+    assert all(math.isnan(nan) for nan in nans)
+    ids = [snapshot_with_args({"x": nan}).snapshot_id for nan in nans]
+    assert len(set(ids)) == len(nans)
+    assert snapshot_with_args({"x": _float("7ff8000000000001")}).snapshot_id == ids[1]
+
+
+class SameRepr:
+    """Unequal objects that all look alike."""
+
+    def __repr__(self) -> str:
+        return "SameRepr()"
+
+
+class RaisingRepr:
+    def __repr__(self) -> str:
+        raise RuntimeError("no repr")
+
+
+@pytest.mark.asyncio
+async def test_call_args_the_digest_cant_encode_are_refused_when_recorded_and_the_evaluation_still_seals():
+    plane = ControlPlane({}, config=AppConfig(closure_wait_seconds=0))
+    async with open_episode(weather_episode(), runtime=UnmanagedRuntime(), control=plane) as ep:
+        assert ep.binding.session_token is not None
+        recorder = ep.control.recorder(ep.binding.session_token)
+        for unsupported in (SameRepr(), RaisingRepr(), {"nested": [SameRepr()]}, {SameRepr(): 1}):
+            with pytest.raises(ControlPlaneRejectedError) as refused:
+                await recorder.start_call(call_id="s", function="f", args={"x": unsupported}, disposition="forwarded")
+            assert refused.value.kind is RejectionKind.UNSUPPORTED_VALUE and not refused.value.late_fact
+            with pytest.raises(ControlPlaneRejectedError) as refused:
+                await recorder.finish_call(
+                    call_id="f", function="f", args={"x": unsupported}, result="ok", disposition="forwarded"
+                )
+            assert refused.value.kind is RejectionKind.UNSUPPORTED_VALUE
+        # On the single writer's own path too, not just through the SDK.
+        with pytest.raises(RejectedError) as direct:
+            plane.start_call(
+                ById(None, ep.evaluation_id), CreateFunctionCallStart(call_id="d", function="f", args={"x": SameRepr()})
+            )
+        assert direct.value.kind is Rejection.UNSUPPORTED_VALUE
+        await recorder.finish_call(call_id="ok", function="f", args={"x": 1}, result="ok", disposition="forwarded")
+        await ep.turn("hi", _reply("rain"))
+    assert [call.call_id for call in ep.sealed.function_calls] == ["ok"]
+    assert ep.sealed.snapshot_id == snapshot_digest(ep.sealed)
+
+
+def test_an_environment_or_observations_the_digest_cant_encode_are_refused():
+    plane = ControlPlane({}, config=AppConfig(closure_wait_seconds=0))
+    opened = plane.open_evaluation(weather_episode(environment={"blob": b""}))
+    target = ById(None, opened.id)
+    with pytest.raises(RejectedError) as changed:
+        plane.change_environment(target, {"blob": SameRepr()})
+    assert changed.value.kind is Rejection.INVALID_ENVIRONMENT
+    environment = plane.evaluation(target).environment.model_copy(update={"blob": RaisingRepr()})
+    with pytest.raises(RejectedError) as replaced:
+        plane.replace_environment(target, environment)
+    assert replaced.value.kind is Rejection.INVALID_ENVIRONMENT
+
+    class Anything(pydantic.BaseModel):
+        value: object
+
+    with pytest.raises(RejectedError) as observed:
+        plane.apply(target, RecordObservations("openshell", Anything(value=SameRepr()), "2026-01-01T00:00:00+00:00"))
+    assert observed.value.kind is Rejection.UNSUPPORTED_VALUE
+    snapshot = asyncio.run(plane.complete(None, opened.id, "done"))
+    assert snapshot.environment.blob == b"" and snapshot.observations == {}  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio

@@ -58,7 +58,7 @@ from .models import (
     CreateFunctionCallStart,
     GradeResponse,
 )
-from .state import CaptureFailure, Evaluation, Run, Snapshot, Stage, Turn
+from .state import CaptureFailure, Evaluation, Run, Snapshot, Stage, Turn, unsupported_value
 from .store import InMemoryStore, Store, detached
 
 # How often the closure wait checks for unfinished calls, in seconds.
@@ -235,11 +235,15 @@ class ControlPlane:
         an interception layer given the session) or ``host`` (by an interceptor
         the host runs outside the target, the only holder of the session). It
         labels each record the session makes (``FunctionCallRecord.provenance``).
+        An environment holding a value a snapshot can't hold
+        (``state.unsupported_value``) raises ValueError too.
         """
         run = self.run(run_id) if run_id is not None else None
         if run is not None and episode.user_task_id is None:
             raise ValueError("An episode opened in a run needs a user_task_id")
         environment = episode.provision_environment()
+        if (problem := unsupported_value(environment.model_dump())) is not None:
+            raise ValueError(f"The episode's environment can't be kept: {problem}")
         turns = episode.turns
         evaluation = Evaluation(
             id=self.store.new_evaluation_id(),

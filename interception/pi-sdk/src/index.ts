@@ -45,6 +45,7 @@ export const REJECTION_KINDS = [
 	"turn_answered",
 	"revision_conflict",
 	"invalid_environment",
+	"unsupported_value",
 ] as const;
 
 export type RejectionKind = (typeof REJECTION_KINDS)[number];

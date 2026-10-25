@@ -15,13 +15,15 @@ import dataclasses
 import enum
 import hashlib
 import json
+import struct
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta, timezone
 from types import MappingProxyType
 from typing import Any
 
 from pydantic import BaseModel
+from pydantic_core import TzInfo
 
 from midojo.episode import Episode
 from midojo.observations import FUNCTION_CALLS, EvidenceStatus
@@ -217,8 +219,10 @@ class Snapshot:
 def snapshot_digest(snapshot: Snapshot) -> str:
     """``sha256:<hex>`` of the snapshot's content, everything in it but its ID, in a lossless encoding.
 
-    The encoding (``_canonical``) never fails for data an episode accepts, and
-    two snapshots share a digest only when their content is equal.
+    Two snapshots share a digest only when their content is equal. The
+    encoding takes only the values :func:`unsupported_value` accepts, which is
+    all an evaluation holds: the control plane refuses any other where it
+    enters (a call's args, an environment, observations).
     """
     content = {
         "evaluation_id": snapshot.evaluation_id,
@@ -233,40 +237,75 @@ def snapshot_digest(snapshot: Snapshot) -> str:
         "observations": {source: observed.model_dump() for source, observed in snapshot._observations.items()},
         "evidence_status": dict(snapshot.evidence_status),
         "sealed_at": snapshot.sealed_at,
-        "capture_failures": [dataclasses.asdict(failure) for failure in snapshot.capture_failures],
+        "capture_failures": [
+            {**dataclasses.asdict(failure), "stage": failure.stage.value} for failure in snapshot.capture_failures
+        ],
     }
     return f"sha256:{hashlib.sha256(_dumps(_canonical(content)).encode()).hexdigest()}"
 
 
-def _canonical(value: Any) -> Any:
-    """A JSON value that encodes ``value`` losslessly: unequal values encode differently, and nothing raises.
+def unsupported_value(value: Any) -> str | None:
+    """Where ``value`` holds a value the snapshot digest can't encode, and of which type; None when it has none.
+
+    The digest encodes exactly these: None, ``bool``, ``int``, ``float``,
+    ``str``, ``bytes`` and ``bytearray``; ``list``, ``tuple``, ``set`` and
+    ``frozenset`` of them, and ``dict`` (or a read-only view of one) with
+    keys and values of them; ``date``, ``datetime``, ``time`` and
+    ``timedelta``, with no time zone or a fixed offset (``datetime.timezone``,
+    or pydantic's parsed ``TzInfo``). Exactly these types, not their
+    subclasses: anything else could be unequal and still encode alike, or
+    fail to encode at all.
+    """
+    try:
+        _canonical(value)
+    except _UnsupportedValueError as unsupported:
+        return str(unsupported)
+    return None
+
+
+class _UnsupportedValueError(TypeError):
+    def __init__(self, path: str, value: Any) -> None:
+        super().__init__(f"{path or 'the value'} is a {type(value).__module__}.{type(value).__qualname__}")
+
+
+_FIXED_OFFSETS = (timezone, TzInfo)
+
+
+def _canonical(value: Any, path: str = "") -> Any:
+    """A JSON value that encodes ``value`` losslessly: unequal values encode differently. Raises ``_UnsupportedValueError``.
 
     Exactly ``str``, ``int`` and ``bool``, and None, are themselves; any other
     value is a ``[tag, content]`` pair, so no value is mistaken for another:
-    a float by its ``repr`` (``inf`` and ``nan`` included), bytes as hex, a
-    list or a tuple by its items, a mapping by its ``[key, value]`` items
-    (keys of any type) and a set by its items, both sorted by their encoding,
-    a date, datetime or time in ISO format, a timedelta as days, seconds and
-    microseconds, and anything else by its type's qualified name and ``repr``.
+    a float by its IEEE-754 bits (so every NaN payload and sign too), bytes
+    as hex, a list or a tuple by its items, a mapping by its ``[key, value]``
+    items and a set by its items, both sorted by their encoding, a date,
+    datetime or time in ISO format, and a timedelta as days, seconds and
+    microseconds.
     """
     kind = type(value)
     if value is None or kind in (str, int, bool):
         return value
     if kind is float:
-        return ["float", repr(value)]
+        return ["float", struct.pack(">d", value).hex()]
     if kind in (bytes, bytearray):
         return [kind.__name__, value.hex()]
     if kind in (list, tuple):
-        return [kind.__name__, [_canonical(item) for item in value]]
-    if isinstance(value, Mapping):
-        return ["mapping", sorted(([_canonical(key), _canonical(item)] for key, item in value.items()), key=_dumps)]
+        return [kind.__name__, [_canonical(item, f"{path}[{index}]") for index, item in enumerate(value)]]
+    if kind in (dict, MappingProxyType):
+        items = []
+        for index, (key, item) in enumerate(value.items()):
+            encoded = _canonical(key, f"{path}<key {index}>")
+            items.append([encoded, _canonical(item, f"{path}[{_dumps(encoded)}]")])
+        return ["mapping", sorted(items, key=_dumps)]
     if kind in (set, frozenset):
-        return ["set", sorted((_canonical(item) for item in value), key=_dumps)]
-    if kind in (datetime, date, time):
+        return ["set", sorted((_canonical(item, f"{path}<item>") for item in value), key=_dumps)]
+    if kind in (datetime, time) and (value.tzinfo is None or type(value.tzinfo) in _FIXED_OFFSETS):
         return [kind.__name__, value.isoformat()]
+    if kind is date:
+        return ["date", value.isoformat()]
     if kind is timedelta:
         return ["timedelta", [value.days, value.seconds, value.microseconds]]
-    return [f"{kind.__module__}.{kind.__qualname__}", repr(value)]
+    raise _UnsupportedValueError(path, value)
 
 
 def _dumps(encoded: Any) -> str:

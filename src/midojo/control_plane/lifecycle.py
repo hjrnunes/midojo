@@ -105,6 +105,7 @@ from .state import (
     Turn,
     capture_evidence,
     late_evidence,
+    unsupported_value,
 )
 
 # --- outcomes ---
@@ -133,6 +134,8 @@ class Rejection(enum.StrEnum):
     # The environment.
     REVISION_CONFLICT = "revision_conflict"
     INVALID_ENVIRONMENT = "invalid_environment"
+    # Values a snapshot can't hold (see ``state.unsupported_value``).
+    UNSUPPORTED_VALUE = "unsupported_value"
 
 
 @dataclass(frozen=True)
@@ -553,8 +556,17 @@ def _observed(evaluation: Evaluation) -> Environment | None:
     return evaluation.environment.model_copy(deep=True) if evaluation.environment_history else None
 
 
+def _unsupported_call(req: FunctionCallStart | CreateFunctionCallRecord) -> Rejected | None:
+    """Refuse a call whose record holds a value the snapshot digest can't encode, before it's kept or compared."""
+    if (problem := unsupported_value(req.model_dump())) is None:
+        return None
+    return Rejected(Rejection.UNSUPPORTED_VALUE, f"The call's record can't be kept: {problem}")
+
+
 def _start_call(evaluation: Evaluation, authority: Authority, event: StartCall) -> Outcome:
     req = event.req
+    if (unsupported := _unsupported_call(req)) is not None:
+        return unsupported
     if req.disposition in REFUSED_DISPOSITIONS:
         return Rejected(
             Rejection.INVALID_DISPOSITION,
@@ -592,6 +604,8 @@ def _start_call(evaluation: Evaluation, authority: Authority, event: StartCall) 
 
 def _finish_call(evaluation: Evaluation, authority: Authority, event: FinishCall) -> Outcome:
     req = event.req
+    if (unsupported := _unsupported_call(req)) is not None:
+        return unsupported
     if (invalid := _invalid_disposition(req.disposition, req.blocked)) is not None:
         return Rejected(Rejection.INVALID_DISPOSITION, invalid)
     index = _find_call(evaluation, req.call_id) if req.call_id is not None else None
@@ -730,6 +744,8 @@ def _reply_turn(evaluation: Evaluation, authority: Authority, event: ReplyTurn) 
 
 
 def _replace_environment(evaluation: Evaluation, authority: Authority, event: ReplaceEnvironment) -> Outcome:
+    if (problem := unsupported_value(event.environment.model_dump())) is not None:
+        return Rejected(Rejection.INVALID_ENVIRONMENT, f"The environment can't be kept: {problem}")
     # A call finishing during the closure wait may still change the environment.
     if evaluation.stage not in (Stage.OPEN, Stage.CLOSING):
         payload = event.environment.model_dump(mode="json")
@@ -759,12 +775,16 @@ def _change_environment(evaluation: Evaluation, authority: Authority, event: Cha
         environment = model.model_validate({**evaluation.environment.model_dump(), **event.values})
     except ValidationError as exc:
         return Rejected(Rejection.INVALID_ENVIRONMENT, str(exc))
+    if (problem := unsupported_value(environment.model_dump())) is not None:
+        return Rejected(Rejection.INVALID_ENVIRONMENT, f"The changed environment can't be kept: {problem}")
     revision = evaluation.environment_revision + 1
     next_value = _replace(evaluation, environment=environment, environment_revision=revision)
     return Accepted(next_value, (revision, environment))
 
 
 def _record_observations(evaluation: Evaluation, authority: Authority, event: RecordObservations) -> Outcome:
+    if (problem := unsupported_value(event.observed.model_dump())) is not None:
+        return Rejected(Rejection.UNSUPPORTED_VALUE, f"The {event.source} observations can't be kept: {problem}")
     if evaluation.stage is Stage.SEALED:
         evidence = tuple(evidence_status({event.source: event.observed})) or (event.source,)
         payload = {"source": event.source, "data": event.observed.model_dump(mode="json")}
