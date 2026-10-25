@@ -473,20 +473,34 @@ async def _in_thread(function: Callable[..., T], /, *args: Any, **kwargs: Any) -
     """Run a runtime step in a thread.
 
     A cancellation doesn't stop the thread, so the step is let finish before
-    the cancellation goes on: the runtime is never released while one of its
-    steps is still running. The step is an executor future, not a task (as
-    ``asyncio.to_thread`` would wrap it in): a KeyboardInterrupt or SystemExit
-    it raises is raised here, to the caller, rather than out of the event loop.
+    the cancellation goes on, however many arrive meanwhile: the runtime is
+    never released while one of its steps is still running. Its outcome is
+    then retrieved: a KeyboardInterrupt or SystemExit it raised goes on ahead
+    of the cancellation (noted on it); otherwise the first cancellation goes
+    on, with any other error the step raised as its context. The step is an
+    executor future, not a task (as ``asyncio.to_thread`` would wrap it in):
+    an interrupt it raises reaches the caller rather than leaving the event
+    loop.
     """
     context = contextvars.copy_context()
     step: asyncio.Future[T] = asyncio.get_running_loop().run_in_executor(
         None, lambda: context.run(function, *args, **kwargs)
     )
-    try:
-        return await asyncio.shield(step)
-    except asyncio.CancelledError:
-        await asyncio.wait([step])
-        raise
+    cancelled: asyncio.CancelledError | None = None
+    while not step.done():
+        try:
+            await asyncio.wait([step])
+        except asyncio.CancelledError as error:
+            cancelled = cancelled or error
+    if cancelled is None:
+        return step.result()
+    error = step.exception()
+    if isinstance(error, KeyboardInterrupt | SystemExit):
+        error.add_note("Cancelled while the runtime step ran")
+        raise error
+    if error is not None:
+        cancelled.__context__ = error
+    raise cancelled
 
 
 def open_episode(

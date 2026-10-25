@@ -11,7 +11,9 @@ import asyncio
 import copy
 import dataclasses
 import datetime
+import gc
 import json
+import logging
 import math
 import os
 import struct
@@ -485,6 +487,70 @@ async def test_a_cancelled_setup_finishes_before_the_runtime_is_torn_down():
     release.set()
     with pytest.raises(asyncio.CancelledError):
         await task
+    assert runtime.steps == ["setup started", "setup finished", "teardown"]
+
+
+class BlockingSetup(RecordingRuntime):
+    """A runtime whose setup waits in its thread for ``release``, then finishes or raises ``raises``."""
+
+    def __init__(self, raises: type[BaseException] | None = None) -> None:
+        super().__init__()
+        self.started, self.release, self.raises = threading.Event(), threading.Event(), raises
+
+    def setup(self, injections, **kwargs):
+        self.steps.append("setup started")
+        self.started.set()
+        self.release.wait(10)
+        self.steps.append("setup finished")
+        if self.raises is not None:
+            raise self.raises("stop now")
+
+
+@pytest.mark.asyncio
+async def test_repeated_cancellation_during_a_runtime_step_waits_for_it_before_the_next_step():
+    runtime = BlockingSetup()
+
+    async def run() -> None:
+        async with open_episode(weather_episode(), runtime=runtime):
+            raise AssertionError("never entered")
+
+    task = asyncio.create_task(run())
+    await asyncio.to_thread(runtime.started.wait, 10)
+    for _ in range(3):
+        task.cancel()
+        await asyncio.sleep(0.05)
+        assert runtime.steps == ["setup started"]  # no teardown while setup still runs in its thread
+    runtime.release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert runtime.steps == ["setup started", "setup finished", "teardown"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exiting", [KeyboardInterrupt, SystemExit])
+async def test_an_interrupt_a_runtime_step_raises_after_a_cancellation_goes_on_ahead_of_it(caplog, exiting):
+    runtime = BlockingSetup(raises=exiting)
+    me = asyncio.current_task()
+    assert me is not None
+
+    async def cancel_twice_then_release() -> None:
+        await asyncio.to_thread(runtime.started.wait, 10)
+        for _ in range(2):
+            me.cancel()
+            await asyncio.sleep(0.05)
+        runtime.release.set()
+
+    canceller = asyncio.create_task(cancel_twice_then_release())
+    with caplog.at_level(logging.ERROR, logger="asyncio"), pytest.raises(exiting) as raised:
+        async with open_episode(weather_episode(), runtime=runtime):
+            raise AssertionError("never entered")
+    await canceller
+    while me.cancelling():
+        me.uncancel()
+    gc.collect()
+    await asyncio.sleep(0)
+    assert "never retrieved" not in caplog.text
+    assert any("Cancelled" in note for note in raised.value.__notes__)
     assert runtime.steps == ["setup started", "setup finished", "teardown"]
 
 
