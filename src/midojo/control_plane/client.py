@@ -216,7 +216,9 @@ def snapshot_from_response(response: SnapshotResponse, environment_type: type[En
     """The snapshot ``response`` carries, as the control plane holds it: environments as ``environment_type``.
 
     Observations are validated against the model registered for their source;
-    an unregistered source raises ValueError.
+    an unregistered source raises ValueError. So does a rebuilt snapshot whose
+    content digest isn't the ``snapshot_id`` the control plane sent: it isn't
+    the snapshot that was sealed (another environment type, say).
     """
 
     def call(data: dict[str, Any]) -> FunctionCallRecord:
@@ -234,10 +236,9 @@ def snapshot_from_response(response: SnapshotResponse, environment_type: type[En
         if model is None:
             raise ValueError(f"Unknown observation source: {source!r}")
         observations[source] = model.model_validate(data)
-    return Snapshot(
+    snapshot = Snapshot(
         evaluation_id=response.evaluation_id,
         run_id=response.run_id,
-        snapshot_id=response.snapshot_id,
         user_task_id=response.user_task_id,
         injection_task_id=response.injection_task_id,
         agent_output=response.agent_output,
@@ -253,3 +254,6 @@ def snapshot_from_response(response: SnapshotResponse, environment_type: type[En
             for failure in response.capture_failures
         ),
     )
+    if snapshot.snapshot_id != response.snapshot_id:
+        raise ValueError(f"Snapshot {response.snapshot_id} didn't survive the round trip: its content differs")
+    return snapshot

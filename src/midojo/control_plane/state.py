@@ -11,10 +11,14 @@ store keeps.
 
 from __future__ import annotations
 
+import dataclasses
 import enum
-from collections.abc import Mapping
+import hashlib
+import json
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from types import MappingProxyType
 from typing import Any
 
 from pydantic import BaseModel
@@ -103,17 +107,27 @@ class CaptureFailure:
     at: str
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class Snapshot:
-    """What the seal fixes: everything grading reads, and how completely it was collected.
+    """What the seal fixes: everything grading reads, and how completely it was collected. Immutable.
 
     ``evidence_status`` is the observations' own status, with every key a late
-    fact recorded before the seal marked ``incomplete``, and ``function_calls``
-    marked ``incomplete`` when a capture failure was reported before the seal.
+    fact recorded before the seal marked ``incomplete``, ``function_calls``
+    marked ``incomplete`` when a capture failure was reported before the seal,
+    and every key the host named as incomplete at the seal.
 
     ``evaluation_id`` and ``run_id`` name the evaluation it seals (``run_id``
     None outside a run), and ``snapshot_id`` this snapshot: a result graded
     from it names what it graded, never "the latest evaluation".
+    ``snapshot_id`` is the snapshot's own content digest (:func:`snapshot_digest`),
+    computed here: no caller chooses it, and equal content has an equal ID.
+
+    Nothing a holder does changes a snapshot. Its scalars and its turns and
+    capture failures are immutable, ``evidence_status`` is a read-only mapping,
+    and the environments, call records and observations (mutable pydantic
+    models) are kept as private copies: each read returns a new deep copy, so
+    changing what a read returned changes nothing here. Copying a snapshot
+    returns the snapshot itself.
     """
 
     evaluation_id: str
@@ -122,14 +136,104 @@ class Snapshot:
     user_task_id: str | None
     injection_task_id: str | None
     agent_output: str
-    pre_environment: Environment
-    environment: Environment
-    function_calls: tuple[FunctionCallRecord, ...]
     turns: tuple[Turn, ...]
-    observations: Mapping[str, BaseModel]
     evidence_status: Mapping[str, EvidenceStatus]
     sealed_at: str
-    capture_failures: tuple[CaptureFailure, ...] = ()
+    capture_failures: tuple[CaptureFailure, ...]
+    _pre_environment: Environment
+    _environment: Environment
+    _function_calls: tuple[FunctionCallRecord, ...]
+    _observations: Mapping[str, BaseModel]
+
+    def __init__(
+        self,
+        *,
+        evaluation_id: str,
+        run_id: str | None,
+        user_task_id: str | None,
+        injection_task_id: str | None,
+        agent_output: str,
+        pre_environment: Environment,
+        environment: Environment,
+        function_calls: Iterable[FunctionCallRecord],
+        turns: Iterable[Turn],
+        observations: Mapping[str, BaseModel],
+        evidence_status: Mapping[str, EvidenceStatus],
+        sealed_at: str,
+        capture_failures: Iterable[CaptureFailure] = (),
+    ) -> None:
+        values: dict[str, Any] = {
+            "evaluation_id": evaluation_id,
+            "run_id": run_id,
+            "user_task_id": user_task_id,
+            "injection_task_id": injection_task_id,
+            "agent_output": agent_output,
+            "turns": tuple(turns),
+            "evidence_status": MappingProxyType(dict(evidence_status)),
+            "sealed_at": sealed_at,
+            "capture_failures": tuple(capture_failures),
+            "_pre_environment": pre_environment.model_copy(deep=True),
+            "_environment": environment.model_copy(deep=True),
+            "_function_calls": tuple(call.model_copy(deep=True) for call in function_calls),
+            "_observations": MappingProxyType(
+                {source: observed.model_copy(deep=True) for source, observed in observations.items()}
+            ),
+        }
+        for name, value in values.items():
+            object.__setattr__(self, name, value)
+        object.__setattr__(self, "snapshot_id", snapshot_digest(self))
+
+    @property
+    def pre_environment(self) -> Environment:
+        """The environment when the evaluation was created (a new copy)."""
+        return self._pre_environment.model_copy(deep=True)
+
+    @property
+    def environment(self) -> Environment:
+        """The environment at the seal (a new copy)."""
+        return self._environment.model_copy(deep=True)
+
+    @property
+    def function_calls(self) -> tuple[FunctionCallRecord, ...]:
+        """The call records, in the order they were started (new copies)."""
+        return tuple(call.model_copy(deep=True) for call in self._function_calls)
+
+    @property
+    def observations(self) -> Mapping[str, BaseModel]:
+        """The runtime observations by source (new copies)."""
+        return {source: observed.model_copy(deep=True) for source, observed in self._observations.items()}
+
+    def __hash__(self) -> int:
+        return hash(self.snapshot_id)
+
+    def __copy__(self) -> Snapshot:
+        return self
+
+    def __deepcopy__(self, _memo: dict[int, Any]) -> Snapshot:
+        return self
+
+
+def snapshot_digest(snapshot: Snapshot) -> str:
+    """``sha256:<hex>`` of the snapshot's content as sorted-key JSON: everything in it but its ID."""
+    content = {
+        "evaluation_id": snapshot.evaluation_id,
+        "run_id": snapshot.run_id,
+        "user_task_id": snapshot.user_task_id,
+        "injection_task_id": snapshot.injection_task_id,
+        "agent_output": snapshot.agent_output,
+        "pre_environment": snapshot._pre_environment.model_dump(mode="json"),
+        "environment": snapshot._environment.model_dump(mode="json"),
+        "function_calls": [call.model_dump(mode="json") for call in snapshot._function_calls],
+        "turns": [dataclasses.asdict(turn) for turn in snapshot.turns],
+        "observations": {
+            source: observed.model_dump(mode="json") for source, observed in snapshot._observations.items()
+        },
+        "evidence_status": dict(snapshot.evidence_status),
+        "sealed_at": snapshot.sealed_at,
+        "capture_failures": [dataclasses.asdict(failure) for failure in snapshot.capture_failures],
+    }
+    canonical = json.dumps(content, sort_keys=True, separators=(",", ":"), default=str)
+    return f"sha256:{hashlib.sha256(canonical.encode()).hexdigest()}"
 
 
 @dataclass(frozen=True)

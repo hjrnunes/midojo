@@ -319,7 +319,7 @@ class EndClosureWait:
 
 @dataclass(frozen=True)
 class Seal:
-    """Take the snapshot, with the agent's final output. ``snapshot_id`` names the snapshot.
+    """Take the snapshot, with the agent's final output.
 
     ``incomplete`` names evidence-status keys the host knows it didn't
     collect in full (an episode cut short by a failure or a cancellation):
@@ -328,7 +328,6 @@ class Seal:
 
     agent_output: str
     at: str
-    snapshot_id: str = dataclasses.field(default_factory=lambda: str(uuid.uuid4()))
     incomplete: tuple[str, ...] = ()
 
 
@@ -823,7 +822,6 @@ def _seal(evaluation: Evaluation, authority: Authority, event: Seal) -> Outcome:
     snapshot = Snapshot(
         evaluation_id=evaluation.id,
         run_id=evaluation.run_id,
-        snapshot_id=event.snapshot_id,
         user_task_id=evaluation.user_task_id,
         injection_task_id=evaluation.injection_task_id,
         agent_output=event.agent_output,
