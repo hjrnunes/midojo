@@ -95,9 +95,10 @@ class TaskResult(NamedTuple):
 class PairFailure(NamedTuple):
     """A task pair whose ``run_task`` raised: its evaluation, when one was opened, and why it failed.
 
-    The pair is left out of the run's results and rates. Its evaluation is
-    usually sealed ungraded with incomplete evidence, but ``run_task`` can
-    raise after the control plane graded it (a lost grade response, say).
+    In ``results.json`` the pair is null in the grade and evidence maps and
+    left out of the aggregates and rates. Its evaluation is usually sealed
+    ungraded with incomplete evidence, but ``run_task`` can raise after the
+    control plane graded it (a lost grade response, say).
     """
 
     eval_id: str | None
@@ -250,7 +251,7 @@ def _print_results_table(
     if failures:
         console.print(
             f"\nTask pairs: {len(utility_results)} graded, {len(failures)} failed "
-            "(not counted in the results or the rates; see failure_reason)"
+            "(not in the aggregates or the rates; see failure_reason)"
         )
     console.print(f"\nResults saved to [cyan]{results_file}[/cyan]")
 
@@ -455,6 +456,7 @@ async def _run_benchmark(
                 pair_name = f"{ut_id} x {it_id}" if it_id else ut_id
                 label = f"[bold]{ut_id}[/bold] x [bold]{it_id}[/bold]" if it_id else f"[bold]{ut_id}[/bold]"
                 contexts: list[EpisodeContext] = []
+                cancellations = _cancellations()
                 try:
                     result = await run_task(
                         control,
@@ -468,8 +470,9 @@ async def _run_benchmark(
                 except Exception as error:
                     # An interrupt or a cancellation isn't an Exception, and stops the run. But the episode
                     # context raises its own failure ahead of a cancellation that arrived while it released
-                    # the evaluation, noting the cancellation only: the task is still being cancelled then.
-                    if _being_cancelled():
+                    # the evaluation, noting the cancellation only: the task's cancellation count went up then.
+                    # Only a rise during this pair counts: one a caller suppressed earlier isn't this pair's.
+                    if _cancellations() > cancellations:
                         raise asyncio.CancelledError(f"Cancelled while running {pair_name}") from error
                     # The pair failed. Its evaluation, if opened, is sealed and usually ungraded, but
                     # run_task can raise after the grade: either way the pair isn't counted.
@@ -520,7 +523,7 @@ async def _run_benchmark(
     results: dict[str, object] = {
         "run_id": run_id,
         "suite_name": suite_name,
-        # A failed pair is null in each of these: it isn't counted, whatever the control plane holds for it.
+        # A failed pair is null in each of these, whatever the control plane holds for its evaluation.
         "utility": by_pair(utility_results),
         "utility_reason": by_pair(utility_reasons),
         # null without an injection task, or where the grade is invalid
@@ -559,10 +562,10 @@ async def _run_benchmark(
     return BenchmarkOutcome(graded=len(utility_results), failed=len(failures), results_file=results_file)
 
 
-def _being_cancelled() -> bool:
-    """Whether the current task has a cancellation request it hasn't withdrawn (``uncancel``)."""
+def _cancellations() -> int:
+    """The current task's pending cancellation requests (``Task.cancelling``): requested and not withdrawn."""
     task = asyncio.current_task()
-    return task is not None and task.cancelling() > 0
+    return task.cancelling() if task is not None else 0
 
 
 def _opened_evaluation(contexts: list[EpisodeContext]) -> str | None:

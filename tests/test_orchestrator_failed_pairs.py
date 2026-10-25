@@ -379,6 +379,31 @@ async def test_a_cancellation_still_stops_the_run(control, unmanaged_suite, tmp_
 
 
 @pytest.mark.asyncio
+async def test_a_cancellation_suppressed_before_the_run_doesnt_turn_a_pair_failure_into_one(
+    control, unmanaged_suite, tmp_path
+):
+    me = asyncio.current_task()
+    assert me is not None
+    me.cancel()
+    try:
+        await asyncio.sleep(0)
+    except asyncio.CancelledError:
+        pass  # suppressed without uncancel(): the task's cancellation count stays positive
+    assert me.cancelling() == 1
+    agent = ScriptedAgent(failing="warmest weather")
+    try:
+        outcome = await benchmark(control, unmanaged_suite, agent, tmp_path, USER_TASKS)
+    finally:
+        while me.cancelling():
+            me.uncancel()
+
+    assert (outcome.graded, outcome.failed) == (2, 1)
+    assert len(agent.prompts) == 3  # the pair after the failed one ran
+    results = read_results(tmp_path)
+    assert results["failure_reason"]["warmest_city,"] == "RuntimeError: model unreachable"
+
+
+@pytest.mark.asyncio
 async def test_a_cancellation_while_a_failed_pair_is_released_still_stops_the_run(control, unmanaged_suite, tmp_path):
     """The context raises the pair's own failure ahead of a cancellation during its release: the run still stops."""
     me = asyncio.current_task()
@@ -428,7 +453,7 @@ async def test_a_pair_that_fails_after_the_control_plane_graded_it_is_failed_not
     assert (outcome.graded, outcome.failed) == (2, 1)
     [run] = control.store.list_runs()
     failed = next(e for e in control.evaluations(run.id) if e.user_task_id == "warmest_city")
-    # The control plane graded it, with complete evidence; the run doesn't count it.
+    # The control plane graded it; the run doesn't count it.
     assert (failed.stage.value, failed.graded) == ("sealed", True)
     assert failed.grade is not None and failed.grade.utility is True
     results = read_results(tmp_path)
