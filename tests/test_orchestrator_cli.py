@@ -12,7 +12,7 @@ from midojo.yaml_task_suite import YAMLTaskSuite
 def benchmark(monkeypatch):
     for name in ("MODEL_NAME", "MCP_SERVER_URL", "OPENAI_API_KEY"):
         monkeypatch.delenv(name, raising=False)
-    benchmark = AsyncMock()
+    benchmark = AsyncMock(return_value=orchestrator.BenchmarkOutcome(graded=1, failed=0))
     monkeypatch.setattr(orchestrator, "run_benchmark", benchmark)
     return benchmark
 
