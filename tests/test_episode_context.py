@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import dataclasses
+import datetime
 import json
 import os
 import sys
@@ -38,6 +39,7 @@ from midojo.interception_host import HostInterception, HostInterceptor
 from midojo.runtimes import ResettableRuntime, UnmanagedRuntime
 from midojo.runtimes.openshell import OpenShellObservations
 from midojo.tool_endpoint import HOST_MODE_WITHHELD_ENV, ToolEndpoint
+from midojo.types import FunctionCallRecord
 from tests.fixtures.scripted_target import target as scripted_target
 from tests.fixtures.scripted_target.upstream import scripted_upstream
 
@@ -611,6 +613,75 @@ def test_a_snapshots_id_is_its_content_digest_and_no_caller_chooses_it(suite):
         Seal("done", "2026-01-01T00:00:00+00:00", snapshot_id="chosen")  # type: ignore[call-arg]
     snapshot = asyncio.run(plane.complete(run.id, evaluation.id, "done"))
     assert snapshot.snapshot_id.startswith("sha256:") and snapshot.snapshot_id == snapshot_digest(snapshot)
+
+
+@pytest.mark.asyncio
+async def test_a_seal_names_any_data_an_episode_accepts_in_its_environment_and_call_records():
+    plane = ControlPlane({}, config=AppConfig(closure_wait_seconds=0))
+    data = {"raw": b"\xff\x00", "nan": float("nan"), "inf": float("inf"), "-inf": float("-inf")}
+    episode = weather_episode(environment=data)
+    async with open_episode(episode, runtime=UnmanagedRuntime(), control=plane) as ep:
+        assert ep.binding.session_token is not None
+        recorder = ep.control.recorder(ep.binding.session_token)
+        await recorder.finish_call(call_id="c1", function="f", args=dict(data), result="ok", disposition="forwarded")
+        await ep.turn("hi", _reply("rain"))
+    snapshot = ep.sealed
+    assert snapshot.environment.raw == b"\xff\x00"  # type: ignore[attr-defined]
+    assert snapshot.function_calls[0].args["raw"] == b"\xff\x00"
+    assert snapshot.snapshot_id == snapshot_digest(snapshot)
+
+
+def snapshot_with_args(args: dict) -> midojo.Snapshot:
+    environment = Episode(turns=["hi"]).provision_environment()
+    call = FunctionCallRecord(call_id="c", function="f", args=args, timestamp="t")
+    return midojo.Snapshot(
+        evaluation_id="e",
+        run_id=None,
+        user_task_id=None,
+        injection_task_id=None,
+        agent_output="",
+        pre_environment=environment,
+        environment=environment,
+        function_calls=[call],
+        turns=(),
+        observations={},
+        evidence_status={},
+        sealed_at="t",
+    )
+
+
+def test_different_values_never_share_a_snapshot_id():
+    values = [
+        *("ok", b"ok", "1", b"\xff", ["bytes", "ff"], ["float", "1.0"]),
+        *(None, float("nan"), float("inf"), float("-inf"), 1, 1.0, True, 0, 0.0, False),
+        *([1], (1,), {1}, {"1": 1}, {1: 1}, {"a": b"x"}, {"a": "x"}),
+        *(datetime.date(2026, 1, 1), "2026-01-01", datetime.timedelta(days=1)),
+    ]
+    ids = [snapshot_with_args({"x": value}).snapshot_id for value in values]
+    assert len(set(ids)) == len(values)
+    # Equal content, equal ID: the encoding is canonical.
+    assert (
+        snapshot_with_args({"a": 1, "b": {2, 3}}).snapshot_id == snapshot_with_args({"b": {3, 2}, "a": 1}).snapshot_id
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_snapshot_rebuilt_over_http_has_the_id_the_control_plane_gave_it(suite):
+    app = create_app({"weather": suite}, config=AppConfig(closure_wait_seconds=0, environment_history=True))
+    plane: ControlPlane = app.state.control
+    run = plane.create_run("weather")
+    args = {"f": 1.0, "i": 1, "big": 10**30, "tiny": 5e-324, "s": "é\U0001f600", "nested": {"l": [0.1, None, True]}}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app)) as http:
+        control = ControlPlaneClient("http://control", http=http)
+        episode = suite.episode("weather_new_york")
+        async with open_episode(episode, runtime=UnmanagedRuntime(), control=control, run_id=run.id) as ep:
+            assert ep.binding.session_token is not None
+            recorder = control.recorder(ep.binding.session_token)
+            await recorder.finish_call(call_id="c1", function="f", args=args, result="ok", disposition="forwarded")
+            await ep.turn("hi", _reply("rain"))
+    held = plane.snapshot(run.id, ep.evaluation_id)
+    assert ep.sealed == held and ep.sealed.snapshot_id == held.snapshot_id == snapshot_digest(ep.sealed)
+    assert ep.sealed.function_calls[0].args == args
 
 
 # --- cleanup survives repeated cancellation, and each step's failure ---

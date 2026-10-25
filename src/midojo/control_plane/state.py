@@ -17,7 +17,7 @@ import hashlib
 import json
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, time, timedelta
 from types import MappingProxyType
 from typing import Any
 
@@ -127,7 +127,8 @@ class Snapshot:
     and the environments, call records and observations (mutable pydantic
     models) are kept as private copies: each read returns a new deep copy, so
     changing what a read returned changes nothing here. Copying a snapshot
-    returns the snapshot itself.
+    returns the snapshot itself. The private ``_``-prefixed copies are not
+    part of that contract: they are shared, and only the snapshot reads them.
     """
 
     evaluation_id: str
@@ -214,26 +215,62 @@ class Snapshot:
 
 
 def snapshot_digest(snapshot: Snapshot) -> str:
-    """``sha256:<hex>`` of the snapshot's content as sorted-key JSON: everything in it but its ID."""
+    """``sha256:<hex>`` of the snapshot's content, everything in it but its ID, in a lossless encoding.
+
+    The encoding (``_canonical``) never fails for data an episode accepts, and
+    two snapshots share a digest only when their content is equal.
+    """
     content = {
         "evaluation_id": snapshot.evaluation_id,
         "run_id": snapshot.run_id,
         "user_task_id": snapshot.user_task_id,
         "injection_task_id": snapshot.injection_task_id,
         "agent_output": snapshot.agent_output,
-        "pre_environment": snapshot._pre_environment.model_dump(mode="json"),
-        "environment": snapshot._environment.model_dump(mode="json"),
-        "function_calls": [call.model_dump(mode="json") for call in snapshot._function_calls],
+        "pre_environment": snapshot._pre_environment.model_dump(),
+        "environment": snapshot._environment.model_dump(),
+        "function_calls": [call.model_dump() for call in snapshot._function_calls],
         "turns": [dataclasses.asdict(turn) for turn in snapshot.turns],
-        "observations": {
-            source: observed.model_dump(mode="json") for source, observed in snapshot._observations.items()
-        },
+        "observations": {source: observed.model_dump() for source, observed in snapshot._observations.items()},
         "evidence_status": dict(snapshot.evidence_status),
         "sealed_at": snapshot.sealed_at,
         "capture_failures": [dataclasses.asdict(failure) for failure in snapshot.capture_failures],
     }
-    canonical = json.dumps(content, sort_keys=True, separators=(",", ":"), default=str)
-    return f"sha256:{hashlib.sha256(canonical.encode()).hexdigest()}"
+    return f"sha256:{hashlib.sha256(_dumps(_canonical(content)).encode()).hexdigest()}"
+
+
+def _canonical(value: Any) -> Any:
+    """A JSON value that encodes ``value`` losslessly: unequal values encode differently, and nothing raises.
+
+    Exactly ``str``, ``int`` and ``bool``, and None, are themselves; any other
+    value is a ``[tag, content]`` pair, so no value is mistaken for another:
+    a float by its ``repr`` (``inf`` and ``nan`` included), bytes as hex, a
+    list or a tuple by its items, a mapping by its ``[key, value]`` items
+    (keys of any type) and a set by its items, both sorted by their encoding,
+    a date, datetime or time in ISO format, a timedelta as days, seconds and
+    microseconds, and anything else by its type's qualified name and ``repr``.
+    """
+    kind = type(value)
+    if value is None or kind in (str, int, bool):
+        return value
+    if kind is float:
+        return ["float", repr(value)]
+    if kind in (bytes, bytearray):
+        return [kind.__name__, value.hex()]
+    if kind in (list, tuple):
+        return [kind.__name__, [_canonical(item) for item in value]]
+    if isinstance(value, Mapping):
+        return ["mapping", sorted(([_canonical(key), _canonical(item)] for key, item in value.items()), key=_dumps)]
+    if kind in (set, frozenset):
+        return ["set", sorted((_canonical(item) for item in value), key=_dumps)]
+    if kind in (datetime, date, time):
+        return [kind.__name__, value.isoformat()]
+    if kind is timedelta:
+        return ["timedelta", [value.days, value.seconds, value.microseconds]]
+    return [f"{kind.__module__}.{kind.__qualname__}", repr(value)]
+
+
+def _dumps(encoded: Any) -> str:
+    return json.dumps(encoded, separators=(",", ":"))
 
 
 @dataclass(frozen=True)
