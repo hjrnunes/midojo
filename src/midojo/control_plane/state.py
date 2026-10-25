@@ -249,12 +249,12 @@ def unsupported_value(value: Any) -> str | None:
 
     The digest encodes exactly these: None, ``bool``, ``int``, ``float``,
     ``str``, ``bytes`` and ``bytearray``; ``list``, ``tuple``, ``set`` and
-    ``frozenset`` of them, and ``dict`` (or a read-only view of one) with
-    keys and values of them; ``date``, ``datetime``, ``time`` and
+    ``frozenset`` of them, and ``dict`` with keys and values of them; ``date``, ``datetime``, ``time`` and
     ``timedelta``, with no time zone or a fixed offset (``datetime.timezone``,
     or pydantic's parsed ``TzInfo``). Exactly these types, not their
     subclasses: anything else could be unequal and still encode alike, or
-    fail to encode at all.
+    fail to encode at all. A read-only mapping view isn't one either: it
+    can't be copied, and the control plane copies what it keeps.
     """
     try:
         _canonical(value)
@@ -291,7 +291,7 @@ def _canonical(value: Any, path: str = "") -> Any:
         return [kind.__name__, value.hex()]
     if kind in (list, tuple):
         return [kind.__name__, [_canonical(item, f"{path}[{index}]") for index, item in enumerate(value)]]
-    if kind in (dict, MappingProxyType):
+    if kind is dict:
         items = []
         for index, (key, item) in enumerate(value.items()):
             encoded = _canonical(key, f"{path}<key {index}>")

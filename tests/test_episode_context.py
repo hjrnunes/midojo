@@ -21,6 +21,7 @@ import sys
 import threading
 import uuid
 from pathlib import Path
+from types import MappingProxyType
 
 import httpx
 import pydantic
@@ -35,9 +36,9 @@ import midojo
 from midojo.control_plane.client import ControlPlaneClient
 from midojo.control_plane.config import AppConfig
 from midojo.control_plane.inprocess_control import InProcessControlClient
-from midojo.control_plane.lifecycle import RecordObservations, RejectedError, Rejection, Seal
+from midojo.control_plane.lifecycle import ChangeEnvironment, RecordObservations, RejectedError, Rejection, Seal
 from midojo.control_plane.main import create_app
-from midojo.control_plane.models import CreateFunctionCallStart
+from midojo.control_plane.models import CreateFunctionCallRecord, CreateFunctionCallStart
 from midojo.control_plane.service import ById, ControlPlane
 from midojo.control_plane.state import Stage, snapshot_digest
 from midojo.episode import Episode
@@ -812,6 +813,38 @@ def test_an_environment_or_observations_the_digest_cant_encode_are_refused():
     assert observed.value.kind is Rejection.UNSUPPORTED_VALUE
     snapshot = asyncio.run(plane.complete(None, opened.id, "done"))
     assert snapshot.environment.blob == b"" and snapshot.observations == {}  # type: ignore[attr-defined]
+
+
+def test_a_read_only_mapping_view_is_refused_cleanly_wherever_it_would_enter():
+    # A view can't be deep-copied, and the transition copies its event: the refusal must come first.
+    proxy = MappingProxyType({"a": 1})
+    plane = ControlPlane({}, config=AppConfig(closure_wait_seconds=0))
+    # The episode's own read-only mappings reach the evaluation as plain dicts.
+    opened = plane.open_evaluation(weather_episode(environment={"blob": b"", "nested": {"a": {"b": 1}}}))
+    target = ById(None, opened.id)
+    assert type(plane.evaluation(target).environment.nested) is dict  # type: ignore[attr-defined]
+    with pytest.raises(RejectedError) as started:
+        plane.start_call(target, CreateFunctionCallStart(call_id="s", function="f", args={"x": [proxy]}))
+    assert started.value.kind is Rejection.UNSUPPORTED_VALUE
+    with pytest.raises(RejectedError) as finished:
+        plane.finish_call(target, CreateFunctionCallRecord(call_id="f", function="f", args={"x": proxy}, result="ok"))
+    assert finished.value.kind is Rejection.UNSUPPORTED_VALUE
+    with pytest.raises(RejectedError) as changed:
+        plane.change_environment(target, {"blob": proxy})
+    assert changed.value.kind is Rejection.INVALID_ENVIRONMENT
+    # A view of the values themselves is read into a dict of the event's own.
+    plane.apply(target, ChangeEnvironment(MappingProxyType({"blob": b"x"}), "2026-01-01T00:00:00+00:00"))
+
+    class Anything(pydantic.BaseModel):
+        value: object
+
+    with pytest.raises(RejectedError) as observed:
+        plane.apply(target, RecordObservations("openshell", Anything(value=proxy), "2026-01-01T00:00:00+00:00"))
+    assert observed.value.kind is Rejection.UNSUPPORTED_VALUE
+    plane.finish_call(target, CreateFunctionCallRecord(call_id="ok", function="f", args={"x": {"a": 1}}, result="ok"))
+    snapshot = asyncio.run(plane.complete(None, opened.id, "done"))
+    assert [call.call_id for call in snapshot.function_calls] == ["ok"] and snapshot.observations == {}
+    assert snapshot.environment.blob == b"x" and snapshot.snapshot_id == snapshot_digest(snapshot)  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio

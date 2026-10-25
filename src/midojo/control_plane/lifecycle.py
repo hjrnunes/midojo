@@ -288,12 +288,16 @@ class ChangeEnvironment:
     """Set top-level fields of the environment in one step, at ``expected_revision`` when it's given.
 
     The changed environment is validated against the environment's own model,
-    the suite's environment type.
+    the suite's environment type. The event keeps the values as a dict of its
+    own, whatever mapping it was given.
     """
 
     values: Mapping[str, Any]
     at: str
     expected_revision: int | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "values", dict(self.values))
 
 
 @dataclass(frozen=True)
@@ -382,6 +386,8 @@ CLOSING_DETAIL = "Evaluation is closing"
 def transition(evaluation: Evaluation, authority: Authority, event: Event) -> Outcome:
     if (rejected := _admit(evaluation, authority, event)) is not None:
         return rejected
+    if (unsupported := _unsupported(event)) is not None:
+        return unsupported
     # The rules work on copies: what a transition returns shares nothing with its arguments, so a
     # caller changing the event or the source evaluation afterwards can't change the outcome.
     evaluation, event = copy.deepcopy(evaluation), copy.deepcopy(event)
@@ -426,6 +432,38 @@ def transition(evaluation: Evaluation, authority: Authority, event: Event) -> Ou
                 return Accepted(evaluation, evaluation)
             next_value = _replace(evaluation, grade=event.grade)
             return Accepted(next_value, next_value)
+
+
+def _unsupported(event: Event) -> Rejected | None:
+    """Refuse an event carrying a value a snapshot can't hold (``state.unsupported_value``).
+
+    Decided on the event as sent, before the transition copies it: such a
+    value may not even be copyable (a read-only mapping view isn't).
+    """
+    match event:
+        case StartCall() | FinishCall():
+            problem, kind, what = (
+                unsupported_value(event.req.model_dump()),
+                Rejection.UNSUPPORTED_VALUE,
+                "call's record",
+            )
+        case ChangeEnvironment():
+            problem, kind, what = unsupported_value(event.values), Rejection.INVALID_ENVIRONMENT, "change"
+        case ReplaceEnvironment():
+            problem, kind, what = (
+                unsupported_value(event.environment.model_dump()),
+                Rejection.INVALID_ENVIRONMENT,
+                "environment",
+            )
+        case RecordObservations():
+            problem, kind, what = (
+                unsupported_value(event.observed.model_dump()),
+                Rejection.UNSUPPORTED_VALUE,
+                "observations",
+            )
+        case _:
+            return None
+    return None if problem is None else Rejected(kind, f"The {what} can't be kept: {problem}")
 
 
 def _admit(evaluation: Evaluation, authority: Authority, event: Event) -> Rejected | None:
@@ -560,17 +598,8 @@ def _observed(evaluation: Evaluation) -> Environment | None:
     return evaluation.environment.model_copy(deep=True) if evaluation.environment_history else None
 
 
-def _unsupported_call(req: FunctionCallStart | CreateFunctionCallRecord) -> Rejected | None:
-    """Refuse a call whose record holds a value the snapshot digest can't encode, before it's kept or compared."""
-    if (problem := unsupported_value(req.model_dump())) is None:
-        return None
-    return Rejected(Rejection.UNSUPPORTED_VALUE, f"The call's record can't be kept: {problem}")
-
-
 def _start_call(evaluation: Evaluation, authority: Authority, event: StartCall) -> Outcome:
     req = event.req
-    if (unsupported := _unsupported_call(req)) is not None:
-        return unsupported
     if req.disposition in REFUSED_DISPOSITIONS:
         return Rejected(
             Rejection.INVALID_DISPOSITION,
@@ -608,8 +637,6 @@ def _start_call(evaluation: Evaluation, authority: Authority, event: StartCall) 
 
 def _finish_call(evaluation: Evaluation, authority: Authority, event: FinishCall) -> Outcome:
     req = event.req
-    if (unsupported := _unsupported_call(req)) is not None:
-        return unsupported
     if (invalid := _invalid_disposition(req.disposition, req.blocked)) is not None:
         return Rejected(Rejection.INVALID_DISPOSITION, invalid)
     index = _find_call(evaluation, req.call_id) if req.call_id is not None else None
@@ -748,8 +775,6 @@ def _reply_turn(evaluation: Evaluation, authority: Authority, event: ReplyTurn) 
 
 
 def _replace_environment(evaluation: Evaluation, authority: Authority, event: ReplaceEnvironment) -> Outcome:
-    if (problem := unsupported_value(event.environment.model_dump())) is not None:
-        return Rejected(Rejection.INVALID_ENVIRONMENT, f"The environment can't be kept: {problem}")
     # A call finishing during the closure wait may still change the environment.
     if evaluation.stage not in (Stage.OPEN, Stage.CLOSING):
         payload = event.environment.model_dump(mode="json")
@@ -787,8 +812,6 @@ def _change_environment(evaluation: Evaluation, authority: Authority, event: Cha
 
 
 def _record_observations(evaluation: Evaluation, authority: Authority, event: RecordObservations) -> Outcome:
-    if (problem := unsupported_value(event.observed.model_dump())) is not None:
-        return Rejected(Rejection.UNSUPPORTED_VALUE, f"The {event.source} observations can't be kept: {problem}")
     if evaluation.stage is Stage.SEALED:
         evidence = tuple(evidence_status({event.source: event.observed})) or (event.source,)
         payload = {"source": event.source, "data": event.observed.model_dump(mode="json")}
