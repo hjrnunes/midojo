@@ -52,7 +52,7 @@ from midojo.control_plane.models import CreateFunctionCallRecord, CreateFunction
 from midojo.control_plane.service import ById, ControlPlane
 from midojo.control_plane.state import Stage, snapshot_digest, unsupported_value
 from midojo.episode import Episode
-from midojo.episode_context import AgentBinding, EpisodeContext, open_episode
+from midojo.episode_context import AgentBinding, EpisodeContext, _refused, open_episode
 from midojo.interception_host import HostInterception, HostInterceptor
 from midojo.runtimes import ResettableRuntime, UnmanagedRuntime
 from midojo.runtimes.openshell import OpenShellObservations
@@ -719,6 +719,66 @@ def assert_sealed_as_interrupted_on(plane: ControlPlane, ep) -> None:
     evaluation = plane.evaluation(ById(ep.run_id, ep.evaluation_id))
     assert evaluation.stage is Stage.SEALED and evaluation.session is None
     assert {key: ep.sealed.evidence_status[key] for key in INTERRUPTED} == INTERRUPTED
+
+
+def _status_error(code: int) -> httpx.HTTPStatusError:
+    request = httpx.Request("POST", "http://control/runs/r/evaluations/e/complete")
+    return httpx.HTTPStatusError(f"{code}", request=request, response=httpx.Response(code, request=request))
+
+
+def _validation_error() -> pydantic.ValidationError:
+    try:
+        CreateFunctionCallStart.model_validate({})
+    except pydantic.ValidationError as error:
+        return error
+    raise AssertionError("unreachable")
+
+
+_REQUEST = httpx.Request("POST", "http://control/complete")
+
+
+@pytest.mark.parametrize(
+    ("error", "refused"),
+    [
+        *(pytest.param(_status_error(code), True, id=f"http_{code}") for code in (401, 404, 409, 422)),
+        *(pytest.param(_status_error(code), False, id=f"http_{code}") for code in (500, 503)),
+        pytest.param(RejectedError(lifecycle.Rejected(Rejection.UNSUPPORTED_VALUE, "no")), True, id="rejected"),
+        pytest.param(_validation_error(), True, id="validation_error"),
+        pytest.param(ValueError("refused before it was sent"), True, id="value_error"),
+        pytest.param(httpx.ConnectError("lost", request=_REQUEST), False, id="connect_error"),
+        pytest.param(httpx.ReadError("lost", request=_REQUEST), False, id="read_error"),
+        pytest.param(httpx.ReadTimeout("slow", request=_REQUEST), False, id="timeout"),
+        pytest.param(asyncio.CancelledError(), False, id="cancelled"),
+        pytest.param(KeyboardInterrupt(), False, id="keyboard_interrupt"),
+    ],
+)
+def test_only_an_outright_refusal_is_taken_for_one_and_an_unknown_outcome_never_is(error, refused):
+    assert _refused(error) is refused
+
+
+@pytest.mark.asyncio
+async def test_a_snapshot_that_fails_its_digest_check_after_the_seal_is_not_taken_for_a_refused_seal(suite):
+    async with counted_seals(suite, "http") as (plane, ep, outputs):
+        with pytest.raises(ValueError, match="didn't survive the round trip") as mismatch:
+            async with ep:
+                # A date in a call's args comes back over JSON as a string: the rebuilt snapshot's digest differs.
+                target = ById(ep.run_id, ep.evaluation_id)
+                plane.finish_call(
+                    target,
+                    CreateFunctionCallRecord(
+                        call_id="d", function="f", args={"on": datetime.date(2026, 1, 1)}, result="ok"
+                    ),
+                )
+                await ep.turn("hi", _reply("rain"))
+    # The read failed after an accepted seal: sealed once, never sent again, not interrupted.
+    assert outputs == ["rain"]
+    assert not ep.interrupted and ep.result.snapshot is None and ep.result.snapshot_error is mismatch.value
+    with pytest.raises(RuntimeError, match="couldn't be read back"):
+        ep.sealed
+    evaluation = plane.evaluation(ById(ep.run_id, ep.evaluation_id))
+    assert evaluation.stage is Stage.SEALED and evaluation.snapshot is not None
+    assert evaluation.snapshot.agent_output == "rain" and evaluation.late_facts == ()
+    assert evaluation.session is not None
 
 
 @pytest.mark.asyncio
