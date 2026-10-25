@@ -783,7 +783,7 @@ def openshell_suite(suite, gateway, client, monkeypatch):
 
 
 async def _run_on_openshell(openshell_suite, tmp_path, http):
-    await run_benchmark(
+    return await run_benchmark(
         control_url="http://control",
         agent_client=OpenShellAgentClient(openshell_suite.runtime),
         agent_uri="g",
@@ -833,9 +833,14 @@ async def test_openshell_failed_second_turn_fails_the_evaluation_after_the_first
     turns = ["What is the weather in New York?", "Thanks. Is it sunny?"]
     monkeypatch.setattr(openshell_suite.suite.user_tasks["weather_new_york"], "turns", turns)
     openshell_suite.failing_run = 2
-    with pytest.raises(RuntimeError, match="exited with code 1 on turn 2/2: model unreachable"):
-        await _run_on_openshell(openshell_suite, tmp_path, local_http)
+    outcome = await _run_on_openshell(openshell_suite, tmp_path, local_http)
+    assert (outcome.graded, outcome.failed) == (0, 1)
     evaluation = _only_evaluation(client)
+    results = json.loads((tmp_path / "results.json").read_text())
+    assert results["status"] == {"weather_new_york,": "failed"}
+    assert results["evaluation_id"] == {"weather_new_york,": evaluation["id"]}
+    [reason] = results["failure_reason"].values()
+    assert re.fullmatch(r"RuntimeError: .*exited with code 1 on turn 2/2: model unreachable.*", reason, re.DOTALL)
     assert [(t["index"], t["reply"]) for t in evaluation["turns"]] == [
         (0, "reply 1: New York is 72°F and sunny"),
         (1, None),

@@ -65,7 +65,7 @@ def control(suite) -> ControlPlane:
 async def benchmark(control, suite, agent, runtime, tmp_path, interception, **kwargs):
     control_client = kwargs.pop("control_client", InProcessControlClient)
     async with control_client(control) as in_process:
-        await run_benchmark(
+        return await run_benchmark(
             control_url="http://control",
             agent_client=agent,
             agent_uri="http://agent",
@@ -152,12 +152,12 @@ async def test_a_call_after_the_seal_is_refused_by_a_live_interceptor_and_kept_a
 @pytest.mark.asyncio
 async def test_the_interceptor_stops_when_the_agent_fails(control, suite, tmp_path):
     agent = ToolCallingAgent(fail=True)
-    with pytest.raises(RuntimeError, match="Agent failed"):
-        await benchmark(
-            control, suite, agent, SetupRecordingRuntime(), tmp_path, HostInterception(upstream=scripted_upstream())
-        )
-    [given] = agent.given
-    assert await refused(given["tool_endpoint"])
+    outcome = await benchmark(
+        control, suite, agent, SetupRecordingRuntime(), tmp_path, HostInterception(upstream=scripted_upstream())
+    )
+    # Each pair failed and was recorded as failed; the run went on to the next.
+    assert (outcome.graded, outcome.failed) == (0, 2)
+    assert [await refused(given["tool_endpoint"]) for given in agent.given] == [True, True]
 
 
 @pytest.mark.asyncio
@@ -182,7 +182,7 @@ async def test_host_mode_is_refused_before_a_run_for_a_client_that_cant_pass_an_
 def cli_benchmark(monkeypatch):
     for name in ("MODEL_NAME", "MCP_SERVER_URL", "OPENAI_API_KEY", "UPSTREAM_MCP_URL"):
         monkeypatch.delenv(name, raising=False)
-    mock = AsyncMock()
+    mock = AsyncMock(return_value=orchestrator.BenchmarkOutcome(graded=1, failed=0))
     monkeypatch.setattr(orchestrator, "run_benchmark", mock)
     return mock
 

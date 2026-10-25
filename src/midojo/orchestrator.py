@@ -7,6 +7,8 @@ import ipaddress
 import json
 import math
 import os
+import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -90,6 +92,40 @@ class TaskResult(NamedTuple):
     snapshot_id: str | None = None
 
 
+class PairFailure(NamedTuple):
+    """A task pair whose ``run_task`` raised: its evaluation, when one was opened, and why it failed.
+
+    In ``results.json`` the pair is null in the grade and evidence maps, left
+    out of the utility, security and reachability aggregates and of every
+    rate, and counted separately in ``aggregates.failed``. Its evaluation is
+    usually sealed ungraded with incomplete evidence, but ``run_task`` can
+    raise after the control plane graded it (a lost grade response, say).
+    """
+
+    eval_id: str | None
+    reason: str
+
+
+class BenchmarkOutcome(NamedTuple):
+    """How many task pairs a run counted (graded) and how many failed, and where its results were written."""
+
+    graded: int
+    failed: int
+    results_file: Path | None = None
+
+
+# midojo-run's exit status when task pairs failed: 1 is an unhandled error, 2 a usage error.
+EXIT_SOME_FAILED = 3
+EXIT_ALL_FAILED = 4
+
+
+def exit_status(outcome: BenchmarkOutcome) -> int:
+    """0 when no pair failed, 3 when some failed and at least one was graded, 4 when every pair failed."""
+    if not outcome.failed:
+        return 0
+    return EXIT_SOME_FAILED if outcome.graded else EXIT_ALL_FAILED
+
+
 _UNKNOWN = Text("❓ unknown (grade invalid)", style="bold yellow")
 
 
@@ -97,6 +133,9 @@ def _utility(value: bool | None) -> Text:
     if value is None:
         return _UNKNOWN
     return Text("✅ task completed", style="bold green") if value else Text("❌ task not completed", style="bold red")
+
+
+_FAILED = Text("💥 failed (not counted)", style="bold magenta")
 
 
 def _print_agent_text(label: str, text: str, max_len: int = 200) -> None:
@@ -171,7 +210,11 @@ def _print_results_table(
     reachability_results: dict[TaskPair, Reachability],
     has_injections: bool,
     results_file: Path,
+    pairs: list[TaskPair] | None = None,
+    failures: dict[TaskPair, PairFailure] | None = None,
 ) -> None:
+    """The run's results; ``pairs`` orders graded and ``failures`` pairs alike, by default the graded ones."""
+    failures = failures or {}
     table = Table(title="Results", border_style="cyan", show_lines=True)
     table.add_column("User Task", style="bold")
     if has_injections:
@@ -180,11 +223,15 @@ def _print_results_table(
     if has_injections:
         table.add_column("Security", justify="center")
 
-    for pair, util in utility_results.items():
-        if has_injections:
-            table.add_row(pair.user_task_id, pair.injection_task_id, _utility(util), _security(security_results[pair]))
+    for pair in pairs if pairs is not None else utility_results:
+        if pair in failures:
+            cells = [_FAILED, _FAILED] if has_injections else [_FAILED]
+        elif has_injections:
+            cells = [_utility(utility_results[pair]), _security(security_results[pair])]
         else:
-            table.add_row(pair.user_task_id, _utility(util))
+            cells = [_utility(utility_results[pair])]
+        ids = [pair.user_task_id, pair.injection_task_id] if has_injections else [pair.user_task_id]
+        table.add_row(*ids, *cells)
 
     table.add_section()
     util_avg = _rate_cell(utility_results)
@@ -201,6 +248,11 @@ def _print_results_table(
         console.print(
             f"\nPayload reachability (report only, not in the rates): {counts['matched']} matched, "
             f"{counts['not_matched']} not matched, {counts['unknown']} unknown"
+        )
+    if failures:
+        console.print(
+            f"\nTask pairs: {len(utility_results)} graded, {len(failures)} failed "
+            "(not in the utility, security or reachability aggregates or any rate; see failure_reason)"
         )
     console.print(f"\nResults saved to [cyan]{results_file}[/cyan]")
 
@@ -265,6 +317,7 @@ async def run_task(
     *,
     runtime: AgentRuntime,
     interception: HostInterception | None = None,
+    on_context: Callable[[EpisodeContext], object] | None = None,
 ) -> TaskResult:
     """Run one evaluation of a suite's ``episode`` in an episode context, and grade it on the control plane.
 
@@ -284,6 +337,9 @@ async def run_task(
     runtime and the agent get only its tool endpoint. It stops once the
     evaluation is sealed and graded, or the evaluation fails; calls it gets
     once the evaluation is closing, and after the seal, are late facts.
+
+    ``on_context`` is given the episode context before it's entered, so a
+    caller can still read its ``evaluation_id`` (once opened) when this raises.
     """
     user_task_id, injection_task_id = episode.user_task_id, episode.injection_task_id
     if user_task_id is None:
@@ -302,9 +358,12 @@ async def run_task(
             return contextlib.nullcontext()
         return console.status(f"[dim]{pair} · {steps[step]}…[/dim]", spinner="dots")
 
-    async with open_episode(
+    context = open_episode(
         episode, runtime=runtime, interception=interception, control=control, run_id=run_id, progress=progress
-    ) as ep:
+    )
+    if on_context is not None:
+        on_context(context)
+    async with context as ep:
         turns = await _converse(ep, agent_client, pair)
         agent_output = turns[-1].reply
         snapshot = await ep.seal(agent_output)
@@ -350,7 +409,7 @@ async def _run_benchmark(
     logdir: Path,
     runtime: AgentRuntime,
     interception: HostInterception | None = None,
-) -> None:
+) -> BenchmarkOutcome:
     user_tasks_to_run = user_task_ids or list(suite.user_tasks.keys())
     injection_tasks_to_run: list[str]
     if injection_task_ids is not None:
@@ -378,6 +437,9 @@ async def _run_benchmark(
     grade_validity: dict[TaskPair, dict] = {}
     evidence_status: dict[TaskPair, dict[str, str]] = {}
     reachability_results: dict[TaskPair, Reachability] = {}
+    pairs: list[TaskPair] = []
+    eval_ids: dict[TaskPair, str | None] = {}
+    failures: dict[TaskPair, PairFailure] = {}
 
     it_ids_to_run: list[str | None] = [*injection_tasks_to_run] if injection_tasks_to_run else [None]
     started: str | None = None
@@ -390,18 +452,43 @@ async def _run_benchmark(
         for ut_id in user_tasks_to_run:
             for it_id in it_ids_to_run:
                 episode = suite.episode(ut_id, it_id, suite.get_probes_for_task(it_id) if it_id else {})
-                result = await run_task(
-                    control, agent_client, run_id, episode, runtime=runtime, interception=interception
-                )
-                grade = result.grade
                 pair = TaskPair(ut_id, it_id or "")
+                pairs.append(pair)
+                pair_name = f"{ut_id} x {it_id}" if it_id else ut_id
+                label = f"[bold]{ut_id}[/bold] x [bold]{it_id}[/bold]" if it_id else f"[bold]{ut_id}[/bold]"
+                contexts: list[EpisodeContext] = []
+                cancellations = _cancellations()
+                try:
+                    result = await run_task(
+                        control,
+                        agent_client,
+                        run_id,
+                        episode,
+                        runtime=runtime,
+                        interception=interception,
+                        on_context=contexts.append,
+                    )
+                except Exception as error:
+                    # An interrupt or a cancellation isn't an Exception, and stops the run. But the episode
+                    # context raises its own failure ahead of a cancellation that arrived while it released
+                    # the evaluation, noting the cancellation only: the task's cancellation count went up then.
+                    # Only a rise during this pair counts: one a caller suppressed earlier isn't this pair's.
+                    if _cancellations() > cancellations:
+                        raise asyncio.CancelledError(f"Cancelled while running {pair_name}") from error
+                    # The pair failed. Its evaluation, if opened, is sealed and usually ungraded, but
+                    # run_task can raise after the grade: either way the pair isn't counted.
+                    failure = PairFailure(_opened_evaluation(contexts), f"{type(error).__name__}: {error}")
+                    failures[pair] = failure
+                    eval_ids[pair] = failure.eval_id
+                    _print_failed_pair(control_url, run_id, label, failure)
+                    continue
+                grade = result.grade
                 utility_results[pair] = grade.utility
                 utility_reasons[pair] = grade.utility_reason
                 grade_validity[pair] = grade.grade_validity.model_dump(mode="json")
                 evidence_status[pair] = dict(grade.evidence_status)
-                eval_id = result.eval_id
+                eval_id = eval_ids[pair] = result.eval_id
                 eval_url = f"{control_url}/runs/{run_id}/evaluations/{eval_id}"
-                label = f"[bold]{ut_id}[/bold] x [bold]{it_id}[/bold]" if it_id else f"[bold]{ut_id}[/bold]"
                 console.print(f"  [dim]\\[eval: [link={eval_url}][cyan]{eval_id}[/cyan][/link]][/dim] {label}")
                 for idx, (message, reply) in enumerate(result.turns):
                     _print_agent_text(_turn_label("agent input", idx, len(result.turns)), message)
@@ -432,36 +519,71 @@ async def _run_benchmark(
     results_file = logdir / "results.json"
 
     def by_pair(values: dict) -> dict:
-        return {f"{k.user_task_id},{k.injection_task_id}": values.get(k) for k in utility_results}
+        return {f"{k.user_task_id},{k.injection_task_id}": values.get(k) for k in pairs}
 
+    results: dict[str, object] = {
+        "run_id": run_id,
+        "suite_name": suite_name,
+        # A failed pair is null in each of these, whatever the control plane holds for its evaluation.
+        "utility": by_pair(utility_results),
+        "utility_reason": by_pair(utility_reasons),
+        # null without an injection task, or where the grade is invalid
+        "security": by_pair(security_results),
+        "security_reason": by_pair(security_reasons),
+        "grade_validity": by_pair(grade_validity),
+        "evidence_status": by_pair(evidence_status),
+        # Whether the payload text was found; report-only, null without an injection task.
+        "reachability": by_pair({k: v.model_dump(mode="json") for k, v in reachability_results.items()}),
+    }
+    # Rates leave invalid grades out of the denominator and failed pairs out altogether; reachability never enters them.
+    aggregates: dict[str, object] = {
+        "utility": _aggregate(utility_results),
+        "security": _aggregate(security_results),
+        "reachability": count(reachability_results.values()),
+    }
+    if failures:
+        # Only a run with a failed pair has these: a run with none writes what it always did.
+        results["status"] = by_pair({k: "failed" if k in failures else "graded" for k in pairs})
+        results["failure_reason"] = by_pair({k: f.reason for k, f in failures.items()})
+        results["evaluation_id"] = by_pair(eval_ids)
+        aggregates["failed"] = len(failures)
+    results["aggregates"] = aggregates
     with open(results_file, "w") as f:
-        json.dump(
-            {
-                "run_id": run_id,
-                "suite_name": suite_name,
-                "utility": by_pair(utility_results),
-                "utility_reason": by_pair(utility_reasons),
-                # null without an injection task, or where the grade is invalid
-                "security": by_pair(security_results),
-                "security_reason": by_pair(security_reasons),
-                "grade_validity": by_pair(grade_validity),
-                "evidence_status": by_pair(evidence_status),
-                # Whether the payload text was found; report-only, null without an injection task.
-                "reachability": by_pair({k: v.model_dump(mode="json") for k, v in reachability_results.items()}),
-                # Rates leave invalid grades out of the denominator; reachability never enters them.
-                "aggregates": {
-                    "utility": _aggregate(utility_results),
-                    "security": _aggregate(security_results),
-                    "reachability": count(reachability_results.values()),
-                },
-            },
-            f,
-            indent=2,
-        )
+        json.dump(results, f, indent=2)
 
     _print_results_table(
-        utility_results, security_results, reachability_results, bool(injection_tasks_to_run), results_file
+        utility_results,
+        security_results,
+        reachability_results,
+        bool(injection_tasks_to_run),
+        results_file,
+        pairs,
+        failures,
     )
+    return BenchmarkOutcome(graded=len(utility_results), failed=len(failures), results_file=results_file)
+
+
+def _cancellations() -> int:
+    """The current task's pending cancellation requests (``Task.cancelling``): requested and not withdrawn."""
+    task = asyncio.current_task()
+    return task.cancelling() if task is not None else 0
+
+
+def _opened_evaluation(contexts: list[EpisodeContext]) -> str | None:
+    """The evaluation the pair's episode context opened, or None when it failed before opening one."""
+    try:
+        return contexts[0].evaluation_id
+    except (IndexError, RuntimeError):
+        return None
+
+
+def _print_failed_pair(control_url: str, run_id: str, label: str, failure: PairFailure) -> None:
+    if failure.eval_id is None:
+        console.print(f"  [dim]\\[eval: none][/dim] {label}")
+    else:
+        eval_url = f"{control_url}/runs/{run_id}/evaluations/{failure.eval_id}"
+        console.print(f"  [dim]\\[eval: [link={eval_url}][cyan]{failure.eval_id}[/cyan][/link]][/dim] {label}")
+    console.print("    ", _FAILED, Text(f"  ({failure.reason})", style="dim"))
 
 
 async def run_benchmark(
@@ -479,8 +601,8 @@ async def run_benchmark(
     runtime: AgentRuntime | None = None,
     control: ControlClient | None = None,
     interception: HostInterception | None = None,
-) -> None:
-    """Run the benchmark against the control plane at ``control_url``.
+) -> BenchmarkOutcome:
+    """Run the benchmark against the control plane at ``control_url``, and say how many task pairs failed.
 
     ``http`` is the client for control-plane requests; by default the control
     plane client opens its own. ``control`` replaces that client altogether,
@@ -490,13 +612,17 @@ async def run_benchmark(
     a time; by default it's a fresh one from the suite (``suite.new_runtime()``).
     ``interception`` runs the evaluations in host mode, each with its own
     interceptor (see :func:`run_task`); by default the agent gets the session.
+
+    A task pair whose evaluation fails (``run_task`` raises an ``Exception``)
+    is recorded as failed and the run goes on; ``results.json`` is written
+    either way. :func:`exit_status` maps the outcome to midojo-run's exit status.
     """
     if runtime is None:
         runtime = suite.new_runtime()
     async with contextlib.AsyncExitStack() as stack:
         if control is None:
             control = await stack.enter_async_context(ControlPlaneClient(control_url, token=control_token, http=http))
-        await _run_benchmark(
+        return await _run_benchmark(
             control,
             control_url,
             agent_client,
@@ -641,6 +767,16 @@ def main(
     interceptor_port: int,
     interceptor_advertise_host: str | None,
 ) -> None:
+    """Run a benchmark suite's task pairs against an agent, and write their results to LOGDIR/results.json.
+
+    A task pair whose evaluation fails is recorded as failed, and the run goes on.
+
+    \b
+    Exit status:
+      0  no task pair failed
+      3  some task pairs failed, and at least one was graded
+      4  every task pair failed
+    """
     for module in modules_to_load:
         importlib.import_module(module)
 
@@ -723,7 +859,7 @@ def main(
     else:
         agent_client = SimpleHTTPAgentClient(agent_uri, **timeout_kwargs)
 
-    asyncio.run(
+    outcome = asyncio.run(
         run_benchmark(
             control_url=control_url,
             agent_client=agent_client,
@@ -739,6 +875,9 @@ def main(
             interception=host_interception,
         )
     )
+    status = exit_status(outcome)
+    if status:
+        sys.exit(status)
 
 
 def _ip(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
