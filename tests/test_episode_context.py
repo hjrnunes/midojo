@@ -52,7 +52,7 @@ from midojo.control_plane.models import CreateFunctionCallRecord, CreateFunction
 from midojo.control_plane.service import ById, ControlPlane
 from midojo.control_plane.state import Stage, snapshot_digest, unsupported_value
 from midojo.episode import Episode
-from midojo.episode_context import AgentBinding, open_episode
+from midojo.episode_context import AgentBinding, EpisodeContext, open_episode
 from midojo.interception_host import HostInterception, HostInterceptor
 from midojo.runtimes import ResettableRuntime, UnmanagedRuntime
 from midojo.runtimes.openshell import OpenShellObservations
@@ -606,6 +606,55 @@ async def test_a_cancellation_after_the_control_plane_sealed_leaves_it_sealed_no
     plane, run, ep, transport, raised = await run_with_lost_completion(suite, "hang")
     assert isinstance(raised, asyncio.CancelledError) and transport.completions == 2
     assert_sealed_once_with(plane, run, ep, "an explicit output")
+
+
+class InterruptedOnceSealed(EpisodeContext):
+    """A context interrupted (KeyboardInterrupt) at the first change to its seal markers once a completion is accepted.
+
+    That is the boundary between the control plane accepting the seal and the
+    context noting it: whichever marker is changed first, the interrupt lands
+    right after it.
+    """
+
+    accepted = False
+    interrupted_at: str | None = None
+
+    def __setattr__(self, name: str, value) -> None:
+        super().__setattr__(name, value)
+        if name in ("_seal_request", "_control_sealed") and self.accepted and self.interrupted_at is None:
+            object.__setattr__(self, "interrupted_at", name)
+            raise KeyboardInterrupt
+
+
+def test_an_interrupt_right_after_the_control_plane_accepts_the_seal_leaves_it_sealed_not_interrupted():
+    plane = ControlPlane({}, config=AppConfig(closure_wait_seconds=0))
+    control = InProcessControlClient(plane)
+    ep = InterruptedOnceSealed(weather_episode(), runtime=RecordingRuntime(), control=control)
+    outputs = []
+    real = control.complete_evaluation
+
+    async def accepting(run_id, eval_id, agent_output, *rest, **kwargs):
+        outputs.append(agent_output)
+        await real(run_id, eval_id, agent_output, *rest, **kwargs)
+        object.__setattr__(ep, "accepted", True)
+
+    control.complete_evaluation = accepting  # type: ignore[method-assign]
+
+    async def run() -> None:
+        async with ep:
+            await ep.turn("hi", _reply("rain"))
+            await ep.seal("an explicit output")
+
+    # An interrupt leaves the event loop, so the episode runs in a loop of its own.
+    with pytest.raises(KeyboardInterrupt):
+        asyncio.run(run())
+    assert ep.interrupted_at is not None
+    assert outputs == ["an explicit output"]  # sealed once: nothing sent again, nothing sealed as interrupted
+    assert not ep.interrupted and ep.result.interrupted is False
+    assert ep.sealed.agent_output == "an explicit output"
+    evaluation = plane.evaluation(ById(None, ep.evaluation_id))
+    assert evaluation.stage is Stage.SEALED and evaluation.snapshot == ep.sealed
+    assert evaluation.late_facts == () and evaluation.session is not None
 
 
 @contextlib.asynccontextmanager

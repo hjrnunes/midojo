@@ -413,8 +413,10 @@ class EpisodeContext:
             if _refused(error):
                 self._seal_request = None
             raise
-        self._seal_request = None
+        # Noted sealed before the request is forgotten: an interrupt between the two never leaves an applied seal
+        # with neither marker, which cleanup would take for an episode cut short.
         self._control_sealed = True
+        self._seal_request = None
 
     async def _read_snapshot(self) -> None:
         """Read the sealed snapshot back; on a failure, keep it as the reason, and raise it."""
@@ -512,7 +514,9 @@ class EpisodeContext:
         control plane refused outright) is first sent again, as it was: the evidence was collected before it was sent, and
         if the control plane had sealed, completing again with the same output
         is a retry that leaves the snapshot as it was. Only if that fails too
-        is the episode taken as interrupted.
+        is the episode taken as interrupted. A sealed evaluation whose
+        snapshot the context never tried to read (an interrupt right after
+        the seal, say) has it read back here.
         """
         errors: list[BaseException] = []
 
@@ -526,8 +530,9 @@ class EpisodeContext:
         if failure is not None and not self._control_sealed and self._seal_request is not None:
             seal_request = self._seal_request
             await attempt("send the seal again", lambda: self._complete(*seal_request))
-            if self._control_sealed:
-                await attempt("read the snapshot back", self._read_snapshot)
+        if failure is not None and self._control_sealed and self._snapshot is None and self._snapshot_error is None:
+            # Sealed, and its snapshot never read: the seal above, or an interrupt right after the seal's own.
+            await attempt("read the snapshot back", self._read_snapshot)
         sealed = self._snapshot is not None or self._control_sealed
         if failure is not None and not sealed and self._evaluation_id is not None:
             self.interrupted = True
