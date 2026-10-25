@@ -29,6 +29,7 @@ from midojo.control_plane.client import ControlPlaneClient
 from midojo.control_plane.config import AppConfig
 from midojo.control_plane.lifecycle import RejectedError, Rejection, Seal
 from midojo.control_plane.main import create_app
+from midojo.control_plane.models import CreateFunctionCallStart
 from midojo.control_plane.service import ById, ControlPlane
 from midojo.control_plane.state import Stage, snapshot_digest
 from midojo.episode import Episode
@@ -744,3 +745,40 @@ async def test_a_cleanup_failure_after_a_clean_seal_is_raised_once_everything_el
             await ep.turn("hi", _reply("rain"))
     assert ep.result.interrupted is False and ep.sealed.agent_output == "rain"
     assert runtime.steps[-1] == "end_run"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("late_fact", [False, True], ids=["no_late_fact", "late_fact_before_the_grade"])
+async def test_the_control_planes_grade_is_the_pure_verdict_plus_late_facts_in_evidence_status(late_fact):
+    plane = ControlPlane({}, config=AppConfig(closure_wait_seconds=0))
+    episode = weather_episode()
+    interception = HostInterception(upstream=scripted_upstream())
+    async with open_episode(episode, runtime=UnmanagedRuntime(), interception=interception, control=plane) as ep:
+
+        async def agent(message: str) -> str:
+            assert ep.binding.tool_endpoint is not None
+            await call_tools(ep.binding.tool_endpoint, ("get_weather", {"city": "Boston"}))
+            return "rain"
+
+        await ep.turn("weather?", agent)
+    verdict = midojo.grade(episode, ep.sealed)
+    if late_fact:
+        # A write after the seal: refused, kept as a late fact, and never part of the snapshot.
+        with pytest.raises(RejectedError) as refused_write:
+            plane.start_call(
+                ById(None, ep.evaluation_id), CreateFunctionCallStart(call_id="late", function="book_shelter", args={})
+            )
+        assert refused_write.value.late
+    served = plane.grade(None, ep.evaluation_id)
+    if not late_fact:
+        assert served == verdict.grade
+        return
+    # The grade is the snapshot's; only the response's evidence status shows the late fact, as incomplete.
+    assert served.model_dump(exclude={"evidence_status"}) == verdict.grade.model_dump(exclude={"evidence_status"})
+    differing = {
+        key
+        for key in {*served.evidence_status, *verdict.grade.evidence_status}
+        if served.evidence_status.get(key) != verdict.grade.evidence_status.get(key)
+    }
+    assert differing == {"function_calls"} and served.evidence_status["function_calls"] == "incomplete"
+    assert verdict == midojo.grade(episode, plane.snapshot(None, ep.evaluation_id))
