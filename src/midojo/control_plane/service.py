@@ -361,9 +361,13 @@ class ControlPlane:
         ``incomplete`` names evidence the host didn't collect in full, such as
         an episode a failure cut short: the snapshot marks it ``incomplete``.
         Each key must be a known evidence key (``observations.is_evidence_key``),
-        or this raises ValueError.
+        or this raises ValueError; ``agent_output`` must be exactly a ``str``,
+        or it's refused as ``unsupported_value``.
         """
-        require_evidence_keys(incomplete)  # before closing: a refused seal leaves the evaluation as it was
+        # Before closing: a refused seal leaves the evaluation as it was.
+        require_evidence_keys(incomplete)
+        if (refused := lifecycle.not_text("agent's output", agent_output)) is not None:
+            raise RejectedError(refused)
         if self.evaluation(ById(run_id, eval_id)).stage is not Stage.SEALED:
             await self.close(run_id, eval_id)
         return self.apply(ById(run_id, eval_id), lifecycle.Seal(agent_output, _now(), incomplete=tuple(incomplete)))

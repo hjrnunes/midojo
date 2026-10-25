@@ -841,6 +841,57 @@ def test_bytes_that_arent_utf8_in_call_args_replay_and_become_late_facts_without
     assert snapshot.snapshot_id == snapshot_digest(snapshot)
 
 
+class Text(str):
+    """A str subclass: not exactly a str."""
+
+
+NOT_TEXT = [5, b"rain", None, ["rain"], Text("rain")]
+
+
+def test_a_turn_message_reply_or_agent_output_that_isnt_exactly_a_str_is_refused_as_unsupported():
+    plane = ControlPlane({}, config=AppConfig(closure_wait_seconds=0))
+    opened = plane.open_evaluation(weather_episode())
+    target = ById(None, opened.id)
+    refusals = []
+    for value in NOT_TEXT:
+        with pytest.raises(RejectedError) as started:
+            plane.start_turn(None, opened.id, value)  # type: ignore[arg-type]
+        refusals.append(started.value)
+    plane.start_turn(None, opened.id, "weather?")
+    for value in NOT_TEXT:
+        with pytest.raises(RejectedError) as replied:
+            plane.record_turn_reply(None, opened.id, 0, value)  # type: ignore[arg-type]
+        refusals.append(replied.value)
+        with pytest.raises(RejectedError) as sealed:
+            asyncio.run(plane.complete(None, opened.id, value))  # type: ignore[arg-type]
+        refusals.append(sealed.value)
+    # A refused seal leaves the evaluation as it was: still open.
+    assert plane.evaluation(target).stage is Stage.OPEN
+    plane.record_turn_reply(None, opened.id, 0, "rain")
+    asyncio.run(plane.close(None, opened.id))
+    # Once closing, still refused outright: never kept as a late fact.
+    with pytest.raises(RejectedError) as late:
+        plane.start_turn(None, opened.id, 5)  # type: ignore[arg-type]
+    refusals.append(late.value)
+    assert {(refused.kind, refused.late) for refused in refusals} == {(Rejection.UNSUPPORTED_VALUE, False)}
+    snapshot = asyncio.run(plane.complete(None, opened.id, "rain"))
+    assert [(turn.message, turn.reply) for turn in snapshot.turns] == [("weather?", "rain")]
+    assert snapshot.agent_output == "rain" and plane.evaluation(target).late_facts == ()
+
+
+@pytest.mark.asyncio
+async def test_an_agent_reply_that_isnt_a_str_fails_its_turn_and_is_never_recorded():
+    async def send(message: str):
+        return 5
+
+    # The client validates it as the routes do (a pydantic ValidationError); the lifecycle would refuse it too.
+    with pytest.raises(ValueError, match="valid string"):
+        async with open_episode(weather_episode(), runtime=UnmanagedRuntime()) as ep:
+            await ep.turn("weather?", send)  # type: ignore[arg-type]
+    assert ep.interrupted and [(turn.message, turn.reply) for turn in ep.sealed.turns] == [("weather?", None)]
+    assert ep.sealed.agent_output == ""
+
+
 def snapshot_with_args(args: dict) -> midojo.Snapshot:
     environment = Episode(turns=["hi"]).provision_environment()
     call = FunctionCallRecord(call_id="c", function="f", args=args, timestamp="t")

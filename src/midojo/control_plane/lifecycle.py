@@ -49,7 +49,9 @@ The rules kept here:
 * the environment's revision: every change counts one, and a change that
   names the revision it was computed from applies only at that revision;
 * turns: a call carries the index of the latest started turn, a turn starts
-  only once the previous one has its reply, and a turn gets one reply;
+  only once the previous one has its reply, and a turn gets one reply; a
+  turn's message and reply, and the agent's output at the seal, are exactly
+  ``str``, or ``unsupported_value`` at any stage (never a late fact);
 * staged closure: ``open`` admits everything; ``closing`` admits no new call
   but lets admitted calls finish until none is unfinished or the closure wait
   ends, judged by each event's arrival time against the deadline;
@@ -388,6 +390,9 @@ CLOSING_DETAIL = "Evaluation is closing"
 def transition(evaluation: Evaluation, authority: Authority, event: Event) -> Outcome:
     if (rejected := _admit(evaluation, authority, event)) is not None:
         return rejected
+    # A str is immutable, so the event's own text is the text the rules would decide on.
+    if (rejected := _not_text(event)) is not None:
+        return rejected
     # The rules work on copies: what a transition returns shares nothing with its arguments, so a
     # caller changing the event or the source evaluation afterwards can't change the outcome.
     evaluation = copy.deepcopy(evaluation)
@@ -473,6 +478,29 @@ def _unsupported(event: Event) -> Rejected | None:
     if (problem := unsupported_value(values())) is None:
         return None
     return Rejected(kind, f"The {what} can't be kept: {problem}")
+
+
+def _not_text(event: Event) -> Rejected | None:
+    """Refuse a turn's message or reply, or the agent's output, that isn't exactly a ``str``."""
+    match event:
+        case StartTurn():
+            return not_text("turn's message", event.message)
+        case ReplyTurn():
+            return not_text("turn's reply", event.reply)
+        case Seal():
+            return not_text("agent's output", event.agent_output)
+        case _:
+            return None
+
+
+def not_text(what: str, value: Any) -> Rejected | None:
+    """An ``unsupported_value`` refusal of ``value`` unless it is exactly a ``str`` (not a subclass); else None."""
+    if type(value) is str:
+        return None
+    kind = type(value)
+    return Rejected(
+        Rejection.UNSUPPORTED_VALUE, f"The {what} must be a str, not a {kind.__module__}.{kind.__qualname__}"
+    )
 
 
 def _admit(evaluation: Evaluation, authority: Authority, event: Event) -> Rejected | None:

@@ -1037,6 +1037,20 @@ def test_reply_to_a_turn_that_has_not_started_404(client, index):
     assert resp.json()["detail"] == f"Turn not started: {index}"
 
 
+@pytest.mark.parametrize("value", [5, None, ["x"], {"x": 1}])
+def test_a_turn_message_reply_or_agent_output_that_isnt_a_string_is_a_422(client, value):
+    run_id = _create_run(client)
+    eval_id = _create_evaluation(client, run_id)["id"]
+    eval_url = f"/runs/{run_id}/evaluations/{eval_id}"
+    assert client.post(f"{eval_url}/turns", json={"message": value}).status_code == 422
+    client.post(f"{eval_url}/turns", json={"message": "first"})
+    assert client.post(f"{eval_url}/turns/0/reply", json={"reply": value}).status_code == 422
+    assert client.post(f"{eval_url}/complete", json={"agent_output": value}).status_code == 422
+    evaluation = _evaluation(client, run_id, eval_id)
+    assert [(turn.message, turn.reply) for turn in evaluation.turns] == [("first", None)]
+    assert evaluation.stage.value == "open"
+
+
 def test_turn_routes_reject_unknown_and_completed_evaluations(client):
     run_id = _create_run(client)
     eval_id = _create_evaluation(client, run_id)["id"]
