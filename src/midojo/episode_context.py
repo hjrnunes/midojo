@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
+import httpx
 from midojo_sdk.injection import Channel, InjectionOutcome
 
 from midojo.control_plane.client import ControlClient
@@ -169,7 +170,8 @@ class EpisodeContext:
         self._last_reply: str | None = None
         # Whether the control plane has sealed the evaluation, its snapshot read back or not.
         self._control_sealed = False
-        # The seal last sent (its agent output and incomplete keys), whether or not its outcome was seen.
+        # The seal last sent (its agent output and incomplete keys) while its outcome is unknown: sent, and
+        # neither accepted nor refused outright.
         self._seal_request: tuple[str, tuple[str, ...]] | None = None
         self._snapshot: Snapshot | None = None
         # Why the sealed snapshot couldn't be read back, when it couldn't.
@@ -361,7 +363,9 @@ class EpisodeContext:
         If the seal request itself fails (its response lost, say, or a
         cancellation while waiting for it), the control plane may have sealed
         or not: sealing again sends the same seal again, whatever
-        ``agent_output`` it's given. Completing a sealed evaluation with the
+        ``agent_output`` it's given. A seal the control plane refuses outright
+        (see :func:`_refused`: an invalid output, say) was not applied, so it
+        is forgotten: sealing again seals afresh, with the output given then. Completing a sealed evaluation with the
         same output is a retry that leaves its snapshot as it was, so the
         evaluation is sealed once either way. Leaving the context after such a
         failure sends it again too (see :meth:`_release`).
@@ -403,7 +407,13 @@ class EpisodeContext:
     async def _complete(self, agent_output: str, incomplete: tuple[str, ...] = ()) -> None:
         self._seal_request = (agent_output, incomplete)
         marked = {"incomplete": incomplete} if incomplete else {}
-        await self.control.complete_evaluation(self.run_id, self.evaluation_id, agent_output, **marked)
+        try:
+            await self.control.complete_evaluation(self.run_id, self.evaluation_id, agent_output, **marked)
+        except BaseException as error:
+            if _refused(error):
+                self._seal_request = None
+            raise
+        self._seal_request = None
         self._control_sealed = True
 
     async def _read_snapshot(self) -> None:
@@ -498,8 +508,8 @@ class EpisodeContext:
         is not interrupted, its session stays bound (a write with it is a late
         fact, as after any seal), and only the runtime, the interceptor and the
         run are released. A seal whose outcome the context didn't see (its
-        response lost, or a cancellation while waiting for it) is first sent
-        again, as it was: the evidence was collected before it was sent, and
+        response lost, or a cancellation while waiting for it; not one the
+        control plane refused outright) is first sent again, as it was: the evidence was collected before it was sent, and
         if the control plane had sealed, completing again with the same output
         is a retry that leaves the snapshot as it was. Only if that fails too
         is the episode taken as interrupted.
@@ -532,6 +542,20 @@ class EpisodeContext:
             await attempt("stop the interceptor", self._interceptor.stop)
         await attempt("end the runtime's run", self._end_run)
         return errors
+
+
+def _refused(error: BaseException) -> bool:
+    """Whether ``error`` is a refusal of a request outright: the control plane didn't apply it.
+
+    A ValueError is one: a rejection in process (``RejectedError``), a request
+    pydantic's validation refused, or one refused before it was sent. Over
+    HTTP, so is a 4xx response. Anything else (a transport error, a timeout,
+    a 5xx, a cancellation) leaves the outcome unknown: the request may have
+    been applied.
+    """
+    if isinstance(error, ValueError):
+        return True
+    return isinstance(error, httpx.HTTPStatusError) and 400 <= error.response.status_code < 500
 
 
 async def _to_the_end(work: Coroutine[Any, Any, T]) -> tuple[T, asyncio.CancelledError | None]:

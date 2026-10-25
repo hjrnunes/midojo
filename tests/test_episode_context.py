@@ -8,6 +8,7 @@ scripted MCP server, and the agent a scripted MCP client on loopback.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import dataclasses
 import datetime
@@ -605,6 +606,70 @@ async def test_a_cancellation_after_the_control_plane_sealed_leaves_it_sealed_no
     plane, run, ep, transport, raised = await run_with_lost_completion(suite, "hang")
     assert isinstance(raised, asyncio.CancelledError) and transport.completions == 2
     assert_sealed_once_with(plane, run, ep, "an explicit output")
+
+
+@contextlib.asynccontextmanager
+async def counted_seals(suite, over: str):
+    """An episode's control plane, client and context, ``over`` HTTP or in process; and each output it seals with."""
+    app = create_app({"weather": suite}, config=AppConfig(closure_wait_seconds=0))
+    plane: ControlPlane = app.state.control
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app)) as http:
+        if over == "http":
+            run_id: str | None = plane.create_run("weather").id
+            control = ControlPlaneClient("http://control", http=http)
+            episode = suite.episode("weather_new_york")
+        else:
+            run_id, control, episode = None, InProcessControlClient(plane), weather_episode()
+        outputs = []
+        real = control.complete_evaluation
+
+        async def counting(run, eval_id, agent_output, *rest, **kwargs):
+            outputs.append(agent_output)
+            return await real(run, eval_id, agent_output, *rest, **kwargs)
+
+        control.complete_evaluation = counting  # type: ignore[method-assign]
+        ep = open_episode(episode, runtime=RecordingRuntime(), control=control, run_id=run_id)
+        yield plane, ep, outputs
+
+
+# A seal the control plane refuses outright: over HTTP a 422, in process pydantic's ValidationError.
+REFUSED_SEAL = (httpx.HTTPStatusError, pydantic.ValidationError)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("over", ["in_process", "http"])
+async def test_a_seal_refused_outright_is_forgotten_so_a_corrected_seal_goes_through(suite, over):
+    async with counted_seals(suite, over) as (plane, ep, outputs):
+        async with ep:
+            await ep.turn("hi", _reply("rain"))
+            with pytest.raises(REFUSED_SEAL):
+                await ep.seal(5)  # type: ignore[arg-type]
+            snapshot = await ep.seal("a corrected output")
+    assert outputs == [5, "a corrected output"]
+    assert snapshot.agent_output == "a corrected output" and ep.sealed is snapshot and not ep.interrupted
+    evaluation = plane.evaluation(ById(ep.run_id, ep.evaluation_id))
+    assert evaluation.late_facts == () and evaluation.session is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("over", ["in_process", "http"])
+async def test_a_seal_refused_outright_is_never_sent_again_when_the_context_is_left(suite, over):
+    async with counted_seals(suite, over) as (plane, ep, outputs):
+        with pytest.raises(REFUSED_SEAL) as refused:
+            async with ep:
+                await ep.turn("hi", _reply("rain"))
+                await ep.seal(5)  # type: ignore[arg-type]
+    # Not resent: the context seals as interrupted, with the last reply, and no cleanup step failed.
+    assert outputs == [5, "rain"]
+    assert not getattr(refused.value, "__notes__", None)
+    assert ep.interrupted and ep.sealed.agent_output == "rain"
+    assert_sealed_as_interrupted_on(plane, ep)
+
+
+def assert_sealed_as_interrupted_on(plane: ControlPlane, ep) -> None:
+    evaluation = plane.evaluation(ById(ep.run_id, ep.evaluation_id))
+    assert evaluation.stage is Stage.SEALED and evaluation.session is None
+    assert {key: ep.sealed.evidence_status[key] for key in INTERRUPTED} == INTERRUPTED
 
 
 @pytest.mark.asyncio
