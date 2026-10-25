@@ -328,7 +328,9 @@ class Seal:
     collect in full (an episode cut short by a failure or a cancellation):
     the snapshot marks them ``incomplete``. A Seal naming an unknown key
     (see ``observations.is_evidence_key``) can't be made: its constructor
-    raises ValueError, so no path into the writer gets one.
+    raises ValueError, so no path into the writer gets one. It keeps the
+    keys as a tuple of its own, so changing what it was given changes
+    nothing in it.
     """
 
     agent_output: str
@@ -336,7 +338,9 @@ class Seal:
     incomplete: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        require_evidence_keys(self.incomplete)
+        incomplete = tuple(self.incomplete)
+        require_evidence_keys(incomplete)
+        object.__setattr__(self, "incomplete", incomplete)
 
 
 @dataclass(frozen=True)

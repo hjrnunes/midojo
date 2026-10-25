@@ -1117,3 +1117,16 @@ async def test_the_single_writer_refuses_a_seal_that_marks_unknown_evidence():
     assert plane.evaluation(target).stage is Stage.COLLECTING
     snapshot = plane.apply(target, Seal("done", "2026-01-01T00:00:00+00:00", incomplete=("turns",)))
     assert snapshot.evidence_status["turns"] == "incomplete"
+
+
+@pytest.mark.asyncio
+async def test_a_seal_keeps_the_keys_it_validated_whatever_happens_to_the_list_it_was_given():
+    plane = ControlPlane({}, config=AppConfig(closure_wait_seconds=0))
+    evaluation = plane.open_evaluation(weather_episode())
+    await plane.close(None, evaluation.id)
+    given = ["turns"]
+    seal = Seal("done", "2026-01-01T00:00:00+00:00", incomplete=given)  # type: ignore[arg-type]
+    given.append("everything")
+    assert seal.incomplete == ("turns",)
+    snapshot = plane.apply(ById(None, evaluation.id), seal)
+    assert "everything" not in snapshot.evidence_status and snapshot.evidence_status["turns"] == "incomplete"
