@@ -28,6 +28,7 @@ from midojo_sdk.mcp import MidojoMCP
 import midojo
 from midojo.control_plane.client import ControlPlaneClient
 from midojo.control_plane.config import AppConfig
+from midojo.control_plane.inprocess_control import InProcessControlClient
 from midojo.control_plane.lifecycle import RejectedError, Rejection, Seal
 from midojo.control_plane.main import create_app
 from midojo.control_plane.models import CreateFunctionCallStart
@@ -816,6 +817,75 @@ async def test_a_cleanup_failure_after_a_clean_seal_is_raised_once_everything_el
             await ep.turn("hi", _reply("rain"))
     assert ep.result.interrupted is False and ep.sealed.agent_output == "rain"
     assert runtime.steps[-1] == "end_run"
+
+
+class CloseRaises(InProcessControlClient):
+    """An in-process control client whose closure raises ``error`` without closing anything."""
+
+    def __init__(self, plane: ControlPlane, error: BaseException) -> None:
+        super().__init__(plane)
+        self.error = error
+
+    async def close_evaluation(self, run_id, eval_id):
+        raise self.error
+
+
+async def assert_released(plane: ControlPlane, ep, runtime: RecordingRuntime) -> None:
+    """Sealed incomplete and revoked, the interceptor stopped, and the runtime torn down and its run ended."""
+    assert_sealed_as_interrupted(plane, ep, ep.episode)
+    assert await refused(ep.binding.tool_endpoint)
+    assert runtime.steps == ["start_run", "setup", "observe", "teardown", "end_run"]
+
+
+@pytest.mark.asyncio
+async def test_a_cleanup_step_cancelled_after_a_failure_lets_every_other_step_run_and_the_failure_goes_on(monkeypatch):
+    plane, runtime = ControlPlane({}, config=AppConfig(closure_wait_seconds=0)), RecordingRuntime()
+    monkeypatch.setattr(Episode, "new_runtime", lambda self: runtime)
+    interception = StopControlledInterception()
+    control = CloseRaises(plane, asyncio.CancelledError())
+    ep = open_episode(weather_episode(), interception=interception, control=control)
+    with pytest.raises(RuntimeError, match="the agent crashed") as raised:
+        async with ep:
+            raise RuntimeError("the agent crashed")
+    assert any("CancelledError" in note for note in raised.value.__notes__)
+    await assert_released(plane, ep, runtime)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exiting", [KeyboardInterrupt, SystemExit])
+async def test_an_interrupt_in_a_cleanup_step_lets_every_other_step_run_and_then_goes_on(monkeypatch, exiting):
+    class ObserveExits(RecordingRuntime):
+        def observe(self):
+            super().observe()
+            raise exiting("stop now")
+
+    plane, runtime = ControlPlane({}, config=AppConfig(closure_wait_seconds=0)), ObserveExits()
+    monkeypatch.setattr(Episode, "new_runtime", lambda self: runtime)
+    interception = StopControlledInterception()
+    ep = open_episode(weather_episode(), interception=interception, control=CloseRaises(plane, RuntimeError("no")))
+    with pytest.raises(exiting) as raised:
+        async with ep:
+            raise RuntimeError("the agent crashed")
+    # Before the body's error, which it was raised while handling, and the other step's.
+    assert isinstance(raised.value.__context__, RuntimeError) and "crashed" in str(raised.value.__context__)
+    assert any("RuntimeError: no" in note for note in raised.value.__notes__)
+    await assert_released(plane, ep, runtime)
+
+
+@pytest.mark.asyncio
+async def test_an_interrupt_in_the_body_goes_on_before_any_cleanup_error(monkeypatch):
+    plane, runtime = ControlPlane({}, config=AppConfig(closure_wait_seconds=0)), FailingTeardown()
+    monkeypatch.setattr(Episode, "new_runtime", lambda self: runtime)
+    interception = StopControlledInterception()
+    ep = open_episode(
+        weather_episode(), interception=interception, control=CloseRaises(plane, asyncio.CancelledError())
+    )
+    with pytest.raises(KeyboardInterrupt) as raised:
+        async with ep:
+            raise KeyboardInterrupt
+    notes = raised.value.__notes__
+    assert any("CancelledError" in note for note in notes) and any("teardown failed" in note for note in notes)
+    await assert_released(plane, ep, runtime)
 
 
 @pytest.mark.asyncio

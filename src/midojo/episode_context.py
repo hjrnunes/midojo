@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import logging
 import uuid
 from collections.abc import Awaitable, Callable, Coroutine
@@ -386,33 +387,33 @@ class EpisodeContext:
 
         A cancellation that arrives while the release runs doesn't stop it:
         the release is awaited to its end, however often the caller is
-        cancelled, and the first such cancellation is raised afterwards (with
-        ``failure`` as its context), unless ``failure`` is a cancellation
-        itself, which then goes on. Otherwise ``failure`` goes on, each
-        cleanup step's error added to it as a note; with no failure, the first
-        cleanup error is raised, the others added to it as notes.
+        cancelled. Then, of ``failure``, the cancellation and the cleanup
+        steps' errors, the first that applies is raised: a KeyboardInterrupt
+        or SystemExit, ``failure``, a cancellation (the caller's, then a
+        step's), the first cleanup error. The others are added to it as
+        notes, and ``failure`` is its context.
         """
         errors, cancelled = await _to_the_end(self._release(failure))
-        notes = [f"While releasing evaluation {self._evaluation_id}: {type(e).__name__}: {e}" for e in errors]
-        if failure is not None:
-            for note in notes:
-                failure.add_note(note)
-            if cancelled is not None and not isinstance(failure, asyncio.CancelledError):
-                cancelled.__context__ = failure
-                return cancelled
-            return failure
-        if cancelled is not None:
-            return cancelled
-        if errors:
-            for note in notes[1:]:
-                errors[0].add_note(note)
-            return errors[0]
-        return None
+        ordered = [error for error in (failure, *errors) if error is not None]
+        exiting = next((error for error in ordered if isinstance(error, KeyboardInterrupt | SystemExit)), None)
+        step_cancelled = next((error for error in errors if isinstance(error, asyncio.CancelledError)), None)
+        raised = exiting or failure or cancelled or step_cancelled or next(iter(errors), None)
+        if raised is None:
+            return None
+        if cancelled is not None and cancelled is not raised:
+            raised.add_note(f"Cancelled while releasing evaluation {self._evaluation_id}")
+        for error in errors:
+            if error is not raised:
+                raised.add_note(f"While releasing evaluation {self._evaluation_id}: {type(error).__name__}: {error}")
+        if failure is not None and failure is not raised and raised.__context__ is None:
+            raised.__context__ = failure
+        return raised
 
-    async def _release(self, failure: BaseException | None) -> list[Exception]:
+    async def _release(self, failure: BaseException | None) -> list[BaseException]:
         """Release what the context acquired, in reverse, and return the errors of the steps that failed.
 
-        Every step is attempted, whatever the ones before did. After a failure
+        Every step is attempted, whatever the ones before did or raised (a
+        cancellation or an interrupt included). After a failure
         or a cancellation, an evaluation that isn't sealed yet is sealed with
         what was collected, never left open: closure still lets admitted calls
         finish, a runtime that was set up is still observed, the runtime is
@@ -425,12 +426,12 @@ class EpisodeContext:
         however late, was refused and kept as a late fact) and a run the
         context started ends.
         """
-        errors: list[Exception] = []
+        errors: list[BaseException] = []
 
         async def attempt(what: str, step: Callable[[], Awaitable[object]]) -> None:
             try:
                 await step()
-            except Exception as error:
+            except BaseException as error:
                 logger.info("Couldn't %s of evaluation %s", what, self._evaluation_id, exc_info=True)
                 errors.append(error)
 
@@ -473,9 +474,14 @@ async def _in_thread(function: Callable[..., T], /, *args: Any, **kwargs: Any) -
 
     A cancellation doesn't stop the thread, so the step is let finish before
     the cancellation goes on: the runtime is never released while one of its
-    steps is still running.
+    steps is still running. The step is an executor future, not a task (as
+    ``asyncio.to_thread`` would wrap it in): a KeyboardInterrupt or SystemExit
+    it raises is raised here, to the caller, rather than out of the event loop.
     """
-    step = asyncio.ensure_future(asyncio.to_thread(function, *args, **kwargs))
+    context = contextvars.copy_context()
+    step: asyncio.Future[T] = asyncio.get_running_loop().run_in_executor(
+        None, lambda: context.run(function, *args, **kwargs)
+    )
     try:
         return await asyncio.shield(step)
     except asyncio.CancelledError:
