@@ -77,7 +77,7 @@ class LateFact:
     ``evidence`` names the evidence-status keys it marks ``incomplete``
     (``function_calls``, ``environment``, ``turns``, ``agent_output``, or an
     observation source's ``<source>.<part>``). ``payload`` is the write as sent,
-    as JSON-compatible data.
+    as JSON-compatible data (bytes as UTF-8 text, undecodable bytes escaped).
     """
 
     event: str
@@ -263,6 +263,14 @@ def unsupported_value(value: Any) -> str | None:
     except _UnsupportedValueError as unsupported:
         return str(unsupported)
     return None
+
+
+def canonical_json(value: Any) -> str:
+    """``value`` in the snapshot digest's lossless encoding, as compact JSON: unequal values encode differently.
+
+    Takes only what :func:`unsupported_value` accepts; anything else raises TypeError.
+    """
+    return _dumps(_canonical(value))
 
 
 class _UnsupportedValueError(TypeError):

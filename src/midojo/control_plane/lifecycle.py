@@ -83,6 +83,7 @@ from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, ValidationError
+from pydantic_core import to_jsonable_python
 
 from midojo.observations import FUNCTION_CALLS, EvidenceStatus, evidence_status, require_evidence_keys
 from midojo.types import REFUSED_DISPOSITIONS, CallDisposition, CallProvenance, Environment, FunctionCallRecord
@@ -103,6 +104,7 @@ from .state import (
     Snapshot,
     Stage,
     Turn,
+    canonical_json,
     capture_evidence,
     late_evidence,
     unsupported_value,
@@ -553,6 +555,28 @@ def _canonical(data: Mapping[str, Any]) -> str:
     return json.dumps(data, sort_keys=True, separators=(",", ":"))
 
 
+def _call_payload(req: BaseModel) -> dict[str, Any]:
+    """A call's request as a late fact keeps it: JSON-compatible data, as ``model_dump(mode="json")`` gives it.
+
+    That gives bytes as UTF-8 text, and raises for bytes that aren't UTF-8;
+    here their undecodable bytes are escaped (``\\xff``) instead, so a late
+    call is kept whatever bytes its args hold.
+    """
+    return to_jsonable_python(_as_text(req.model_dump()))
+
+
+def _as_text(value: Any) -> Any:
+    """``value`` with every bytes or bytearray in it decoded as UTF-8, undecodable bytes escaped."""
+    kind = type(value)
+    if kind in (bytes, bytearray):
+        return value.decode("utf-8", "backslashreplace")
+    if kind is dict:
+        return {_as_text(key): _as_text(item) for key, item in value.items()}
+    if kind in (list, tuple, set, frozenset):
+        return [_as_text(item) for item in value]
+    return value
+
+
 # --- function calls ---
 
 # The disposition is compared on its own (see ``_same_disposition``): a body that leaves it out matches any.
@@ -562,15 +586,17 @@ _CALL_EVIDENCE = (FUNCTION_CALLS,)
 
 
 def canonical_body(call: FunctionCallStart | FunctionCallRecord, fields: set[str] = _BODY_FIELDS) -> str:
-    """A call's body as canonical JSON, so a replay must match it type for type.
+    """A call's body in a lossless encoding, so a replay must match it type for type.
 
-    Plain ``==`` would let ``true`` match ``1``. JSON keeps them apart, and ``1``
-    and ``1.0`` too: they're different bodies. Object keys are sorted, so their
-    order doesn't matter, and an omitted field and its explicit default are the
-    same body because the model has filled in the default by now. ``fields``
-    picks the fields compared: the whole body, or a start's function and args.
+    The encoding is the snapshot digest's (``state.canonical_json``). Plain ``==`` would let ``true`` match ``1``. The encoding keeps them apart,
+    and ``1`` and ``1.0``, bytes and the text they decode to, a list and a
+    tuple too: they're different bodies. It encodes any bytes, UTF-8 or not.
+    Mapping keys are sorted, so their order doesn't matter, and an omitted
+    field and its explicit default are the same body because the model has
+    filled in the default by now. ``fields`` picks the fields compared: the
+    whole body, or a start's function and args.
     """
-    return json.dumps(call.model_dump(mode="json", include=fields), sort_keys=True, separators=(",", ":"))
+    return canonical_json(call.model_dump(include=fields))
 
 
 def _same_disposition(a: CallDisposition | None, b: CallDisposition | None) -> bool:
@@ -625,9 +651,7 @@ def _start_call(evaluation: Evaluation, authority: Authority, event: StartCall) 
                 f"call_id {req.call_id!r} is already recorded with another function, args or disposition",
             )
     if evaluation.stage is not Stage.OPEN:
-        return _late(
-            evaluation, authority, "start_call", event.at, _CALL_EVIDENCE, req.model_dump(mode="json"), req.call_id
-        )
+        return _late(evaluation, authority, "start_call", event.at, _CALL_EVIDENCE, _call_payload(req), req.call_id)
     # With environment history, the pre-env is the live environment when the call starts; the finish adds the
     # post-env.
     record = FunctionCallRecord(
@@ -672,9 +696,7 @@ def _finish_call(evaluation: Evaluation, authority: Authority, event: FinishCall
     # An admitted call may finish until the closure wait ends; a new call only while the evaluation is open.
     admitted = (Stage.OPEN, Stage.CLOSING) if index is not None else (Stage.OPEN,)
     if evaluation.stage not in admitted:
-        return _late(
-            evaluation, authority, "finish_call", event.at, _CALL_EVIDENCE, req.model_dump(mode="json"), req.call_id
-        )
+        return _late(evaluation, authority, "finish_call", event.at, _CALL_EVIDENCE, _call_payload(req), req.call_id)
     if index is not None:
         # Finish a started call in place, so the record keeps its place in start order.
         started = evaluation.function_calls[index]

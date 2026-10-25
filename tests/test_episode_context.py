@@ -765,6 +765,47 @@ async def test_a_seal_names_any_data_an_episode_accepts_in_its_environment_and_c
     assert snapshot.snapshot_id == snapshot_digest(snapshot)
 
 
+def test_bytes_that_arent_utf8_in_call_args_replay_and_become_late_facts_without_raising():
+    plane = ControlPlane({}, config=AppConfig(closure_wait_seconds=0))
+    opened = plane.open_evaluation(weather_episode())
+    target = ById(None, opened.id)
+    args = {"raw": b"\xff\x00", "nested": [bytearray(b"\xfe")]}
+
+    def start(call_id: str, **changes):
+        return plane.start_call(
+            target, CreateFunctionCallStart(call_id=call_id, function="f", args={**args, **changes})
+        )
+
+    def finish(call_id: str, **changes):
+        req = CreateFunctionCallRecord(call_id=call_id, function="f", args={**args, **changes}, result="ok")
+        return plane.finish_call(target, req)
+
+    assert start("c1")[1] is True
+    assert start("c1")[1] is False  # a replay of the start
+    assert finish("c1")[1] is True  # finishes the started call
+    assert finish("c1")[1] is False  # a replay of the finish
+    # Bytes and a str that decode alike are different args: a conflict, not a replay.
+    with pytest.raises(RejectedError) as conflict:
+        start("c1", raw="\xff\x00")
+    assert conflict.value.kind is Rejection.CALL_CONFLICT
+    asyncio.run(plane.close(None, opened.id))
+    with pytest.raises(RejectedError) as late_start:
+        start("c2")
+    assert late_start.value.late
+    snapshot = asyncio.run(plane.complete(None, opened.id, "done"))
+    with pytest.raises(RejectedError) as late_finish:
+        finish("c3")
+    assert late_finish.value.late
+    with pytest.raises(RejectedError) as late_replay:
+        finish("c3")
+    assert late_replay.value.late
+    facts = plane.evaluation(target).late_facts
+    assert [(fact.event, fact.call_id) for fact in facts] == [("start_call", "c2"), ("finish_call", "c3")]
+    assert json.loads(json.dumps(dict(facts[0].payload))) == dict(facts[0].payload)
+    assert [call.args for call in snapshot.function_calls] == [args]
+    assert snapshot.snapshot_id == snapshot_digest(snapshot)
+
+
 def snapshot_with_args(args: dict) -> midojo.Snapshot:
     environment = Episode(turns=["hi"]).provision_environment()
     call = FunctionCallRecord(call_id="c", function="f", args=args, timestamp="t")
