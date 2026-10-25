@@ -254,7 +254,9 @@ def unsupported_value(value: Any) -> str | None:
     or pydantic's parsed ``TzInfo``). Exactly these types, not their
     subclasses: anything else could be unequal and still encode alike, or
     fail to encode at all. A read-only mapping view isn't one either: it
-    can't be copied, and the control plane copies what it keeps.
+    can't be copied, and the control plane copies what it keeps. Nor is a
+    list, tuple, dict or set that contains itself, at any depth: it has no
+    finite encoding.
     """
     try:
         _canonical(value)
@@ -264,14 +266,18 @@ def unsupported_value(value: Any) -> str | None:
 
 
 class _UnsupportedValueError(TypeError):
-    def __init__(self, path: str, value: Any) -> None:
-        super().__init__(f"{path or 'the value'} is a {type(value).__module__}.{type(value).__qualname__}")
+    def __init__(self, path: str, value: Any, why: str = "") -> None:
+        kind = f"{type(value).__module__}.{type(value).__qualname__}"
+        super().__init__(f"{path or 'the value'} is a {kind}{f' {why}' if why else ''}")
 
 
 _FIXED_OFFSETS = (timezone, TzInfo)
 
 
-def _canonical(value: Any, path: str = "") -> Any:
+_CONTAINERS = (list, tuple, dict, set, frozenset)
+
+
+def _canonical(value: Any, path: str = "", within: frozenset[int] = frozenset()) -> Any:
     """A JSON value that encodes ``value`` losslessly: unequal values encode differently. Raises ``_UnsupportedValueError``.
 
     Exactly ``str``, ``int`` and ``bool``, and None, are themselves; any other
@@ -281,6 +287,8 @@ def _canonical(value: Any, path: str = "") -> Any:
     sorted by their encoding (each tagged with its own type), a mapping by
     its ``[key, value]`` items sorted by their encoding, a date, datetime or
     time in ISO format, and a timedelta as days, seconds and microseconds.
+    ``within`` holds the containers ``value`` is inside of: a container that
+    contains itself has no finite encoding.
     """
     kind = type(value)
     if value is None or kind in (str, int, bool):
@@ -289,16 +297,20 @@ def _canonical(value: Any, path: str = "") -> Any:
         return ["float", struct.pack(">d", value).hex()]
     if kind in (bytes, bytearray):
         return [kind.__name__, value.hex()]
+    if kind in _CONTAINERS:
+        if id(value) in within:
+            raise _UnsupportedValueError(path, value, "that contains itself")
+        within = within | {id(value)}
     if kind in (list, tuple):
-        return [kind.__name__, [_canonical(item, f"{path}[{index}]") for index, item in enumerate(value)]]
+        return [kind.__name__, [_canonical(item, f"{path}[{index}]", within) for index, item in enumerate(value)]]
     if kind is dict:
         items = []
         for index, (key, item) in enumerate(value.items()):
-            encoded = _canonical(key, f"{path}<key {index}>")
-            items.append([encoded, _canonical(item, f"{path}[{_dumps(encoded)}]")])
+            encoded = _canonical(key, f"{path}<key {index}>", within)
+            items.append([encoded, _canonical(item, f"{path}[{_dumps(encoded)}]", within)])
         return ["mapping", sorted(items, key=_dumps)]
     if kind in (set, frozenset):
-        return [kind.__name__, sorted((_canonical(item, f"{path}<item>") for item in value), key=_dumps)]
+        return [kind.__name__, sorted((_canonical(item, f"{path}<item>", within) for item in value), key=_dumps)]
     if kind in (datetime, time) and (value.tzinfo is None or type(value.tzinfo) in _FIXED_OFFSETS):
         return [kind.__name__, value.isoformat()]
     if kind is date:

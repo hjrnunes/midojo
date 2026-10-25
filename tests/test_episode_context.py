@@ -49,7 +49,7 @@ from midojo.control_plane.lifecycle import (
 from midojo.control_plane.main import create_app
 from midojo.control_plane.models import CreateFunctionCallRecord, CreateFunctionCallStart
 from midojo.control_plane.service import ById, ControlPlane
-from midojo.control_plane.state import Stage, snapshot_digest
+from midojo.control_plane.state import Stage, snapshot_digest, unsupported_value
 from midojo.episode import Episode
 from midojo.episode_context import AgentBinding, open_episode
 from midojo.interception_host import HostInterception, HostInterceptor
@@ -907,6 +907,50 @@ def test_a_read_only_mapping_view_is_refused_cleanly_wherever_it_would_enter():
     snapshot = asyncio.run(plane.complete(None, opened.id, "done"))
     assert [call.call_id for call in snapshot.function_calls] == ["ok"] and snapshot.observations == {}
     assert snapshot.environment.blob == b"x" and snapshot.snapshot_id == snapshot_digest(snapshot)  # type: ignore[attr-defined]
+
+
+def looped_values() -> list:
+    """A list, a dict and a tuple that each contain themselves."""
+    looped_list: list = []
+    looped_list.append(looped_list)
+    looped_dict: dict = {}
+    looped_dict["self"] = looped_dict
+    looped_tuple: tuple = ([],)
+    looped_tuple[0].append(looped_tuple)
+    return [looped_list, looped_dict, looped_tuple]
+
+
+def test_a_value_that_contains_itself_is_unsupported_not_a_recursion_error():
+    for looped in looped_values():
+        problem = unsupported_value({"x": {"y": looped}})
+        assert problem is not None and "contains itself" in problem
+    # A value held twice, but never inside itself, is no loop.
+    shared = [1]
+    assert unsupported_value({"a": shared, "b": [shared, (shared,)]}) is None
+
+
+def test_a_call_or_change_holding_a_value_that_contains_itself_is_refused_where_it_enters():
+    plane = ControlPlane({}, config=AppConfig(closure_wait_seconds=0))
+    opened = plane.open_evaluation(weather_episode(environment={"blob": b""}))
+    target = ById(None, opened.id)
+    for looped in looped_values():
+        with pytest.raises(RejectedError) as started:
+            plane.start_call(target, CreateFunctionCallStart(call_id="s", function="f", args={"x": looped}))
+        assert started.value.kind is Rejection.UNSUPPORTED_VALUE and not started.value.late
+        with pytest.raises(RejectedError) as finished:
+            plane.finish_call(
+                target, CreateFunctionCallRecord(call_id="f", function="f", args={"x": looped}, result="ok")
+            )
+        assert finished.value.kind is Rejection.UNSUPPORTED_VALUE
+        with pytest.raises(RejectedError) as changed:
+            plane.change_environment(target, {"blob": looped})
+        assert changed.value.kind is Rejection.INVALID_ENVIRONMENT
+        with pytest.raises(RejectedError) as observed:
+            plane.apply(target, RecordObservations("openshell", Observed(value=looped), AT))
+        assert observed.value.kind is Rejection.UNSUPPORTED_VALUE
+    snapshot = asyncio.run(plane.complete(None, opened.id, "done"))
+    assert snapshot.function_calls == () and snapshot.observations == {}
+    assert snapshot.environment.blob == b"" and snapshot.snapshot_id == snapshot_digest(snapshot)  # type: ignore[attr-defined]
 
 
 class Observed(pydantic.BaseModel):
