@@ -103,23 +103,28 @@ class EpisodeResult:
     tool-output placements (empty in in-agent mode). ``reset`` says whether the
     target was reset before the episode (see :data:`ResetOutcome`).
     ``interrupted`` is True when a failure or a cancellation cut the episode
-    short: it was sealed with what was collected, and the snapshot marks
-    :data:`INTERRUPTED_EVIDENCE` incomplete.
+    short before the control plane sealed it: it was sealed with what was
+    collected, and the snapshot marks :data:`INTERRUPTED_EVIDENCE` incomplete.
+
+    ``snapshot`` is None when the control plane sealed the evaluation but the
+    context couldn't read its snapshot back (``ControlClient.snapshot``
+    failed): ``snapshot_error`` is that failure. The evaluation is sealed as
+    it was, and the snapshot is still on the control plane, under
+    ``evaluation_id``; sealing again (:meth:`EpisodeContext.seal`) only
+    retries the read.
     """
 
-    snapshot: Snapshot
+    evaluation_id: str
+    snapshot: Snapshot | None
     interception: InterceptionMode
     reset: ResetOutcome = "not_requested"
     interrupted: bool = False
     injection_outcomes: tuple[InjectionOutcome, ...] = ()
+    snapshot_error: BaseException | None = None
 
     @property
-    def evaluation_id(self) -> str:
-        return self.snapshot.evaluation_id
-
-    @property
-    def snapshot_id(self) -> str:
-        return self.snapshot.snapshot_id
+    def snapshot_id(self) -> str | None:
+        return self.snapshot.snapshot_id if self.snapshot is not None else None
 
 
 def _no_progress(_step: EpisodeStep) -> AbstractContextManager[object]:
@@ -162,7 +167,11 @@ class EpisodeContext:
         self._binding: AgentBinding | None = None
         self._interceptor: HostInterceptor | None = None
         self._last_reply: str | None = None
+        # Whether the control plane has sealed the evaluation, its snapshot read back or not.
+        self._control_sealed = False
         self._snapshot: Snapshot | None = None
+        # Why the sealed snapshot couldn't be read back, when it couldn't.
+        self._snapshot_error: BaseException | None = None
         self.turns: tuple[str, ...] | None = None
         self.control: ControlClient
 
@@ -190,18 +199,27 @@ class EpisodeContext:
     def sealed(self) -> Snapshot:
         """The sealed snapshot: immutable evidence, named by ``evaluation_id`` and ``snapshot_id``."""
         if self._snapshot is None:
+            if self._snapshot_error is not None:
+                raise RuntimeError(
+                    f"Evaluation {self._evaluation_id} is sealed, but its snapshot couldn't be read back"
+                ) from self._snapshot_error
             raise RuntimeError("The episode isn't sealed yet")
         return self._snapshot
 
     @property
     def result(self) -> EpisodeResult:
+        """The run's result, once the control plane has sealed the evaluation (its snapshot read back or not)."""
+        if self._snapshot is None and not self._control_sealed:
+            raise RuntimeError("The episode isn't sealed yet")
         interceptor = self._interceptor
         return EpisodeResult(
-            snapshot=self.sealed,
+            evaluation_id=self.evaluation_id,
+            snapshot=self._snapshot,
             interception="host" if self.interception is not None else "agent",
             reset=self.reset_outcome,
             interrupted=self.interrupted,
             injection_outcomes=interceptor.injection_outcomes if interceptor is not None else (),
+            snapshot_error=self._snapshot_error,
         )
 
     # --- entering ---
@@ -331,19 +349,27 @@ class EpisodeContext:
         context seals it if the host hasn't; sealing first lets the host act
         on the sealed evaluation (grade it on the control plane, say) while the
         interceptor is still up, so a call after the seal is a late fact.
+
+        Once the control plane has sealed the evaluation, the snapshot is read
+        back (``ControlClient.snapshot``). If that read fails, its error is
+        raised, the evaluation stays sealed as it was, and :attr:`result` says
+        so (``snapshot`` None, ``snapshot_error``); sealing again only retries
+        the read, whatever ``agent_output`` it's given.
         """
         if self._snapshot is not None:
             return self._snapshot
-        output = agent_output if agent_output is not None else (self._last_reply or "")
-        # Staged closure: no new call is admitted, calls already admitted may still finish, and the final
-        # observations are collected after that, before the seal.
-        try:
-            await self._close()
-            if self._ready:
-                await self._observe()
-        finally:
-            await self._teardown()
-        await self._seal(output)
+        if not self._control_sealed:
+            output = agent_output if agent_output is not None else (self._last_reply or "")
+            # Staged closure: no new call is admitted, calls already admitted may still finish, and the final
+            # observations are collected after that, before the seal.
+            try:
+                await self._close()
+                if self._ready:
+                    await self._observe()
+            finally:
+                await self._teardown()
+            await self._complete(output)
+        await self._read_snapshot()
         assert self._snapshot is not None
         return self._snapshot
 
@@ -358,12 +384,26 @@ class EpisodeContext:
             await self.control.record_observations(self.run_id, self.evaluation_id, source, observed)
 
     async def _seal(self, agent_output: str, incomplete: tuple[str, ...] = ()) -> None:
-        control, run_id, eval_id = self.control, self.run_id, self.evaluation_id
+        await self._complete(agent_output, incomplete)
+        await self._read_snapshot()
+
+    async def _complete(self, agent_output: str, incomplete: tuple[str, ...] = ()) -> None:
         marked = {"incomplete": incomplete} if incomplete else {}
-        await control.complete_evaluation(run_id, eval_id, agent_output, **marked)
+        await self.control.complete_evaluation(self.run_id, self.evaluation_id, agent_output, **marked)
+        self._control_sealed = True
+
+    async def _read_snapshot(self) -> None:
+        """Read the sealed snapshot back; on a failure, keep it as the reason, and raise it."""
         environment_type = self.episode.environment_type
         assert environment_type is not None  # An episode infers one when it isn't given.
-        self._snapshot = await control.snapshot(run_id, eval_id, environment_type=environment_type)
+        try:
+            self._snapshot = await self.control.snapshot(
+                self.run_id, self.evaluation_id, environment_type=environment_type
+            )
+        except BaseException as error:
+            self._snapshot_error = error
+            raise
+        self._snapshot_error = None
 
     async def __aexit__(
         self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None
@@ -438,6 +478,12 @@ class EpisodeContext:
         (it was live until the seal, so a call the target made after closure,
         however late, was refused and kept as a late fact) and a run the
         context started ends.
+
+        An evaluation the control plane has sealed is never treated so, even
+        when its snapshot couldn't be read back: nothing was cut short, so it
+        is not interrupted, its session stays bound (a write with it is a late
+        fact, as after any seal), and only the runtime, the interceptor and the
+        run are released.
         """
         errors: list[BaseException] = []
 
@@ -448,7 +494,8 @@ class EpisodeContext:
                 logger.info("Couldn't %s of evaluation %s", what, self._evaluation_id, exc_info=True)
                 errors.append(error)
 
-        if failure is not None and self._snapshot is None and self._evaluation_id is not None:
+        sealed = self._snapshot is not None or self._control_sealed
+        if failure is not None and not sealed and self._evaluation_id is not None:
             self.interrupted = True
             await attempt("close the evaluation", self._close)
             if self._ready:

@@ -483,6 +483,80 @@ async def test_a_failed_setup_is_torn_down_and_its_evaluation_sealed_incomplete(
     assert_sealed_as_interrupted(plane, ep, ep.episode)
 
 
+class NoSnapshotTransport(httpx.AsyncBaseTransport):
+    """The control plane's app, except that every snapshot fetch gets a 503."""
+
+    def __init__(self, app) -> None:
+        self.app = httpx.ASGITransport(app)
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path.endswith("/snapshot"):
+            return httpx.Response(503, request=request)
+        return await self.app.handle_async_request(request)
+
+
+@pytest.mark.asyncio
+async def test_a_sealed_evaluation_whose_snapshot_fetch_fails_is_sealed_not_interrupted(suite):
+    app = create_app({"weather": suite}, config=AppConfig(closure_wait_seconds=0))
+    plane: ControlPlane = app.state.control
+    run = plane.create_run("weather")
+    runtime = RecordingRuntime()
+    async with httpx.AsyncClient(transport=NoSnapshotTransport(app)) as http:
+        control = ControlPlaneClient("http://control", http=http)
+        ep = open_episode(suite.episode("weather_new_york"), runtime=runtime, control=control, run_id=run.id)
+        with pytest.raises(httpx.HTTPStatusError) as fetch:
+            async with ep:
+                await ep.turn("hi", _reply("rain"))
+    # The fetch's own error is raised, and the result says what happened: sealed, its snapshot not read back.
+    assert fetch.value.response.status_code == 503
+    result = ep.result
+    assert result.snapshot is None and result.snapshot_id is None and result.snapshot_error is fetch.value
+    assert result.evaluation_id == ep.evaluation_id and result.interrupted is False and not ep.interrupted
+    with pytest.raises(RuntimeError, match="couldn't be read back") as unread:
+        ep.sealed
+    assert unread.value.__cause__ is fetch.value
+    # Sealed once, with the agent's output and no incomplete marks; the session stays bound, as after any seal.
+    evaluation = plane.evaluation(ById(run.id, ep.evaluation_id))
+    assert evaluation.stage is Stage.SEALED and evaluation.snapshot is not None
+    assert evaluation.snapshot.agent_output == "rain" and evaluation.late_facts == ()
+    # (function_calls is incomplete for another reason: intercepted in the agent, and no call recorded.)
+    status = evaluation.snapshot.evidence_status
+    assert "incomplete" not in (status.get("turns"), status.get("agent_output"))
+    assert evaluation.session is not None
+    assert runtime.steps == ["setup", "observe", "teardown"]
+
+
+@pytest.mark.asyncio
+async def test_a_host_retries_a_failed_snapshot_fetch_by_sealing_again_and_nothing_is_sealed_twice(monkeypatch):
+    plane = ControlPlane({}, config=AppConfig(closure_wait_seconds=0))
+    real = InProcessControlClient.snapshot
+    failures = [OSError("the read failed")]
+
+    async def snapshot_failing_once(self, run_id, eval_id, *, environment_type):
+        if failures:
+            raise failures.pop()
+        return await real(self, run_id, eval_id, environment_type=environment_type)
+
+    monkeypatch.setattr(InProcessControlClient, "snapshot", snapshot_failing_once)
+    interception = HostInterception(upstream=scripted_upstream())
+    async with open_episode(
+        weather_episode(), runtime=RecordingRuntime(), interception=interception, control=plane
+    ) as ep:
+        await ep.turn("weather?", _reply("rain"))
+        with pytest.raises(OSError, match="the read failed") as fetch:
+            await ep.seal("an explicit output")
+        assert ep.result.snapshot is None and ep.result.snapshot_error is fetch.value
+        # The interceptor is still up, and the session bound: a call after the seal is a late fact.
+        assert ep.binding.tool_endpoint is not None
+        await call_tools(ep.binding.tool_endpoint, ("get_weather", {"city": "Boston"}))
+        snapshot = await ep.seal()
+    assert ep.sealed is snapshot and ep.result.snapshot is snapshot and ep.result.snapshot_error is None
+    assert snapshot.agent_output == "an explicit output" and not ep.interrupted
+    evaluation = plane.evaluation(ById(None, ep.evaluation_id))
+    assert [(fact.event, fact.by) for fact in evaluation.late_facts] == [("start_call", "interceptor")]
+    assert snapshot.function_calls == ()
+
+
 @pytest.mark.asyncio
 async def test_a_runtime_whose_run_fails_to_start_is_ended_and_no_evaluation_is_opened(monkeypatch):
     class FailingStart(RecordingRuntime):
