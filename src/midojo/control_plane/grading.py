@@ -58,10 +58,12 @@ def grade(episode: Episode, snapshot: Snapshot) -> Verdict:
     control plane grades the same snapshot with the same function, but its
     response (``ControlPlane.grade``, ``POST .../grade``) shows the
     evaluation's current evidence status, which also marks ``incomplete``
-    every key a late fact carries, including facts that arrived after the
-    seal. So with no late fact the two are equal; with one, the grades
-    (``utility``, ``security``, their reasons and validity) are still equal,
-    and ``evidence_status`` differs only in the late facts' keys, which the
-    control plane's response marks ``incomplete``.
+    every key a late fact carries. A late fact recorded before the seal is
+    already in the snapshot, so it changes neither: only late facts that
+    arrive after the seal (even after the grade) make the two differ. With
+    none, they are equal; with one, the grades (``utility``, ``security``,
+    their reasons and validity) are still equal, and ``evidence_status``
+    differs only in those facts' keys, which the control plane's response
+    marks ``incomplete``.
     """
     return Verdict(snapshot.evaluation_id, snapshot.snapshot_id, grade_snapshot(episode, snapshot))

@@ -925,6 +925,20 @@ async def test_the_control_planes_grade_is_the_pure_verdict_plus_late_facts_in_e
     assert verdict == midojo.grade(episode, plane.snapshot(None, ep.evaluation_id))
 
 
+@pytest.mark.asyncio
+async def test_a_late_fact_before_the_seal_is_in_the_snapshot_and_the_two_grades_are_equal():
+    plane = ControlPlane({}, config=AppConfig(closure_wait_seconds=0))
+    episode = weather_episode()
+    evaluation = plane.open_evaluation(episode)
+    await plane.close(None, evaluation.id)
+    with pytest.raises(RejectedError) as refused_write:
+        plane.start_call(ById(None, evaluation.id), CreateFunctionCallStart(call_id="late", function="f", args={}))
+    assert refused_write.value.late
+    snapshot = await plane.complete(None, evaluation.id, "rain")
+    assert snapshot.evidence_status["function_calls"] == "incomplete"
+    assert plane.grade(None, evaluation.id) == midojo.grade(episode, snapshot).grade
+
+
 @pytest.mark.parametrize("key", ["function_calls", "turns", "agent_output", "environment", "openshell.workdir"])
 def test_a_seal_may_mark_any_known_evidence_incomplete(suite, key):
     plane = ControlPlane({"weather": suite}, config=AppConfig(closure_wait_seconds=0))
