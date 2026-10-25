@@ -258,17 +258,23 @@ class EpisodeContext:
                 self._binding = AgentBinding(tool_endpoint=await self._interceptor.start())
         else:
             self._binding = AgentBinding(session_token=self._session_token)
-        with self._progress("setup"):
-            self._set_up = True
-            await _in_thread(
-                runtime.setup,
+        binding = self._binding
+
+        def set_up() -> None:
+            runtime.setup(
                 dict(episode.injections),
-                **self._binding.access,
+                **binding.access,
                 eval_id=self.evaluation_id,
                 user_task_id=episode.user_task_id,
                 injection_task_id=episode.injection_task_id,
             )
-        self._setup_done = True
+            # Set in the step itself: a setup that succeeds while a cancellation waits for it is still done,
+            # so the interrupted closure still observes the runtime.
+            self._setup_done = True
+
+        with self._progress("setup"):
+            self._set_up = True
+            await _in_thread(set_up)
 
     async def _open(self) -> None:
         """Open the evaluation: the episode itself in process, or a suite's episode in a run."""

@@ -488,7 +488,7 @@ async def test_a_cancelled_setup_finishes_before_the_runtime_is_torn_down():
     release.set()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert runtime.steps == ["setup started", "setup finished", "teardown"]
+    assert runtime.steps == ["setup started", "setup finished", "observe", "teardown"]
 
 
 class BlockingSetup(RecordingRuntime):
@@ -524,7 +524,33 @@ async def test_repeated_cancellation_during_a_runtime_step_waits_for_it_before_t
     runtime.release.set()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert runtime.steps == ["setup started", "setup finished", "teardown"]
+    assert runtime.steps == ["setup started", "setup finished", "observe", "teardown"]
+
+
+@pytest.mark.asyncio
+async def test_a_setup_that_succeeds_after_a_cancellation_is_observed_before_teardown_and_seal():
+    class ObservedSetup(BlockingSetup):
+        def observe(self) -> dict[str, pydantic.BaseModel]:
+            self.steps.append("observe")
+            return {"openshell": OpenShellObservations()}
+
+    plane, runtime = ControlPlane({}, config=AppConfig(closure_wait_seconds=0)), ObservedSetup()
+    ep = open_episode(weather_episode(), runtime=runtime, control=plane)
+
+    async def run() -> None:
+        async with ep:
+            raise AssertionError("never entered")
+
+    task = asyncio.create_task(run())
+    await asyncio.to_thread(runtime.started.wait, 10)
+    task.cancel()
+    await asyncio.sleep(0.05)
+    runtime.release.set()  # setup succeeds, with the cancellation pending
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert runtime.steps == ["setup started", "setup finished", "observe", "teardown"]
+    assert_sealed_as_interrupted(plane, ep, ep.episode)
+    assert set(ep.sealed.observations) == {"openshell"}
 
 
 @pytest.mark.asyncio
