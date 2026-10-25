@@ -526,6 +526,87 @@ async def test_a_sealed_evaluation_whose_snapshot_fetch_fails_is_sealed_not_inte
     assert runtime.steps == ["setup", "observe", "teardown"]
 
 
+class LostCompletionTransport(httpx.AsyncBaseTransport):
+    """The control plane's app, except that the first completion is lost: its request, or its response.
+
+    ``lost`` is ``request`` (it never reaches the app), ``response`` (the app
+    seals, and the client gets a transport error) or ``hang`` (the app seals,
+    and the client waits for a response that never comes, until cancelled).
+    """
+
+    def __init__(self, app, lost: str) -> None:
+        self.app = httpx.ASGITransport(app)
+        self.lost = lost
+        self.completions = 0
+        self.committed = asyncio.Event()
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        if not (request.method == "POST" and request.url.path.endswith("/complete")):
+            return await self.app.handle_async_request(request)
+        self.completions += 1
+        if self.completions > 1:
+            return await self.app.handle_async_request(request)
+        if self.lost == "request":
+            raise httpx.ConnectError("the request was lost", request=request)
+        response = await self.app.handle_async_request(request)
+        await response.aread()
+        self.committed.set()
+        if self.lost == "hang":
+            await asyncio.Event().wait()
+        raise httpx.ReadError("the response was lost", request=request)
+
+
+async def run_with_lost_completion(suite, lost: str):
+    """An episode over HTTP whose host seals with an explicit output and loses the first completion."""
+    app = create_app({"weather": suite}, config=AppConfig(closure_wait_seconds=0))
+    plane: ControlPlane = app.state.control
+    run = plane.create_run("weather")
+    transport = LostCompletionTransport(app, lost)
+    async with httpx.AsyncClient(transport=transport) as http:
+        control = ControlPlaneClient("http://control", http=http)
+        ep = open_episode(suite.episode("weather_new_york"), runtime=RecordingRuntime(), control=control, run_id=run.id)
+
+        async def run_it() -> None:
+            async with ep:
+                await ep.turn("hi", _reply("rain"))
+                await ep.seal("an explicit output")
+
+        task = asyncio.create_task(run_it())
+        if lost == "hang":
+            await asyncio.wait_for(transport.committed.wait(), timeout=10)
+            task.cancel()
+        with pytest.raises((httpx.TransportError, asyncio.CancelledError)) as raised:
+            await task
+    return plane, run, ep, transport, raised.value
+
+
+def assert_sealed_once_with(plane: ControlPlane, run, ep, output: str) -> None:
+    """Sealed once, with the host's output: not interrupted, nothing late, the session still bound."""
+    assert not ep.interrupted and ep.result.interrupted is False
+    assert ep.sealed.agent_output == output and ep.result.snapshot is ep.sealed
+    evaluation = plane.evaluation(ById(run.id, ep.evaluation_id))
+    assert evaluation.stage is Stage.SEALED and evaluation.snapshot == ep.sealed
+    assert evaluation.late_facts == () and evaluation.session is not None
+    status = ep.sealed.evidence_status
+    assert "incomplete" not in (status.get("turns"), status.get("agent_output"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lost", ["request", "response"])
+async def test_a_seal_whose_completion_was_lost_over_http_is_sent_again_and_sealed_once(suite, lost):
+    plane, run, ep, transport, raised = await run_with_lost_completion(suite, lost)
+    # The lost completion's own error is raised; the seal it carried was sent again, as is.
+    assert isinstance(raised, httpx.TransportError) and transport.completions == 2
+    assert_sealed_once_with(plane, run, ep, "an explicit output")
+
+
+@pytest.mark.asyncio
+async def test_a_cancellation_after_the_control_plane_sealed_leaves_it_sealed_not_interrupted(suite):
+    plane, run, ep, transport, raised = await run_with_lost_completion(suite, "hang")
+    assert isinstance(raised, asyncio.CancelledError) and transport.completions == 2
+    assert_sealed_once_with(plane, run, ep, "an explicit output")
+
+
 @pytest.mark.asyncio
 async def test_a_host_retries_a_failed_snapshot_fetch_by_sealing_again_and_nothing_is_sealed_twice(monkeypatch):
     plane = ControlPlane({}, config=AppConfig(closure_wait_seconds=0))

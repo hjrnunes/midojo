@@ -169,6 +169,8 @@ class EpisodeContext:
         self._last_reply: str | None = None
         # Whether the control plane has sealed the evaluation, its snapshot read back or not.
         self._control_sealed = False
+        # The seal last sent (its agent output and incomplete keys), whether or not its outcome was seen.
+        self._seal_request: tuple[str, tuple[str, ...]] | None = None
         self._snapshot: Snapshot | None = None
         # Why the sealed snapshot couldn't be read back, when it couldn't.
         self._snapshot_error: BaseException | None = None
@@ -355,20 +357,31 @@ class EpisodeContext:
         raised, the evaluation stays sealed as it was, and :attr:`result` says
         so (``snapshot`` None, ``snapshot_error``); sealing again only retries
         the read, whatever ``agent_output`` it's given.
+
+        If the seal request itself fails (its response lost, say, or a
+        cancellation while waiting for it), the control plane may have sealed
+        or not: sealing again sends the same seal again, whatever
+        ``agent_output`` it's given. Completing a sealed evaluation with the
+        same output is a retry that leaves its snapshot as it was, so the
+        evaluation is sealed once either way. Leaving the context after such a
+        failure sends it again too (see :meth:`_release`).
         """
         if self._snapshot is not None:
             return self._snapshot
         if not self._control_sealed:
-            output = agent_output if agent_output is not None else (self._last_reply or "")
-            # Staged closure: no new call is admitted, calls already admitted may still finish, and the final
-            # observations are collected after that, before the seal.
-            try:
-                await self._close()
-                if self._ready:
-                    await self._observe()
-            finally:
-                await self._teardown()
-            await self._complete(output)
+            if self._seal_request is not None:
+                await self._complete(*self._seal_request)
+            else:
+                output = agent_output if agent_output is not None else (self._last_reply or "")
+                # Staged closure: no new call is admitted, calls already admitted may still finish, and the final
+                # observations are collected after that, before the seal.
+                try:
+                    await self._close()
+                    if self._ready:
+                        await self._observe()
+                finally:
+                    await self._teardown()
+                await self._complete(output)
         await self._read_snapshot()
         assert self._snapshot is not None
         return self._snapshot
@@ -388,6 +401,7 @@ class EpisodeContext:
         await self._read_snapshot()
 
     async def _complete(self, agent_output: str, incomplete: tuple[str, ...] = ()) -> None:
+        self._seal_request = (agent_output, incomplete)
         marked = {"incomplete": incomplete} if incomplete else {}
         await self.control.complete_evaluation(self.run_id, self.evaluation_id, agent_output, **marked)
         self._control_sealed = True
@@ -483,7 +497,12 @@ class EpisodeContext:
         when its snapshot couldn't be read back: nothing was cut short, so it
         is not interrupted, its session stays bound (a write with it is a late
         fact, as after any seal), and only the runtime, the interceptor and the
-        run are released.
+        run are released. A seal whose outcome the context didn't see (its
+        response lost, or a cancellation while waiting for it) is first sent
+        again, as it was: the evidence was collected before it was sent, and
+        if the control plane had sealed, completing again with the same output
+        is a retry that leaves the snapshot as it was. Only if that fails too
+        is the episode taken as interrupted.
         """
         errors: list[BaseException] = []
 
@@ -494,6 +513,11 @@ class EpisodeContext:
                 logger.info("Couldn't %s of evaluation %s", what, self._evaluation_id, exc_info=True)
                 errors.append(error)
 
+        if failure is not None and not self._control_sealed and self._seal_request is not None:
+            seal_request = self._seal_request
+            await attempt("send the seal again", lambda: self._complete(*seal_request))
+            if self._control_sealed:
+                await attempt("read the snapshot back", self._read_snapshot)
         sealed = self._snapshot is not None or self._control_sealed
         if failure is not None and not sealed and self._evaluation_id is not None:
             self.interrupted = True
