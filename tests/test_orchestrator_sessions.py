@@ -841,7 +841,14 @@ async def test_openshell_failed_second_turn_fails_the_evaluation_after_the_first
         (1, None),
     ]
     assert [call["turn"] for call in evaluation["function_calls"]] == [0, 1]
-    assert evaluation["completed"] is False
+    # The failed turn cut the episode short: sealed with what was collected, never left open, and not graded.
+    assert (evaluation["completed"], evaluation["graded"]) == (True, False)
+    run_id = client.app.state.store.list_runs()[0].id
+    snapshot = client.get(f"/runs/{run_id}/evaluations/{evaluation['id']}/snapshot").json()
+    assert [snapshot["evidence_status"][key] for key in ("function_calls", "turns", "agent_output")] == [
+        "incomplete"
+    ] * 3
+    assert snapshot["agent_output"] == "reply 1: New York is 72°F and sunny"
     gateway.sandboxes.delete.assert_called_once()
     token = gateway.sandboxes.create.call_args.kwargs["spec"].environment["MIDOJO_SESSION_TOKEN"]
     assert client.get("/agent/environment", headers={"Authorization": f"Bearer {token}"}).status_code == 401

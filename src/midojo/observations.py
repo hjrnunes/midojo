@@ -23,7 +23,7 @@ Evidence status:
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import Literal
 
 from pydantic import BaseModel
@@ -37,6 +37,9 @@ EvidenceStatus = Literal["complete", "incomplete", "failed", "not_collected"]
 
 FUNCTION_CALLS = "function_calls"
 """The evidence-status key of the recorded tool calls."""
+
+# The evidence the control plane itself records, apart from runtime observations.
+RECORD_EVIDENCE = frozenset({FUNCTION_CALLS, "environment", "turns", "agent_output"})
 
 _OBSERVATION_TYPES: dict[str, type[BaseModel]] = {}
 
@@ -61,3 +64,24 @@ def evidence_status(observations: Mapping[str, BaseModel]) -> dict[str, Evidence
         if isinstance(reported, BaseModel):
             statuses.update({f"{source}.{part}": status for part, status in reported.model_dump().items()})
     return statuses
+
+
+def is_evidence_key(key: str) -> bool:
+    """Whether ``key`` names evidence an evidence status can mark.
+
+    That is one of :data:`RECORD_EVIDENCE`, a registered observation source,
+    or ``<source>.<part>`` for a part its model's ``evidence_status`` reports.
+    """
+    if key in RECORD_EVIDENCE or key in _OBSERVATION_TYPES:
+        return True
+    source, _, part = key.partition(".")
+    model = _OBSERVATION_TYPES.get(source)
+    status = model.model_fields.get("evidence_status") if model is not None else None
+    reported = status.annotation if status is not None else None
+    return isinstance(reported, type) and issubclass(reported, BaseModel) and part in reported.model_fields
+
+
+def require_evidence_keys(keys: Iterable[str]) -> None:
+    """Raise ValueError unless every key names evidence an evidence status can mark (:func:`is_evidence_key`)."""
+    if unknown := [key for key in keys if not is_evidence_key(key)]:
+        raise ValueError(f"Unknown evidence keys: {unknown}")

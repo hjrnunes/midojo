@@ -77,14 +77,14 @@ import dataclasses
 import enum
 import json
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
-from midojo.observations import FUNCTION_CALLS, EvidenceStatus, evidence_status
+from midojo.observations import FUNCTION_CALLS, EvidenceStatus, evidence_status, require_evidence_keys
 from midojo.types import REFUSED_DISPOSITIONS, CallDisposition, CallProvenance, Environment, FunctionCallRecord
 
 from .models import (
@@ -105,6 +105,7 @@ from .state import (
     Turn,
     capture_evidence,
     late_evidence,
+    unsupported_value,
 )
 
 # --- outcomes ---
@@ -133,6 +134,8 @@ class Rejection(enum.StrEnum):
     # The environment.
     REVISION_CONFLICT = "revision_conflict"
     INVALID_ENVIRONMENT = "invalid_environment"
+    # Values a snapshot can't hold (see ``state.unsupported_value``).
+    UNSUPPORTED_VALUE = "unsupported_value"
 
 
 @dataclass(frozen=True)
@@ -285,12 +288,16 @@ class ChangeEnvironment:
     """Set top-level fields of the environment in one step, at ``expected_revision`` when it's given.
 
     The changed environment is validated against the environment's own model,
-    the suite's environment type.
+    the suite's environment type. The event keeps the values as a dict of its
+    own, whatever mapping it was given.
     """
 
     values: Mapping[str, Any]
     at: str
     expected_revision: int | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "values", dict(self.values))
 
 
 @dataclass(frozen=True)
@@ -319,10 +326,25 @@ class EndClosureWait:
 
 @dataclass(frozen=True)
 class Seal:
-    """Take the snapshot, with the agent's final output."""
+    """Take the snapshot, with the agent's final output.
+
+    ``incomplete`` names evidence-status keys the host knows it didn't
+    collect in full (an episode cut short by a failure or a cancellation):
+    the snapshot marks them ``incomplete``. A Seal naming an unknown key
+    (see ``observations.is_evidence_key``) can't be made: its constructor
+    raises ValueError, so no path into the writer gets one. It keeps the
+    keys as a tuple of its own, so changing what it was given changes
+    nothing in it.
+    """
 
     agent_output: str
     at: str
+    incomplete: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        incomplete = tuple(self.incomplete)
+        require_evidence_keys(incomplete)
+        object.__setattr__(self, "incomplete", incomplete)
 
 
 @dataclass(frozen=True)
@@ -366,7 +388,17 @@ def transition(evaluation: Evaluation, authority: Authority, event: Event) -> Ou
         return rejected
     # The rules work on copies: what a transition returns shares nothing with its arguments, so a
     # caller changing the event or the source evaluation afterwards can't change the outcome.
-    evaluation, event = copy.deepcopy(evaluation), copy.deepcopy(event)
+    evaluation = copy.deepcopy(evaluation)
+    try:
+        event = copy.deepcopy(event)
+    except Exception as error:
+        if (refusal := _held_values(event)) is None:
+            raise
+        kind, what, _ = refusal
+        return Rejected(kind, f"The {what} can't be kept: it can't be copied ({type(error).__name__})")
+    # Checked on the copy the rules decide on, never on the caller's event, which may still change.
+    if (unsupported := _unsupported(event)) is not None:
+        return unsupported
     evaluation = _on_time(evaluation, event)
     match event:
         case Read():
@@ -408,6 +440,37 @@ def transition(evaluation: Evaluation, authority: Authority, event: Event) -> Ou
                 return Accepted(evaluation, evaluation)
             next_value = _replace(evaluation, grade=event.grade)
             return Accepted(next_value, next_value)
+
+
+def _held_values(event: Event) -> tuple[Rejection, str, Callable[[], Any]] | None:
+    """For an event carrying values the evaluation would keep: how to refuse one, what it is, and its values."""
+    match event:
+        case StartCall() | FinishCall():
+            return Rejection.UNSUPPORTED_VALUE, "call's record", event.req.model_dump
+        case ChangeEnvironment():
+            return Rejection.INVALID_ENVIRONMENT, "change", lambda: event.values
+        case ReplaceEnvironment():
+            return Rejection.INVALID_ENVIRONMENT, "environment", event.environment.model_dump
+        case RecordObservations():
+            return Rejection.UNSUPPORTED_VALUE, "observations", event.observed.model_dump
+        case _:
+            return None
+
+
+def _unsupported(event: Event) -> Rejected | None:
+    """Refuse an event carrying a value a snapshot can't hold (``state.unsupported_value``).
+
+    Decided on the transition's own copy of the event: a value the caller
+    changes afterwards never reaches the rules unchecked. An event that
+    can't be copied at all (one holding a read-only mapping view, say) is
+    refused the same way before this.
+    """
+    if (held := _held_values(event)) is None:
+        return None
+    kind, what, values = held
+    if (problem := unsupported_value(values())) is None:
+        return None
+    return Rejected(kind, f"The {what} can't be kept: {problem}")
 
 
 def _admit(evaluation: Evaluation, authority: Authority, event: Event) -> Rejected | None:
@@ -748,6 +811,8 @@ def _change_environment(evaluation: Evaluation, authority: Authority, event: Cha
         environment = model.model_validate({**evaluation.environment.model_dump(), **event.values})
     except ValidationError as exc:
         return Rejected(Rejection.INVALID_ENVIRONMENT, str(exc))
+    if (problem := unsupported_value(environment.model_dump())) is not None:
+        return Rejected(Rejection.INVALID_ENVIRONMENT, f"The changed environment can't be kept: {problem}")
     revision = evaluation.environment_revision + 1
     next_value = _replace(evaluation, environment=environment, environment_revision=revision)
     return Accepted(next_value, (revision, environment))
@@ -814,6 +879,8 @@ def _seal(evaluation: Evaluation, authority: Authority, event: Seal) -> Outcome:
         )
     )
     snapshot = Snapshot(
+        evaluation_id=evaluation.id,
+        run_id=evaluation.run_id,
         user_task_id=evaluation.user_task_id,
         injection_task_id=evaluation.injection_task_id,
         agent_output=event.agent_output,
@@ -827,6 +894,7 @@ def _seal(evaluation: Evaluation, authority: Authority, event: Seal) -> Outcome:
             **_capture_status(evaluation),
             **late_evidence(evaluation.late_facts),
             **capture_evidence(evaluation.capture_failures),
+            **{key: "incomplete" for key in event.incomplete},
         },
         sealed_at=event.at,
         capture_failures=capture_failures,

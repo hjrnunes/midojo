@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny
+from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, field_validator
 
-from midojo.observations import EvidenceStatus
+from midojo.observations import EvidenceStatus, require_evidence_keys
 from midojo.types import CallDisposition, CallProvenance, Environment, GradeValidity, InterceptionMode, SuiteName
 
 # --- Run / Evaluation request/response models ---
@@ -187,6 +187,20 @@ class CreateEvaluationResponse(BaseModel):
 
 class CompleteRequest(BaseModel):
     agent_output: str
+    incomplete: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Evidence-status keys the host didn't collect in full, such as an episode a failure cut short "
+            "(function_calls, turns, agent_output): the snapshot marks them incomplete. Each must be a known "
+            "evidence key: function_calls, environment, turns, agent_output, or an observation source's part."
+        ),
+    )
+
+    @field_validator("incomplete")
+    @classmethod
+    def _known_evidence(cls, keys: list[str]) -> list[str]:
+        require_evidence_keys(keys)
+        return keys
 
 
 _STAGE_DESCRIPTION = (
@@ -369,6 +383,30 @@ class EvaluationResponse(BaseModel):
             "function_calls incomplete in evidence_status, so a check that depends on a call's absence is unknown."
         ),
     )
+
+
+class SnapshotResponse(BaseModel):
+    """A sealed evaluation's snapshot: everything grading reads, and how completely it was collected.
+
+    ``function_calls`` are the full call records, environment history
+    included. The snapshot never changes: a fact that arrives after the seal
+    shows up only in the evaluation's ``evidence_status``.
+    """
+
+    evaluation_id: str
+    run_id: str | None
+    snapshot_id: str = Field(description="Names this snapshot: what a grade of it graded.")
+    user_task_id: str | None
+    injection_task_id: str | None
+    agent_output: str
+    pre_environment: dict[str, Any]
+    environment: dict[str, Any]
+    function_calls: list[dict[str, Any]]
+    turns: list[TurnResponse]
+    observations: dict[str, dict[str, Any]]
+    evidence_status: dict[str, EvidenceStatus] = Field(description=_EVIDENCE_STATUS_DESCRIPTION)
+    sealed_at: str
+    capture_failures: list[CaptureFailureResponse]
 
 
 # --- Suite / task response models ---

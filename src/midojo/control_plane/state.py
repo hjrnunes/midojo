@@ -11,13 +11,19 @@ store keeps.
 
 from __future__ import annotations
 
+import dataclasses
 import enum
-from collections.abc import Mapping
+import hashlib
+import json
+import struct
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, time, timedelta, timezone
+from types import MappingProxyType
 from typing import Any
 
 from pydantic import BaseModel
+from pydantic_core import TzInfo
 
 from midojo.episode import Episode
 from midojo.observations import FUNCTION_CALLS, EvidenceStatus
@@ -103,26 +109,207 @@ class CaptureFailure:
     at: str
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class Snapshot:
-    """What the seal fixes: everything grading reads, and how completely it was collected.
+    """What the seal fixes: everything grading reads, and how completely it was collected. Immutable.
 
     ``evidence_status`` is the observations' own status, with every key a late
-    fact recorded before the seal marked ``incomplete``, and ``function_calls``
-    marked ``incomplete`` when a capture failure was reported before the seal.
+    fact recorded before the seal marked ``incomplete``, ``function_calls``
+    marked ``incomplete`` when a capture failure was reported before the seal,
+    and every key the host named as incomplete at the seal.
+
+    ``evaluation_id`` and ``run_id`` name the evaluation it seals (``run_id``
+    None outside a run), and ``snapshot_id`` this snapshot: a result graded
+    from it names what it graded, never "the latest evaluation".
+    ``snapshot_id`` is the snapshot's own content digest (:func:`snapshot_digest`),
+    computed here: no caller chooses it, and equal content has an equal ID.
+
+    Nothing a holder does changes a snapshot. Its scalars and its turns and
+    capture failures are immutable, ``evidence_status`` is a read-only mapping,
+    and the environments, call records and observations (mutable pydantic
+    models) are kept as private copies: each read returns a new deep copy, so
+    changing what a read returned changes nothing here. Copying a snapshot
+    returns the snapshot itself. The private ``_``-prefixed copies are not
+    part of that contract: they are shared, and only the snapshot reads them.
     """
 
+    evaluation_id: str
+    run_id: str | None
+    snapshot_id: str
     user_task_id: str | None
     injection_task_id: str | None
     agent_output: str
-    pre_environment: Environment
-    environment: Environment
-    function_calls: tuple[FunctionCallRecord, ...]
     turns: tuple[Turn, ...]
-    observations: Mapping[str, BaseModel]
     evidence_status: Mapping[str, EvidenceStatus]
     sealed_at: str
-    capture_failures: tuple[CaptureFailure, ...] = ()
+    capture_failures: tuple[CaptureFailure, ...]
+    _pre_environment: Environment
+    _environment: Environment
+    _function_calls: tuple[FunctionCallRecord, ...]
+    _observations: Mapping[str, BaseModel]
+
+    def __init__(
+        self,
+        *,
+        evaluation_id: str,
+        run_id: str | None,
+        user_task_id: str | None,
+        injection_task_id: str | None,
+        agent_output: str,
+        pre_environment: Environment,
+        environment: Environment,
+        function_calls: Iterable[FunctionCallRecord],
+        turns: Iterable[Turn],
+        observations: Mapping[str, BaseModel],
+        evidence_status: Mapping[str, EvidenceStatus],
+        sealed_at: str,
+        capture_failures: Iterable[CaptureFailure] = (),
+    ) -> None:
+        values: dict[str, Any] = {
+            "evaluation_id": evaluation_id,
+            "run_id": run_id,
+            "user_task_id": user_task_id,
+            "injection_task_id": injection_task_id,
+            "agent_output": agent_output,
+            "turns": tuple(turns),
+            "evidence_status": MappingProxyType(dict(evidence_status)),
+            "sealed_at": sealed_at,
+            "capture_failures": tuple(capture_failures),
+            "_pre_environment": pre_environment.model_copy(deep=True),
+            "_environment": environment.model_copy(deep=True),
+            "_function_calls": tuple(call.model_copy(deep=True) for call in function_calls),
+            "_observations": MappingProxyType(
+                {source: observed.model_copy(deep=True) for source, observed in observations.items()}
+            ),
+        }
+        for name, value in values.items():
+            object.__setattr__(self, name, value)
+        object.__setattr__(self, "snapshot_id", snapshot_digest(self))
+
+    @property
+    def pre_environment(self) -> Environment:
+        """The environment when the evaluation was created (a new copy)."""
+        return self._pre_environment.model_copy(deep=True)
+
+    @property
+    def environment(self) -> Environment:
+        """The environment at the seal (a new copy)."""
+        return self._environment.model_copy(deep=True)
+
+    @property
+    def function_calls(self) -> tuple[FunctionCallRecord, ...]:
+        """The call records, in the order they were started (new copies)."""
+        return tuple(call.model_copy(deep=True) for call in self._function_calls)
+
+    @property
+    def observations(self) -> Mapping[str, BaseModel]:
+        """The runtime observations by source (new copies)."""
+        return {source: observed.model_copy(deep=True) for source, observed in self._observations.items()}
+
+    def __hash__(self) -> int:
+        return hash(self.snapshot_id)
+
+    def __copy__(self) -> Snapshot:
+        return self
+
+    def __deepcopy__(self, _memo: dict[int, Any]) -> Snapshot:
+        return self
+
+
+def snapshot_digest(snapshot: Snapshot) -> str:
+    """``sha256:<hex>`` of the snapshot's content, everything in it but its ID, in a lossless encoding.
+
+    Two snapshots share a digest only when their content is equal. The
+    encoding takes only the values :func:`unsupported_value` accepts, which is
+    all an evaluation holds: the control plane refuses any other where it
+    enters (a call's args, an environment, observations).
+    """
+    content = {
+        "evaluation_id": snapshot.evaluation_id,
+        "run_id": snapshot.run_id,
+        "user_task_id": snapshot.user_task_id,
+        "injection_task_id": snapshot.injection_task_id,
+        "agent_output": snapshot.agent_output,
+        "pre_environment": snapshot._pre_environment.model_dump(),
+        "environment": snapshot._environment.model_dump(),
+        "function_calls": [call.model_dump() for call in snapshot._function_calls],
+        "turns": [dataclasses.asdict(turn) for turn in snapshot.turns],
+        "observations": {source: observed.model_dump() for source, observed in snapshot._observations.items()},
+        "evidence_status": dict(snapshot.evidence_status),
+        "sealed_at": snapshot.sealed_at,
+        "capture_failures": [
+            {**dataclasses.asdict(failure), "stage": failure.stage.value} for failure in snapshot.capture_failures
+        ],
+    }
+    return f"sha256:{hashlib.sha256(_dumps(_canonical(content)).encode()).hexdigest()}"
+
+
+def unsupported_value(value: Any) -> str | None:
+    """Where ``value`` holds a value the snapshot digest can't encode, and of which type; None when it has none.
+
+    The digest encodes exactly these: None, ``bool``, ``int``, ``float``,
+    ``str``, ``bytes`` and ``bytearray``; ``list``, ``tuple``, ``set`` and
+    ``frozenset`` of them, and ``dict`` with keys and values of them; ``date``, ``datetime``, ``time`` and
+    ``timedelta``, with no time zone or a fixed offset (``datetime.timezone``,
+    or pydantic's parsed ``TzInfo``). Exactly these types, not their
+    subclasses: anything else could be unequal and still encode alike, or
+    fail to encode at all. A read-only mapping view isn't one either: it
+    can't be copied, and the control plane copies what it keeps.
+    """
+    try:
+        _canonical(value)
+    except _UnsupportedValueError as unsupported:
+        return str(unsupported)
+    return None
+
+
+class _UnsupportedValueError(TypeError):
+    def __init__(self, path: str, value: Any) -> None:
+        super().__init__(f"{path or 'the value'} is a {type(value).__module__}.{type(value).__qualname__}")
+
+
+_FIXED_OFFSETS = (timezone, TzInfo)
+
+
+def _canonical(value: Any, path: str = "") -> Any:
+    """A JSON value that encodes ``value`` losslessly: unequal values encode differently. Raises ``_UnsupportedValueError``.
+
+    Exactly ``str``, ``int`` and ``bool``, and None, are themselves; any other
+    value is a ``[tag, content]`` pair, so no value is mistaken for another:
+    a float by its IEEE-754 bits (so every NaN payload and sign too), bytes
+    as hex, a list or a tuple by its items, a set or a frozenset by its items
+    sorted by their encoding (each tagged with its own type), a mapping by
+    its ``[key, value]`` items sorted by their encoding, a date, datetime or
+    time in ISO format, and a timedelta as days, seconds and microseconds.
+    """
+    kind = type(value)
+    if value is None or kind in (str, int, bool):
+        return value
+    if kind is float:
+        return ["float", struct.pack(">d", value).hex()]
+    if kind in (bytes, bytearray):
+        return [kind.__name__, value.hex()]
+    if kind in (list, tuple):
+        return [kind.__name__, [_canonical(item, f"{path}[{index}]") for index, item in enumerate(value)]]
+    if kind is dict:
+        items = []
+        for index, (key, item) in enumerate(value.items()):
+            encoded = _canonical(key, f"{path}<key {index}>")
+            items.append([encoded, _canonical(item, f"{path}[{_dumps(encoded)}]")])
+        return ["mapping", sorted(items, key=_dumps)]
+    if kind in (set, frozenset):
+        return [kind.__name__, sorted((_canonical(item, f"{path}<item>") for item in value), key=_dumps)]
+    if kind in (datetime, time) and (value.tzinfo is None or type(value.tzinfo) in _FIXED_OFFSETS):
+        return [kind.__name__, value.isoformat()]
+    if kind is date:
+        return ["date", value.isoformat()]
+    if kind is timedelta:
+        return ["timedelta", [value.days, value.seconds, value.microseconds]]
+    raise _UnsupportedValueError(path, value)
+
+
+def _dumps(encoded: Any) -> str:
+    return json.dumps(encoded, separators=(",", ":"))
 
 
 @dataclass(frozen=True)

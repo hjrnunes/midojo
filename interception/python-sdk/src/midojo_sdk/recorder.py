@@ -96,6 +96,7 @@ class RejectionKind(enum.StrEnum):
     TURN_ANSWERED = "turn_answered"
     REVISION_CONFLICT = "revision_conflict"
     INVALID_ENVIRONMENT = "invalid_environment"
+    UNSUPPORTED_VALUE = "unsupported_value"
 
 
 class ControlPlaneRejectedError(RuntimeError):

@@ -22,7 +22,7 @@ in host mode, only the tool endpoint of the interceptor the host runs
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from pydantic import BaseModel
 
@@ -47,13 +47,14 @@ class AgentRuntime(Protocol):
         session_token: str | None = None,
         tool_endpoint: ToolEndpoint | None = None,
         eval_id: str,
-        user_task_id: str,
+        user_task_id: str | None,
         injection_task_id: str | None,
     ) -> None:
         """Prepare the agent for one evaluation, with the active injections in place.
 
         The agent is given ``session_token`` (in-agent interception) or
-        ``tool_endpoint`` (host mode), whichever is set.
+        ``tool_endpoint`` (host mode), whichever is set. ``user_task_id`` is
+        None for an episode no suite compiled.
         """
         ...
 
@@ -67,6 +68,22 @@ class AgentRuntime(Protocol):
 
     def end_run(self) -> None:
         """Release the run's resources."""
+        ...
+
+
+@runtime_checkable
+class ResettableRuntime(Protocol):
+    """A runtime that can return its target to the initial state: a capability it declares by implementing ``reset``.
+
+    Nothing resets a target implicitly: the episode context calls ``reset``
+    only when its caller asks (``open_episode(..., reset=True)``) and the
+    runtime declares it, before the evaluation's ``setup``. Neither built-in
+    runtime declares it: an OpenShell sandbox is new for each evaluation, but
+    what the agent changed outside it (a remote account, say) isn't undone.
+    """
+
+    def reset(self) -> None:
+        """Return the target to its initial state, before an episode."""
         ...
 
 
@@ -90,7 +107,7 @@ class UnmanagedRuntime:
         session_token: str | None = None,
         tool_endpoint: ToolEndpoint | None = None,
         eval_id: str,
-        user_task_id: str,
+        user_task_id: str | None,
         injection_task_id: str | None,
     ) -> None:
         pass

@@ -35,7 +35,7 @@ import asyncio
 import hashlib
 import secrets
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -43,6 +43,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from midojo.episode import Episode, UnknownTaskError
+from midojo.observations import require_evidence_keys
 from midojo.types import Environment, FunctionCallRecord, InterceptionMode, SuiteName
 from midojo.yaml_task_suite import YAMLTaskSuite
 
@@ -57,7 +58,7 @@ from .models import (
     CreateFunctionCallStart,
     GradeResponse,
 )
-from .state import CaptureFailure, Evaluation, Run, Snapshot, Stage, Turn
+from .state import CaptureFailure, Evaluation, Run, Snapshot, Stage, Turn, unsupported_value
 from .store import InMemoryStore, Store, detached
 
 # How often the closure wait checks for unfinished calls, in seconds.
@@ -234,11 +235,15 @@ class ControlPlane:
         an interception layer given the session) or ``host`` (by an interceptor
         the host runs outside the target, the only holder of the session). It
         labels each record the session makes (``FunctionCallRecord.provenance``).
+        An environment holding a value a snapshot can't hold
+        (``state.unsupported_value``) raises ValueError too.
         """
         run = self.run(run_id) if run_id is not None else None
         if run is not None and episode.user_task_id is None:
             raise ValueError("An episode opened in a run needs a user_task_id")
         environment = episode.provision_environment()
+        if (problem := unsupported_value(environment.model_dump())) is not None:
+            raise ValueError(f"The episode's environment can't be kept: {problem}")
         turns = episode.turns
         evaluation = Evaluation(
             id=self.store.new_evaluation_id(),
@@ -346,15 +351,29 @@ class ControlPlane:
             remaining = (evaluation.closure_deadline or 0.0) - time.time()
             await asyncio.sleep(max(0.0, min(CLOSURE_POLL_SECONDS, remaining)))
 
-    async def complete(self, run_id: str | None, eval_id: str, agent_output: str) -> Snapshot:
+    async def complete(
+        self, run_id: str | None, eval_id: str, agent_output: str, incomplete: Sequence[str] = ()
+    ) -> Snapshot:
         """Seal the evaluation with the agent's final output, closing it first if needed.
 
         Completing a sealed evaluation again with the same output returns its
         snapshot; another output is refused and recorded as a late fact.
+        ``incomplete`` names evidence the host didn't collect in full, such as
+        an episode a failure cut short: the snapshot marks it ``incomplete``.
+        Each key must be a known evidence key (``observations.is_evidence_key``),
+        or this raises ValueError.
         """
+        require_evidence_keys(incomplete)  # before closing: a refused seal leaves the evaluation as it was
         if self.evaluation(ById(run_id, eval_id)).stage is not Stage.SEALED:
             await self.close(run_id, eval_id)
-        return self.apply(ById(run_id, eval_id), lifecycle.Seal(agent_output, _now()))
+        return self.apply(ById(run_id, eval_id), lifecycle.Seal(agent_output, _now(), incomplete=tuple(incomplete)))
+
+    def snapshot(self, run_id: str | None, eval_id: str) -> Snapshot:
+        """The evaluation's sealed snapshot, refused as ``not_sealed`` before the seal. It shares nothing stored."""
+        snapshot = self.evaluation(ById(run_id, eval_id)).snapshot
+        if snapshot is None:
+            raise _reject(Rejection.NOT_SEALED, "Evaluation not completed. Call complete first.")
+        return snapshot
 
     # --- grading ---
 

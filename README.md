@@ -267,9 +267,34 @@ policy:
         - path: /usr/bin/node
 ```
 
-Each interceptor accepts only its own token. It keeps running until its evaluation is sealed and graded, then stops (it also stops if the evaluation fails). The port or path is only an address: one evaluation's agent can't call another evaluation's interceptor. Once the evaluation is closing, the interceptor stops forwarding: a new call gets an error, and the control plane keeps it as a late fact, including a call that arrives after the seal. The evaluation's state ends calls, not a revoked token.
+Each interceptor accepts only its own token. It keeps running until its evaluation is sealed and graded, then stops (it also stops if the evaluation fails, which leaves the evaluation sealed with its evidence marked incomplete). The port or path is only an address: one evaluation's agent can't call another evaluation's interceptor. Once the evaluation is closing, the interceptor stops forwarding: a new call gets an error, and the control plane keeps it as a late fact, including a call that arrives after the seal. The evaluation's state ends calls, not a revoked token.
 
 Every call record has a `provenance`, set by the control plane from how the record arrived, never by the sender: `interceptor` (a host-side interceptor), `agent` (an interception layer holding the session: lower-trust evidence, since the agent could have written or left out any record) or `host` (the run-scoped routes). The evaluation's `interception` (`agent` or `host`) says which applies. When an evaluation intercepted in the agent is sealed with no call recorded at all, its `function_calls` evidence is `incomplete`: a hook that fails open records nothing, so a missing call is unknown, never proof the agent was safe.
+
+### Run an episode from Python
+
+`midojo-run` is one client of an API you can call yourself: from a test, an attacker loop, or another red-teaming tool that sends its own messages. An `Episode` describes one run (the turns, the injection plan, the checks, the initial environment and the runtime). `open_episode` runs it once; you drive the agent and report each turn; `grade` grades the sealed result:
+
+```python
+import midojo
+from midojo.interception_host import HostInterception
+
+episode = suite.episode("weather_new_york", "tornado_alert_via_prompt", suite.get_probes_for_task("tornado_alert_via_prompt"))
+async with midojo.open_episode(episode, interception=HostInterception(upstream="http://localhost:9000/mcp")) as ep:
+    for message in ep.turns:
+        await ep.turn(message, lambda m: my_agent(m, ep.binding.tool_endpoint))
+verdict = midojo.grade(episode, ep.sealed)
+print(verdict.evaluation_id, verdict.snapshot_id, verdict.grade.security)
+```
+
+Entering the context starts the runtime, opens the evaluation, starts the interceptor and sets the runtime up. `ep.binding` is what the agent may hold: in host mode only the interceptor's `tool_endpoint`; without `interception`, the evaluation's `session_token` for an interception layer in the agent (`ep.control.recorder(token)` records with it). Never both. `ep.turn(message, send)` starts the turn, calls `send`, and records the reply (or call `start_turn` and `record_turn_reply` yourself). Leaving the context closes the evaluation, waits for calls already admitted, collects the runtime's observations, tears the runtime down and seals. `ep.sealed` is the immutable snapshot, named by its `evaluation_id` and `snapshot_id`.
+
+- **Control plane.** By default the episode runs on a new control plane in your process: no `midojo-serve` needed. Pass `control=` a `ControlPlane`, or a `ControlPlaneClient` with `run_id=` to run a suite's episode in a run on a `midojo-serve`; there, `GET /runs/{run_id}/evaluations/{eval_id}/snapshot` returns the sealed snapshot.
+- **Runtime.** Without `runtime=`, the context builds the episode's runtime and starts and ends its run. A runtime you pass belongs to a run you started.
+- **Grading.** `midojo.grade(episode, snapshot)` is a pure function: it needs no context or control plane. Its `Verdict` names the evaluation and snapshot it graded, and its grade is the control plane's grade of that snapshot. One difference: the control plane's grade response also marks `incomplete` the evidence of a late fact that arrived after the seal (even after the grade), while the verdict keeps the evidence status fixed in the snapshot. A late fact recorded before the seal is already in the snapshot, so it makes no difference: with no late fact after the seal, the two are equal.
+- **Immutability.** A sealed snapshot can't change: its `evidence_status` is read-only, and each read of its environments, call records or observations returns a new copy. Its `snapshot_id` is a digest of its content, which the snapshot computes itself, in an encoding that loses nothing: snapshots share an ID only when their content is equal. It encodes only plain data (None, booleans, numbers, strings, bytes, lists, tuples, sets, dicts, dates and times), so a tool call's args, an environment or observations holding any other object are refused when they're recorded (`unsupported_value`, or `invalid_environment` for an environment). Over HTTP, a snapshot is rebuilt only when it comes back equal: one holding a value JSON doesn't carry back as it was (bytes or a date in an untyped environment field, a non-finite float) is refused.
+- **Reset.** `reset=True` resets the target before the episode only when the runtime declares it can (`midojo.runtimes.ResettableRuntime`). Otherwise nothing is reset, and `ep.result.reset` is `unsupported`. Neither built-in runtime declares it; for a clean start, use a runtime that is fresh for each episode.
+- **Failures.** If the body raises or is cancelled, the context still tears the runtime down, stops the interceptor, and seals the evaluation with what it collected, marking `function_calls`, `turns` and `agent_output` `incomplete`, so a check that needs a call's absence grades unknown. `ep.result.interrupted` is then True, and the session is revoked. Every cleanup step runs whatever an earlier one raised, even a cancellation or a KeyboardInterrupt; then a KeyboardInterrupt or SystemExit goes on first, then the body's own error, then a cancellation, then the first cleanup error, and the others are attached as notes.
 
 ### Write a suite
 

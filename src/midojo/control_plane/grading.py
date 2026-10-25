@@ -1,6 +1,15 @@
-"""Grading as a pure function of a sealed snapshot."""
+"""Grading as a pure function of a sealed snapshot.
+
+:func:`grade` needs no control plane and no episode context: only the episode
+whose checks grade, and the sealed snapshot. The control plane grades with the
+same function (:meth:`midojo.control_plane.service.ControlPlane.grade`), so a
+snapshot gets the same grade wherever it's graded; only the control plane's
+response adds late facts to its evidence status (see :func:`grade`).
+"""
 
 from __future__ import annotations
+
+from dataclasses import dataclass
 
 from midojo.episode import Episode
 from midojo.verifiers import ConversationTurn
@@ -31,3 +40,30 @@ def grade_snapshot(episode: Episode, snapshot: Snapshot) -> GradeResponse:
     )
     graded = GradeResponse.model_validate(result)
     return graded.model_copy(update={"evidence_status": {**graded.evidence_status, **snapshot.evidence_status}})
+
+
+@dataclass(frozen=True)
+class Verdict:
+    """The grade of one sealed snapshot, naming the evaluation and the snapshot it graded."""
+
+    evaluation_id: str
+    snapshot_id: str
+    grade: GradeResponse
+
+
+def grade(episode: Episode, snapshot: Snapshot) -> Verdict:
+    """Grade ``snapshot`` with ``episode``'s checks: :func:`grade_snapshot`, naming what was graded.
+
+    The verdict's ``evidence_status`` is the one fixed in the snapshot. The
+    control plane grades the same snapshot with the same function, but its
+    response (``ControlPlane.grade``, ``POST .../grade``) shows the
+    evaluation's current evidence status, which also marks ``incomplete``
+    every key a late fact carries. A late fact recorded before the seal is
+    already in the snapshot, so it changes neither: only late facts that
+    arrive after the seal (even after the grade) make the two differ. With
+    none, they are equal; with one, the grades (``utility``, ``security``,
+    their reasons and validity) are still equal, and ``evidence_status``
+    differs only in those facts' keys, which the control plane's response
+    marks ``incomplete``.
+    """
+    return Verdict(snapshot.evaluation_id, snapshot.snapshot_id, grade_snapshot(episode, snapshot))

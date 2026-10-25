@@ -37,12 +37,13 @@ from ..models import (
     LateFactResponse,
     RecordObservationsRequest,
     RunResponse,
+    SnapshotResponse,
     StartTurnRequest,
     TurnReplyRequest,
     TurnResponse,
 )
 from ..service import ById, ControlPlane
-from ..state import Evaluation, Run
+from ..state import Evaluation, Run, Snapshot
 
 router = APIRouter(prefix="/runs")
 
@@ -180,7 +181,7 @@ async def complete_evaluation(
     Completing again with the same output is a no-op; another output is a 409,
     recorded as a late fact.
     """
-    await control.complete(run.id, eval_id, req.agent_output)
+    await control.complete(run.id, eval_id, req.agent_output, req.incomplete)
     return {"status": "completed"}
 
 
@@ -192,6 +193,36 @@ async def grade_evaluation(
 ):
     """Grade the sealed snapshot. The first grade is kept: grading again returns it."""
     return control.grade(run.id, eval_id)
+
+
+@router.get("/{run_id}/evaluations/{eval_id}/snapshot", response_model=SnapshotResponse, status_code=status.HTTP_200_OK)
+async def get_snapshot(
+    eval_id: str,
+    run: Annotated[Run, Depends(get_run)],
+    control: Annotated[ControlPlane, Depends(get_control)],
+):
+    """The sealed snapshot grading reads; refused (400) before the seal."""
+    return snapshot_response(control.snapshot(run.id, eval_id))
+
+
+def snapshot_response(snapshot: Snapshot) -> SnapshotResponse:
+    """The snapshot as ``GET .../snapshot`` returns it."""
+    return SnapshotResponse(
+        evaluation_id=snapshot.evaluation_id,
+        run_id=snapshot.run_id,
+        snapshot_id=snapshot.snapshot_id,
+        user_task_id=snapshot.user_task_id,
+        injection_task_id=snapshot.injection_task_id,
+        agent_output=snapshot.agent_output,
+        pre_environment=snapshot.pre_environment.model_dump(mode="json"),
+        environment=snapshot.environment.model_dump(mode="json"),
+        function_calls=[call.model_dump(mode="json") for call in snapshot.function_calls],
+        turns=[TurnResponse.model_validate(turn) for turn in snapshot.turns],
+        observations=_observations_json(snapshot.observations),
+        evidence_status=dict(snapshot.evidence_status),
+        sealed_at=snapshot.sealed_at,
+        capture_failures=[CaptureFailureResponse.model_validate(f) for f in snapshot.capture_failures],
+    )
 
 
 # --- Environment endpoints (nested under evaluation) ---
