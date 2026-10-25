@@ -93,14 +93,19 @@ class TaskResult(NamedTuple):
 
 
 class PairFailure(NamedTuple):
-    """A task pair whose ``run_task`` raised: its evaluation, when one was opened, and why it failed."""
+    """A task pair whose ``run_task`` raised: its evaluation, when one was opened, and why it failed.
+
+    The pair is left out of the run's results and rates. Its evaluation is
+    usually sealed ungraded with incomplete evidence, but ``run_task`` can
+    raise after the control plane graded it (a lost grade response, say).
+    """
 
     eval_id: str | None
     reason: str
 
 
 class BenchmarkOutcome(NamedTuple):
-    """How many task pairs a run graded and how many failed, and where its results were written."""
+    """How many task pairs a run counted (graded) and how many failed, and where its results were written."""
 
     graded: int
     failed: int
@@ -128,7 +133,7 @@ def _utility(value: bool | None) -> Text:
     return Text("✅ task completed", style="bold green") if value else Text("❌ task not completed", style="bold red")
 
 
-_FAILED = Text("💥 failed (not graded)", style="bold magenta")
+_FAILED = Text("💥 failed (not counted)", style="bold magenta")
 
 
 def _print_agent_text(label: str, text: str, max_len: int = 200) -> None:
@@ -245,7 +250,7 @@ def _print_results_table(
     if failures:
         console.print(
             f"\nTask pairs: {len(utility_results)} graded, {len(failures)} failed "
-            "(not graded, not in the rates; see failure_reason)"
+            "(not counted in the results or the rates; see failure_reason)"
         )
     console.print(f"\nResults saved to [cyan]{results_file}[/cyan]")
 
@@ -447,6 +452,7 @@ async def _run_benchmark(
                 episode = suite.episode(ut_id, it_id, suite.get_probes_for_task(it_id) if it_id else {})
                 pair = TaskPair(ut_id, it_id or "")
                 pairs.append(pair)
+                pair_name = f"{ut_id} x {it_id}" if it_id else ut_id
                 label = f"[bold]{ut_id}[/bold] x [bold]{it_id}[/bold]" if it_id else f"[bold]{ut_id}[/bold]"
                 contexts: list[EpisodeContext] = []
                 try:
@@ -460,8 +466,13 @@ async def _run_benchmark(
                         on_context=contexts.append,
                     )
                 except Exception as error:
-                    # The pair failed: the episode context left its evaluation, if opened, sealed and
-                    # ungraded. An interrupt or a cancellation isn't an Exception, and still stops the run.
+                    # An interrupt or a cancellation isn't an Exception, and stops the run. But the episode
+                    # context raises its own failure ahead of a cancellation that arrived while it released
+                    # the evaluation, noting the cancellation only: the task is still being cancelled then.
+                    if _being_cancelled():
+                        raise asyncio.CancelledError(f"Cancelled while running {pair_name}") from error
+                    # The pair failed. Its evaluation, if opened, is sealed and usually ungraded, but
+                    # run_task can raise after the grade: either way the pair isn't counted.
                     failure = PairFailure(_opened_evaluation(contexts), f"{type(error).__name__}: {error}")
                     failures[pair] = failure
                     eval_ids[pair] = failure.eval_id
@@ -509,7 +520,7 @@ async def _run_benchmark(
     results: dict[str, object] = {
         "run_id": run_id,
         "suite_name": suite_name,
-        # A failed pair is null in each of these: it was never graded.
+        # A failed pair is null in each of these: it isn't counted, whatever the control plane holds for it.
         "utility": by_pair(utility_results),
         "utility_reason": by_pair(utility_reasons),
         # null without an injection task, or where the grade is invalid
@@ -546,6 +557,12 @@ async def _run_benchmark(
         failures,
     )
     return BenchmarkOutcome(graded=len(utility_results), failed=len(failures), results_file=results_file)
+
+
+def _being_cancelled() -> bool:
+    """Whether the current task has a cancellation request it hasn't withdrawn (``uncancel``)."""
+    task = asyncio.current_task()
+    return task is not None and task.cancelling() > 0
 
 
 def _opened_evaluation(contexts: list[EpisodeContext]) -> str | None:
