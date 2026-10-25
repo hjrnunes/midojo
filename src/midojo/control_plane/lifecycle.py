@@ -77,7 +77,7 @@ import dataclasses
 import enum
 import json
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -386,11 +386,19 @@ CLOSING_DETAIL = "Evaluation is closing"
 def transition(evaluation: Evaluation, authority: Authority, event: Event) -> Outcome:
     if (rejected := _admit(evaluation, authority, event)) is not None:
         return rejected
-    if (unsupported := _unsupported(event)) is not None:
-        return unsupported
     # The rules work on copies: what a transition returns shares nothing with its arguments, so a
     # caller changing the event or the source evaluation afterwards can't change the outcome.
-    evaluation, event = copy.deepcopy(evaluation), copy.deepcopy(event)
+    evaluation = copy.deepcopy(evaluation)
+    try:
+        event = copy.deepcopy(event)
+    except Exception as error:
+        if (refusal := _held_values(event)) is None:
+            raise
+        kind, what, _ = refusal
+        return Rejected(kind, f"The {what} can't be kept: it can't be copied ({type(error).__name__})")
+    # Checked on the copy the rules decide on, never on the caller's event, which may still change.
+    if (unsupported := _unsupported(event)) is not None:
+        return unsupported
     evaluation = _on_time(evaluation, event)
     match event:
         case Read():
@@ -434,36 +442,35 @@ def transition(evaluation: Evaluation, authority: Authority, event: Event) -> Ou
             return Accepted(next_value, next_value)
 
 
+def _held_values(event: Event) -> tuple[Rejection, str, Callable[[], Any]] | None:
+    """For an event carrying values the evaluation would keep: how to refuse one, what it is, and its values."""
+    match event:
+        case StartCall() | FinishCall():
+            return Rejection.UNSUPPORTED_VALUE, "call's record", event.req.model_dump
+        case ChangeEnvironment():
+            return Rejection.INVALID_ENVIRONMENT, "change", lambda: event.values
+        case ReplaceEnvironment():
+            return Rejection.INVALID_ENVIRONMENT, "environment", event.environment.model_dump
+        case RecordObservations():
+            return Rejection.UNSUPPORTED_VALUE, "observations", event.observed.model_dump
+        case _:
+            return None
+
+
 def _unsupported(event: Event) -> Rejected | None:
     """Refuse an event carrying a value a snapshot can't hold (``state.unsupported_value``).
 
-    Decided on the event as sent, before the transition copies it: such a
-    value may not even be copyable (a read-only mapping view isn't).
+    Decided on the transition's own copy of the event: a value the caller
+    changes afterwards never reaches the rules unchecked. An event that
+    can't be copied at all (one holding a read-only mapping view, say) is
+    refused the same way before this.
     """
-    match event:
-        case StartCall() | FinishCall():
-            problem, kind, what = (
-                unsupported_value(event.req.model_dump()),
-                Rejection.UNSUPPORTED_VALUE,
-                "call's record",
-            )
-        case ChangeEnvironment():
-            problem, kind, what = unsupported_value(event.values), Rejection.INVALID_ENVIRONMENT, "change"
-        case ReplaceEnvironment():
-            problem, kind, what = (
-                unsupported_value(event.environment.model_dump()),
-                Rejection.INVALID_ENVIRONMENT,
-                "environment",
-            )
-        case RecordObservations():
-            problem, kind, what = (
-                unsupported_value(event.observed.model_dump()),
-                Rejection.UNSUPPORTED_VALUE,
-                "observations",
-            )
-        case _:
-            return None
-    return None if problem is None else Rejected(kind, f"The {what} can't be kept: {problem}")
+    if (held := _held_values(event)) is None:
+        return None
+    kind, what, values = held
+    if (problem := unsupported_value(values())) is None:
+        return None
+    return Rejected(kind, f"The {what} can't be kept: {problem}")
 
 
 def _admit(evaluation: Evaluation, authority: Authority, event: Event) -> Rejected | None:

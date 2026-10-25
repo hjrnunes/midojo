@@ -21,7 +21,7 @@ import sys
 import threading
 import uuid
 from pathlib import Path
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 
 import httpx
 import pydantic
@@ -33,10 +33,19 @@ from midojo_sdk.mcp import MidojoMCP
 from midojo_sdk.recorder import ControlPlaneRejectedError, RejectionKind
 
 import midojo
+from midojo.control_plane import lifecycle
 from midojo.control_plane.client import ControlPlaneClient
 from midojo.control_plane.config import AppConfig
 from midojo.control_plane.inprocess_control import InProcessControlClient
-from midojo.control_plane.lifecycle import ChangeEnvironment, RecordObservations, RejectedError, Rejection, Seal
+from midojo.control_plane.lifecycle import (
+    ChangeEnvironment,
+    FinishCall,
+    RecordObservations,
+    RejectedError,
+    Rejection,
+    Seal,
+    StartCall,
+)
 from midojo.control_plane.main import create_app
 from midojo.control_plane.models import CreateFunctionCallRecord, CreateFunctionCallStart
 from midojo.control_plane.service import ById, ControlPlane
@@ -842,7 +851,7 @@ def test_an_environment_or_observations_the_digest_cant_encode_are_refused():
 
 
 def test_a_read_only_mapping_view_is_refused_cleanly_wherever_it_would_enter():
-    # A view can't be deep-copied, and the transition copies its event: the refusal must come first.
+    # A view can't be deep-copied, and the transition copies its event: a copy that fails is refused, not raised.
     proxy = MappingProxyType({"a": 1})
     plane = ControlPlane({}, config=AppConfig(closure_wait_seconds=0))
     # The episode's own read-only mappings reach the evaluation as plain dicts.
@@ -871,6 +880,66 @@ def test_a_read_only_mapping_view_is_refused_cleanly_wherever_it_would_enter():
     snapshot = asyncio.run(plane.complete(None, opened.id, "done"))
     assert [call.call_id for call in snapshot.function_calls] == ["ok"] and snapshot.observations == {}
     assert snapshot.environment.blob == b"x" and snapshot.snapshot_id == snapshot_digest(snapshot)  # type: ignore[attr-defined]
+
+
+class Observed(pydantic.BaseModel):
+    value: object
+
+
+AT = "2026-01-01T00:00:00+00:00"
+
+
+@pytest.mark.parametrize(
+    ("make", "nested", "kind"),
+    [
+        (
+            lambda held: StartCall(CreateFunctionCallStart(call_id="s", function="f", args={"x": held}), AT),
+            lambda event: event.req.args["x"],
+            Rejection.UNSUPPORTED_VALUE,
+        ),
+        (
+            lambda held: FinishCall(
+                CreateFunctionCallRecord(call_id="f", function="f", args={"x": held}, result="ok"), AT
+            ),
+            lambda event: event.req.args["x"],
+            Rejection.UNSUPPORTED_VALUE,
+        ),
+        (
+            lambda held: RecordObservations("openshell", Observed(value=held), AT),
+            lambda event: event.observed.value,
+            Rejection.UNSUPPORTED_VALUE,
+        ),
+        (
+            lambda held: ChangeEnvironment({"blob": held}, AT),
+            lambda event: event.values["blob"],
+            Rejection.INVALID_ENVIRONMENT,
+        ),
+    ],
+    ids=["start_call", "finish_call", "observations", "change_environment"],
+)
+def test_a_value_changed_after_the_event_was_sent_is_checked_on_the_copy_the_transition_keeps(
+    monkeypatch, make, nested, kind
+):
+    plane = ControlPlane({}, config=AppConfig(closure_wait_seconds=0))
+    opened = plane.open_evaluation(weather_episode(environment={"blob": b""}))
+    target = ById(None, opened.id)
+    event = make([1])
+    real = copy.deepcopy
+
+    def deepcopy_after_a_change(value, *rest):
+        # Another holder of the event changes a nested value just before the transition copies it.
+        if value is event:
+            nested(event)[0] = SameRepr()
+        return real(value, *rest)
+
+    monkeypatch.setattr(lifecycle, "copy", SimpleNamespace(deepcopy=deepcopy_after_a_change))
+    with pytest.raises(RejectedError) as refused:
+        plane.apply(target, event)
+    assert refused.value.kind is kind and not refused.value.late
+    monkeypatch.undo()
+    snapshot = asyncio.run(plane.complete(None, opened.id, "done"))
+    assert snapshot.function_calls == () and snapshot.observations == {}
+    assert snapshot.environment.blob == b"" and snapshot.snapshot_id == snapshot_digest(snapshot)  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio
