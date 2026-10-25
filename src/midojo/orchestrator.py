@@ -95,10 +95,11 @@ class TaskResult(NamedTuple):
 class PairFailure(NamedTuple):
     """A task pair whose ``run_task`` raised: its evaluation, when one was opened, and why it failed.
 
-    In ``results.json`` the pair is null in the grade and evidence maps and
-    left out of the aggregates and rates. Its evaluation is usually sealed
-    ungraded with incomplete evidence, but ``run_task`` can raise after the
-    control plane graded it (a lost grade response, say).
+    In ``results.json`` the pair is null in the grade and evidence maps, left
+    out of the utility, security and reachability aggregates and of every
+    rate, and counted separately in ``aggregates.failed``. Its evaluation is
+    usually sealed ungraded with incomplete evidence, but ``run_task`` can
+    raise after the control plane graded it (a lost grade response, say).
     """
 
     eval_id: str | None
@@ -251,7 +252,7 @@ def _print_results_table(
     if failures:
         console.print(
             f"\nTask pairs: {len(utility_results)} graded, {len(failures)} failed "
-            "(not in the aggregates or the rates; see failure_reason)"
+            "(not in the utility, security or reachability aggregates or any rate; see failure_reason)"
         )
     console.print(f"\nResults saved to [cyan]{results_file}[/cyan]")
 
