@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny
+from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, field_validator
 
-from midojo.observations import EvidenceStatus
+from midojo.observations import EvidenceStatus, is_evidence_key
 from midojo.types import CallDisposition, CallProvenance, Environment, GradeValidity, InterceptionMode, SuiteName
 
 # --- Run / Evaluation request/response models ---
@@ -191,9 +191,17 @@ class CompleteRequest(BaseModel):
         default_factory=list,
         description=(
             "Evidence-status keys the host didn't collect in full, such as an episode a failure cut short "
-            "(function_calls, turns, agent_output): the snapshot marks them incomplete."
+            "(function_calls, turns, agent_output): the snapshot marks them incomplete. Each must be a known "
+            "evidence key: function_calls, environment, turns, agent_output, or an observation source's part."
         ),
     )
+
+    @field_validator("incomplete")
+    @classmethod
+    def _known_evidence(cls, keys: list[str]) -> list[str]:
+        if unknown := [key for key in keys if not is_evidence_key(key)]:
+            raise ValueError(f"Unknown evidence keys: {unknown}")
+        return keys
 
 
 _STAGE_DESCRIPTION = (

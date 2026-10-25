@@ -43,6 +43,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from midojo.episode import Episode, UnknownTaskError
+from midojo.observations import is_evidence_key
 from midojo.types import Environment, FunctionCallRecord, InterceptionMode, SuiteName
 from midojo.yaml_task_suite import YAMLTaskSuite
 
@@ -355,7 +356,11 @@ class ControlPlane:
         snapshot; another output is refused and recorded as a late fact.
         ``incomplete`` names evidence the host didn't collect in full, such as
         an episode a failure cut short: the snapshot marks it ``incomplete``.
+        Each key must be a known evidence key (``observations.is_evidence_key``),
+        or this raises ValueError.
         """
+        if unknown := [key for key in incomplete if not is_evidence_key(key)]:
+            raise ValueError(f"Unknown evidence keys: {unknown}")
         if self.evaluation(ById(run_id, eval_id)).stage is not Stage.SEALED:
             await self.close(run_id, eval_id)
         return self.apply(ById(run_id, eval_id), lifecycle.Seal(agent_output, _now(), incomplete=tuple(incomplete)))

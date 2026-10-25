@@ -782,3 +782,27 @@ async def test_the_control_planes_grade_is_the_pure_verdict_plus_late_facts_in_e
     }
     assert differing == {"function_calls"} and served.evidence_status["function_calls"] == "incomplete"
     assert verdict == midojo.grade(episode, plane.snapshot(None, ep.evaluation_id))
+
+
+@pytest.mark.parametrize("key", ["function_calls", "turns", "agent_output", "environment", "openshell.workdir"])
+def test_a_seal_may_mark_any_known_evidence_incomplete(suite, key):
+    plane = ControlPlane({"weather": suite}, config=AppConfig(closure_wait_seconds=0))
+    run = plane.create_run("weather")
+    evaluation = plane.create_evaluation(run.id, "weather_new_york")
+    snapshot = asyncio.run(plane.complete(run.id, evaluation.id, "done", [key]))
+    assert snapshot.evidence_status[key] == "incomplete"
+
+
+def test_a_seal_refuses_to_mark_unknown_evidence(suite):
+    app = create_app({"weather": suite}, config=AppConfig(closure_wait_seconds=0))
+    plane: ControlPlane = app.state.control
+    run = plane.create_run("weather")
+    evaluation = plane.create_evaluation(run.id, "weather_new_york")
+    for unknown in ("everything", "openshell.nothing", "nosource.part"):
+        with pytest.raises(ValueError, match="Unknown evidence keys"):
+            asyncio.run(plane.complete(run.id, evaluation.id, "done", [unknown]))
+    response = TestClient(app).post(
+        f"/runs/{run.id}/evaluations/{evaluation.id}/complete", json={"agent_output": "done", "incomplete": ["x"]}
+    )
+    assert response.status_code == 422
+    assert plane.evaluation(ById(run.id, evaluation.id)).stage is Stage.OPEN
