@@ -30,7 +30,7 @@ import asyncio
 import contextlib
 import logging
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from types import TracebackType
@@ -213,8 +213,10 @@ class EpisodeContext:
         try:
             await self._acquire()
         except BaseException as failure:
-            await self._release(failure)
-            raise
+            raised = await self._release_to_the_end(failure)
+            if raised is failure or raised is None:
+                raise
+            raise raised from failure
         return self
 
     def _resolve_control(self) -> ControlClient:
@@ -319,29 +321,27 @@ class EpisodeContext:
         if self._snapshot is not None:
             return self._snapshot
         output = agent_output if agent_output is not None else (self._last_reply or "")
-        await self._collect()
+        # Staged closure: no new call is admitted, calls already admitted may still finish, and the final
+        # observations are collected after that, before the seal.
+        try:
+            await self._close()
+            if self._ready:
+                await self._observe()
+        finally:
+            await self._teardown()
         await self._seal(output)
         assert self._snapshot is not None
         return self._snapshot
 
-    async def _collect(self, *, best_effort: bool = False) -> None:
-        """Staged closure: no new call is admitted, calls already admitted may still finish, and the final
-        observations are collected after that, before the seal. The runtime is torn down whatever happens."""
-        control, run_id, eval_id = self.control, self.run_id, self.evaluation_id
-        try:
-            with self._progress("close"):
-                await control.close_evaluation(run_id, eval_id)
-            if self._ready:
-                with self._progress("observe"):
-                    observations = await _in_thread(self.runtime.observe)
-                for source, observed in observations.items():
-                    await control.record_observations(run_id, eval_id, source, observed)
-        except Exception:
-            if not best_effort:
-                raise
-            logger.info("Couldn't collect the final evidence of evaluation %s", eval_id, exc_info=True)
-        finally:
-            await self._teardown()
+    async def _close(self) -> None:
+        with self._progress("close"):
+            await self.control.close_evaluation(self.run_id, self.evaluation_id)
+
+    async def _observe(self) -> None:
+        with self._progress("observe"):
+            observations = await _in_thread(self.runtime.observe)
+        for source, observed in observations.items():
+            await self.control.record_observations(self.run_id, self.evaluation_id, source, observed)
 
     async def _seal(self, agent_output: str, incomplete: tuple[str, ...] = ()) -> None:
         control, run_id, eval_id = self.control, self.run_id, self.evaluation_id
@@ -354,15 +354,15 @@ class EpisodeContext:
     async def __aexit__(
         self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None
     ) -> None:
-        if exc is not None:
-            await self._release(exc)
-            return
-        try:
-            await self.seal()
-        except BaseException as failure:
-            await self._release(failure)
-            raise
-        await self._release(None)
+        failure = exc
+        if failure is None:
+            try:
+                await self.seal()
+            except BaseException as sealing:
+                failure = sealing
+        raised = await self._release_to_the_end(failure)
+        if raised is not None and raised is not exc:
+            raise raised
 
     @property
     def _ready(self) -> bool:
@@ -375,53 +375,97 @@ class EpisodeContext:
             with self._progress("teardown"):
                 await _in_thread(self.runtime.teardown)
 
-    async def _release(self, failure: BaseException | None) -> None:
-        """Release what the context acquired, in reverse, each step whatever the one before did.
+    async def _end_run(self) -> None:
+        if self._run_started:
+            self._run_started = False
+            with self._progress("end_run"):
+                await _in_thread(self.runtime.end_run)
 
-        After a failure or a cancellation, an evaluation that isn't sealed yet
-        is sealed with what was collected, never left open (see
-        :meth:`_seal_interrupted`).
+    async def _release_to_the_end(self, failure: BaseException | None) -> BaseException | None:
+        """Release (see :meth:`_release`) in a task of its own, to the end, and return the error to raise.
+
+        A cancellation that arrives while the release runs doesn't stop it:
+        the release is awaited to its end, however often the caller is
+        cancelled, and the first such cancellation is raised afterwards (with
+        ``failure`` as its context), unless ``failure`` is a cancellation
+        itself, which then goes on. Otherwise ``failure`` goes on, each
+        cleanup step's error added to it as a note; with no failure, the first
+        cleanup error is raised, the others added to it as notes.
         """
-        try:
-            try:
-                if failure is not None and self._snapshot is None and self._evaluation_id is not None:
-                    await self._seal_interrupted()
-            finally:
-                await self._teardown()
-        finally:
-            try:
-                # Live until the evaluation is sealed: a call the target makes after closure, however late, is
-                # refused and kept as a late fact, rather than lost to a refused connection.
-                if self._interceptor is not None:
-                    await self._interceptor.stop()
-            finally:
-                if self._run_started:
-                    self._run_started = False
-                    with self._progress("end_run"):
-                        await _in_thread(self.runtime.end_run)
+        errors, cancelled = await _to_the_end(self._release(failure))
+        notes = [f"While releasing evaluation {self._evaluation_id}: {type(e).__name__}: {e}" for e in errors]
+        if failure is not None:
+            for note in notes:
+                failure.add_note(note)
+            if cancelled is not None and not isinstance(failure, asyncio.CancelledError):
+                cancelled.__context__ = failure
+                return cancelled
+            return failure
+        if cancelled is not None:
+            return cancelled
+        if errors:
+            for note in notes[1:]:
+                errors[0].add_note(note)
+            return errors[0]
+        return None
 
-    async def _seal_interrupted(self) -> None:
-        """Seal an episode a failure or a cancellation cut short, its evidence marked incomplete.
+    async def _release(self, failure: BaseException | None) -> list[Exception]:
+        """Release what the context acquired, in reverse, and return the errors of the steps that failed.
 
-        Closure still lets admitted calls finish, and a runtime that was set up
-        is still observed, each as far as it goes. The seal marks
-        :data:`INTERRUPTED_EVIDENCE` incomplete: the conversation and the
-        agent's output were cut short, and the agent might have gone on to
-        make calls it never made, so no call's absence is evidence. Then the
-        session is revoked, sealed or not: nothing more is recorded with it, not
-        even as a late fact.
+        Every step is attempted, whatever the ones before did. After a failure
+        or a cancellation, an evaluation that isn't sealed yet is sealed with
+        what was collected, never left open: closure still lets admitted calls
+        finish, a runtime that was set up is still observed, the runtime is
+        torn down, and the seal marks :data:`INTERRUPTED_EVIDENCE` incomplete
+        (the conversation and the agent's output were cut short, and the agent
+        might have gone on to make calls it never made, so no call's absence is
+        evidence). Then the session is revoked, sealed or not: nothing more is
+        recorded with it, not even as a late fact. Last, the interceptor stops
+        (it was live until the seal, so a call the target made after closure,
+        however late, was refused and kept as a late fact) and a run the
+        context started ends.
         """
-        self.interrupted = True
-        await self._collect(best_effort=True)
-        try:
-            await self._seal(self._last_reply or "", INTERRUPTED_EVIDENCE)
-        except Exception:
-            logger.info("Couldn't seal evaluation %s after a failure", self._evaluation_id, exc_info=True)
-        finally:
+        errors: list[Exception] = []
+
+        async def attempt(what: str, step: Callable[[], Awaitable[object]]) -> None:
             try:
-                await self.control.revoke_session(self.run_id, self.evaluation_id)
-            except Exception:
-                logger.info("Couldn't revoke the session of evaluation %s", self._evaluation_id, exc_info=True)
+                await step()
+            except Exception as error:
+                logger.info("Couldn't %s of evaluation %s", what, self._evaluation_id, exc_info=True)
+                errors.append(error)
+
+        if failure is not None and self._snapshot is None and self._evaluation_id is not None:
+            self.interrupted = True
+            await attempt("close the evaluation", self._close)
+            if self._ready:
+                await attempt("collect the final observations", self._observe)
+            await attempt("tear down the runtime", self._teardown)
+            await attempt("seal the evaluation", lambda: self._seal(self._last_reply or "", INTERRUPTED_EVIDENCE))
+            await attempt("revoke the session", lambda: self.control.revoke_session(self.run_id, self.evaluation_id))
+        await attempt("tear down the runtime", self._teardown)
+        if self._interceptor is not None:
+            await attempt("stop the interceptor", self._interceptor.stop)
+        await attempt("end the runtime's run", self._end_run)
+        return errors
+
+
+async def _to_the_end(work: Coroutine[Any, Any, T]) -> tuple[T, asyncio.CancelledError | None]:
+    """Run ``work`` in a task of its own and wait for its end, however often the caller is cancelled meanwhile.
+
+    Returns its result and the first cancellation that arrived while waiting,
+    or None, for the caller to raise once the work is done.
+    """
+    task = asyncio.ensure_future(work)
+    cancelled: asyncio.CancelledError | None = None
+    while True:
+        try:
+            return await asyncio.shield(task), cancelled
+        except asyncio.CancelledError as error:
+            if task.cancelled():  # The work itself was cancelled (the loop is shutting down): nothing to wait for.
+                raise
+            cancelled = cancelled or error
+            if task.done():
+                return task.result(), cancelled
 
 
 async def _in_thread(function: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:

@@ -33,7 +33,7 @@ from midojo.control_plane.service import ById, ControlPlane
 from midojo.control_plane.state import Stage, snapshot_digest
 from midojo.episode import Episode
 from midojo.episode_context import AgentBinding, open_episode
-from midojo.interception_host import HostInterception
+from midojo.interception_host import HostInterception, HostInterceptor
 from midojo.runtimes import ResettableRuntime, UnmanagedRuntime
 from midojo.runtimes.openshell import OpenShellObservations
 from midojo.tool_endpoint import HOST_MODE_WITHHELD_ENV, ToolEndpoint
@@ -610,3 +610,137 @@ def test_a_snapshots_id_is_its_content_digest_and_no_caller_chooses_it(suite):
         Seal("done", "2026-01-01T00:00:00+00:00", snapshot_id="chosen")  # type: ignore[call-arg]
     snapshot = asyncio.run(plane.complete(run.id, evaluation.id, "done"))
     assert snapshot.snapshot_id.startswith("sha256:") and snapshot.snapshot_id == snapshot_digest(snapshot)
+
+
+# --- cleanup survives repeated cancellation, and each step's failure ---
+
+
+class StopControlledInterception(HostInterception):
+    """Host interception whose interceptors wait for ``release`` before stopping, or fail to stop."""
+
+    def __init__(self, *, release: asyncio.Event | None = None, fail: bool = False) -> None:
+        super().__init__(upstream=scripted_upstream())
+        object.__setattr__(self, "_release", release)
+        object.__setattr__(self, "_fail", fail)
+        object.__setattr__(self, "stopping", asyncio.Event())
+        object.__setattr__(self, "built", [])
+
+    def interceptor(self, recorder, *, evaluation_id, plan) -> HostInterceptor:
+        outer = self
+
+        class Interceptor(HostInterceptor):
+            async def stop(self) -> None:
+                outer.stopping.set()  # type: ignore[attr-defined]
+                if outer._release is not None:  # type: ignore[attr-defined]
+                    await outer._release.wait()  # type: ignore[attr-defined]
+                await super().stop()
+                if outer._fail:  # type: ignore[attr-defined]
+                    raise RuntimeError("the interceptor didn't stop cleanly")
+
+        built = Interceptor(recorder, upstream=self.upstream, evaluation_id=evaluation_id, plan=plan)
+        self.built.append(built)  # type: ignore[attr-defined]
+        return built
+
+
+async def cancel_repeatedly(task: asyncio.Task, times: int = 3) -> None:
+    for _ in range(times):
+        task.cancel()
+        await asyncio.sleep(0.02)
+    assert not task.done()
+
+
+@pytest.mark.asyncio
+async def test_repeated_cancellation_during_an_interrupted_closure_still_seals_and_releases_everything(monkeypatch):
+    observing, release = threading.Event(), threading.Event()
+
+    class SlowObserve(RecordingRuntime):
+        def observe(self):
+            self.steps.append("observe")
+            observing.set()
+            release.wait(10)
+            return {}
+
+    plane, runtime = ControlPlane({}, config=AppConfig(closure_wait_seconds=0)), SlowObserve()
+    monkeypatch.setattr(Episode, "new_runtime", lambda self: runtime)
+    contexts, waiting = [], asyncio.Event()
+
+    async def run() -> None:
+        ep = open_episode(weather_episode(), interception=HostInterception(upstream=scripted_upstream()), control=plane)
+        contexts.append(ep)
+        async with ep:
+            waiting.set()
+            await asyncio.Event().wait()
+
+    task = asyncio.create_task(run())
+    await asyncio.wait_for(waiting.wait(), timeout=10)
+    task.cancel()
+    await asyncio.to_thread(observing.wait, 10)
+    await cancel_repeatedly(task)  # the cleanup goes on: it's in a task of its own
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    [ep] = contexts
+    assert runtime.steps == ["start_run", "setup", "observe", "teardown", "end_run"]
+    assert await refused(ep.binding.tool_endpoint)
+    assert_sealed_as_interrupted(plane, ep, ep.episode)
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_the_interceptors_shutdown_lets_it_stop_and_then_goes_on(monkeypatch):
+    release = asyncio.Event()
+    interception = StopControlledInterception(release=release)
+    runtime = RecordingRuntime()
+    monkeypatch.setattr(Episode, "new_runtime", lambda self: runtime)
+    contexts = []
+
+    async def run() -> None:
+        ep = open_episode(weather_episode(), interception=interception)
+        contexts.append(ep)
+        async with ep:
+            await ep.turn("hi", _reply("rain"))
+
+    task = asyncio.create_task(run())
+    await asyncio.wait_for(interception.stopping.wait(), timeout=10)  # type: ignore[attr-defined]
+    await cancel_repeatedly(task)
+    assert "end_run" not in runtime.steps
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    [ep] = contexts
+    # Sealed whole before the release began: the cancellation interrupted nothing but the caller's wait.
+    assert ep.result.interrupted is False and ep.sealed.agent_output == "rain"
+    assert runtime.steps == ["start_run", "setup", "observe", "teardown", "end_run"]
+    assert await refused(ep.binding.tool_endpoint)
+
+
+class FailingTeardown(RecordingRuntime):
+    def teardown(self):
+        super().teardown()
+        raise RuntimeError("teardown failed")
+
+
+@pytest.mark.asyncio
+async def test_a_teardown_failure_after_a_failure_still_seals_stops_and_ends_and_the_first_error_goes_on(monkeypatch):
+    plane, runtime = ControlPlane({}, config=AppConfig(closure_wait_seconds=0)), FailingTeardown()
+    monkeypatch.setattr(Episode, "new_runtime", lambda self: runtime)
+    interception = StopControlledInterception()
+    ep = open_episode(weather_episode(), interception=interception, control=plane)
+    with pytest.raises(RuntimeError, match="the agent crashed") as raised:
+        async with ep:
+            raise RuntimeError("the agent crashed")
+    assert any("teardown failed" in note for note in raised.value.__notes__)
+    assert runtime.steps == ["start_run", "setup", "observe", "teardown", "end_run"]
+    assert await refused(ep.binding.tool_endpoint)  # type: ignore[arg-type]
+    assert_sealed_as_interrupted(plane, ep, ep.episode)
+
+
+@pytest.mark.asyncio
+async def test_a_cleanup_failure_after_a_clean_seal_is_raised_once_everything_else_is_released(monkeypatch):
+    runtime = RecordingRuntime()
+    monkeypatch.setattr(Episode, "new_runtime", lambda self: runtime)
+    ep = open_episode(weather_episode(), interception=StopControlledInterception(fail=True))
+    with pytest.raises(RuntimeError, match="didn't stop cleanly"):
+        async with ep:
+            await ep.turn("hi", _reply("rain"))
+    assert ep.result.interrupted is False and ep.sealed.agent_output == "rain"
+    assert runtime.steps[-1] == "end_run"
