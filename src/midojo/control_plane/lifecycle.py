@@ -84,7 +84,7 @@ from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
-from midojo.observations import FUNCTION_CALLS, EvidenceStatus, evidence_status
+from midojo.observations import FUNCTION_CALLS, EvidenceStatus, evidence_status, require_evidence_keys
 from midojo.types import REFUSED_DISPOSITIONS, CallDisposition, CallProvenance, Environment, FunctionCallRecord
 
 from .models import (
@@ -323,12 +323,17 @@ class Seal:
 
     ``incomplete`` names evidence-status keys the host knows it didn't
     collect in full (an episode cut short by a failure or a cancellation):
-    the snapshot marks them ``incomplete``.
+    the snapshot marks them ``incomplete``. A Seal naming an unknown key
+    (see ``observations.is_evidence_key``) can't be made: its constructor
+    raises ValueError, so no path into the writer gets one.
     """
 
     agent_output: str
     at: str
     incomplete: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        require_evidence_keys(self.incomplete)
 
 
 @dataclass(frozen=True)

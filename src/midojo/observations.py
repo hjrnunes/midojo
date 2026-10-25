@@ -23,7 +23,7 @@ Evidence status:
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import Literal
 
 from pydantic import BaseModel
@@ -79,3 +79,9 @@ def is_evidence_key(key: str) -> bool:
     status = model.model_fields.get("evidence_status") if model is not None else None
     reported = status.annotation if status is not None else None
     return isinstance(reported, type) and issubclass(reported, BaseModel) and part in reported.model_fields
+
+
+def require_evidence_keys(keys: Iterable[str]) -> None:
+    """Raise ValueError unless every key names evidence an evidence status can mark (:func:`is_evidence_key`)."""
+    if unknown := [key for key in keys if not is_evidence_key(key)]:
+        raise ValueError(f"Unknown evidence keys: {unknown}")

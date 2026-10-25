@@ -947,3 +947,16 @@ def test_a_seal_refuses_to_mark_unknown_evidence(suite):
     )
     assert response.status_code == 422
     assert plane.evaluation(ById(run.id, evaluation.id)).stage is Stage.OPEN
+
+
+@pytest.mark.asyncio
+async def test_the_single_writer_refuses_a_seal_that_marks_unknown_evidence():
+    plane = ControlPlane({}, config=AppConfig(closure_wait_seconds=0))
+    evaluation = plane.open_evaluation(weather_episode())
+    target = ById(None, evaluation.id)
+    await plane.close(None, evaluation.id)
+    with pytest.raises(ValueError, match="Unknown evidence keys"):
+        plane.apply(target, Seal("done", "2026-01-01T00:00:00+00:00", incomplete=("function_calls", "everything")))
+    assert plane.evaluation(target).stage is Stage.COLLECTING
+    snapshot = plane.apply(target, Seal("done", "2026-01-01T00:00:00+00:00", incomplete=("turns",)))
+    assert snapshot.evidence_status["turns"] == "incomplete"

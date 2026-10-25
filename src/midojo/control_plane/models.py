@@ -4,7 +4,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, field_validator
 
-from midojo.observations import EvidenceStatus, is_evidence_key
+from midojo.observations import EvidenceStatus, require_evidence_keys
 from midojo.types import CallDisposition, CallProvenance, Environment, GradeValidity, InterceptionMode, SuiteName
 
 # --- Run / Evaluation request/response models ---
@@ -199,8 +199,7 @@ class CompleteRequest(BaseModel):
     @field_validator("incomplete")
     @classmethod
     def _known_evidence(cls, keys: list[str]) -> list[str]:
-        if unknown := [key for key in keys if not is_evidence_key(key)]:
-            raise ValueError(f"Unknown evidence keys: {unknown}")
+        require_evidence_keys(keys)
         return keys
 
 
