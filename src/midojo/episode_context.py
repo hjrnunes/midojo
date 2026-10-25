@@ -363,12 +363,16 @@ class EpisodeContext:
         If the seal request itself fails (its response lost, say, or a
         cancellation while waiting for it), the control plane may have sealed
         or not: sealing again sends the same seal again, whatever
-        ``agent_output`` it's given. A seal the control plane refuses outright
-        (see :func:`_refused`: an invalid output, say) was not applied, so it
-        is forgotten: sealing again seals afresh, with the output given then. Completing a sealed evaluation with the
+        ``agent_output`` it's given. Completing a sealed evaluation with the
         same output is a retry that leaves its snapshot as it was, so the
         evaluation is sealed once either way. Leaving the context after such a
         failure sends it again too (see :meth:`_release`).
+
+        A seal the control plane refuses outright (see :func:`_refused`: an
+        invalid output, say) changed neither the seal nor the snapshot (on an
+        evaluation already sealed, the attempt may be kept as a late fact), so
+        it is forgotten: sealing again seals afresh, with the output given
+        then, and leaving never sends it again.
         """
         if self._snapshot is not None:
             return self._snapshot
@@ -550,13 +554,15 @@ class EpisodeContext:
 
 
 def _refused(error: BaseException) -> bool:
-    """Whether ``error`` is a refusal of a request outright: the control plane didn't apply it.
+    """Whether ``error`` is a refusal of a request outright: it changed nothing the request asked for.
 
     A ValueError is one: a rejection in process (``RejectedError``), a request
     pydantic's validation refused, or one refused before it was sent. Over
-    HTTP, so is a 4xx response. Anything else (a transport error, a timeout,
-    a 5xx, a cancellation) leaves the outcome unknown: the request may have
-    been applied.
+    HTTP, so is a 4xx response. A refused write can still be kept as a late
+    fact (a seal with another output on a sealed evaluation, say), but the
+    seal and the snapshot are as they were. Anything else (a transport error,
+    a timeout, a 5xx, a cancellation) leaves the outcome unknown: the request
+    may have been applied.
     """
     if isinstance(error, ValueError):
         return True
