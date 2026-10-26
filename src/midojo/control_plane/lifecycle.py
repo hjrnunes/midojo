@@ -734,6 +734,8 @@ def _finish_call(evaluation: Evaluation, authority: Authority, event: FinishCall
                 "error": req.error,
                 "blocked": req.blocked,
                 "disposition": req.disposition or started.disposition,
+                "structured_content": req.structured_content,
+                "injection_outcomes": req.injection_outcomes,
                 "complete": True,
                 "post_environment": _observed(evaluation),
             }

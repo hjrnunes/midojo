@@ -37,6 +37,26 @@ InterceptionMode = Literal["agent", "host"]
 CallProvenance = Literal["host", "interceptor", "agent"]
 
 
+# How one injection instruction fared on one call, as the interceptor that placed it reported it: the values of
+# ``midojo_sdk.injection.OutcomeStatus``. ``partial`` is a structured-content placement the result's text doesn't
+# carry (its text isn't a JSON mirror of the structured content), so an agent reading only the text never saw it.
+InjectionStatus = Literal["applied", "partial", "fallback", "unmatched", "no_result", "too_large", "skipped_occurrence"]
+
+
+class CallInjectionOutcome(BaseModel):
+    """One injection instruction's outcome on a recorded call, as the interceptor reported it in the call's finish.
+
+    It names the instruction by its index in the plan the interceptor was
+    given, never the payload or the interceptor's counter scope.
+    """
+
+    instruction_index: int = Field(ge=0, description="The instruction's index in the interceptor's plan.")
+    probe_key: str | None = Field(default=None, description="The instruction's probe, when it names one.")
+    occurrence: int = Field(ge=1, description="Which matching call of the instruction's this was, one-based.")
+    status: InjectionStatus
+    detail: str = Field(description="Why: the selector that matched or didn't, or what was left unchanged.")
+
+
 class FunctionCallRecord(BaseModel):
     """A recorded function call: what the agent asked for and what it saw.
 
@@ -72,6 +92,20 @@ class FunctionCallRecord(BaseModel):
         description=(
             "What the interception layer did with the call: forwarded, simulated, denied or blocked. A denied or "
             "blocked call is `blocked`. None when the record doesn't say, as in records made before the field."
+        ),
+    )
+    structured_content: dict | None = Field(
+        default=None,
+        description=(
+            "The structured content the agent got with `result` (its text), exactly as it got it. None when the "
+            "result had none, the call is unfinished, or the interception layer didn't say."
+        ),
+    )
+    injection_outcomes: list[CallInjectionOutcome] = Field(
+        default_factory=list,
+        description=(
+            "How each injection instruction admitted for the call fared, as the interception layer reported it: "
+            "`partial` when only `structured_content` carries the payload. Empty when none was admitted."
         ),
     )
     complete: bool = Field(

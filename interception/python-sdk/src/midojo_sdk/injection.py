@@ -76,7 +76,15 @@ class MismatchPolicy(enum.StrEnum):
 
 
 class OutcomeStatus(enum.StrEnum):
+    """How one instruction fared on one call.
+
+    ``partial`` is a structured-content placement the agent's text content
+    doesn't carry: the result's text isn't a JSON mirror of its structured
+    content, so only ``structuredContent`` has the payload.
+    """
+
     APPLIED = "applied"
+    PARTIAL = "partial"
     FALLBACK = "fallback"
     UNMATCHED = "unmatched"
     NO_RESULT = "no_result"

@@ -7,15 +7,19 @@ client on the loopback interface. No model and no network beyond loopback.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import signal
 import socket
+from typing import Any
 
 import httpx
 import pytest
 import pytest_asyncio
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
+from fastmcp.tools import ToolResult
+from mcp.types import CallToolResult, ContentBlock, TextContent
 from midojo_sdk.injection import (
     Channel,
     InjectionInstruction,
@@ -99,88 +103,169 @@ async def test_the_interceptor_records_in_its_evaluation_and_applies_the_plan(co
 
     assert [block.text for block in weather.content] == ["41°F, rain", PAYLOAD]  # type: ignore[union-attr]
     assert [block.text for block in alerts.content] == ["no alerts"]  # type: ignore[union-attr]
-    calls = control.evaluation(ById(run.id, evaluation.id)).function_calls
+    calls = (await control.complete(run.id, evaluation.id, "done")).function_calls
     assert [(c.function, c.complete, c.turn, c.provenance, c.disposition) for c in calls] == [
         ("get_weather", True, 0, "interceptor", "forwarded"),
         ("list_alerts", True, 0, "interceptor", "forwarded"),
     ]
-    assert calls[0].result == f"41°F, rain\n{PAYLOAD}"
+    # The sealed records are what the agent got: a text-only result has no structured part.
+    assert [(c.result, c.structured_content) for c in calls] == [(f"41°F, rain\n{PAYLOAD}", None), ("no alerts", None)]
+    assert [[(o.status, o.probe_key) for o in c.injection_outcomes] for c in calls] == [
+        [("applied", "weather_alert:main")],
+        [],
+    ]
 
 
-@pytest.mark.asyncio
-async def test_host_interceptor_replaces_a_selected_record(control, serve):
-    upstream = FastMCP("notes")
+NOTES = {"notes": [{"id": "NOTE-1", "body": "first"}, {"id": "NOTE-2", "body": "second"}]}
 
-    @upstream.tool()
-    def list_notes() -> dict:
-        return {"notes": [{"id": "NOTE-1", "body": "first"}, {"id": "NOTE-2", "body": "second"}]}
 
-    plan = InjectionPlan(
+def note_plan(payload: str = "replacement", mode: InjectionMode = InjectionMode.REPLACE, **changes) -> InjectionPlan:
+    return InjectionPlan(
         (
             InjectionInstruction(
                 channel=Channel.TOOL_OUTPUT,
-                payload="replacement",
+                payload=payload,
                 target=InjectionTarget(
                     tool="list_notes",
                     surface=SelectorSurface.STRUCTURED_CONTENT,
                     structured_content_path=("notes", RecordSelector("NOTE-1"), "body"),
                 ),
-                mode=InjectionMode.REPLACE,
+                mode=mode,
+                probe_key="notes:body",
+                **changes,
             ),
         )
     )
+
+
+class _ErrorResult(ToolResult):
+    """An upstream result with the error flag set and structured content, which a FastMCP tool can't raise."""
+
+    def to_mcp_result(self) -> CallToolResult:
+        return CallToolResult(content=self.content, structuredContent=self.structured_content, isError=True)
+
+
+def notes_upstream(text: str | None = None, *, error: bool = False) -> FastMCP:
+    """A notes server answering NOTES: as FastMCP mirrors it, or with ``text`` as its one text block."""
+    upstream = FastMCP("notes")
+
+    @upstream.tool()
+    def list_notes() -> Any:
+        if text is None and not error:
+            return NOTES
+        sent = json.dumps(NOTES, separators=(",", ":")) if text is None else text
+        content: list[ContentBlock] = [TextContent(type="text", text=sent)]
+        return (_ErrorResult if error else ToolResult)(content=content, structured_content=NOTES)
+
+    return upstream
+
+
+async def call_notes(control: ControlPlane, serve, upstream: FastMCP, plan: InjectionPlan):
+    """Call list_notes through a host interceptor, seal the evaluation, and return the result, outcomes and record."""
     run, evaluation = open_evaluation(control)
     recorder = InProcessControlClient(control).recorder(evaluation.session_token)
     interceptor = HostInterceptor(recorder, upstream=upstream, evaluation_id=evaluation.id, plan=plan)
     endpoint = await serve(interceptor)
-
     async with Client(endpoint.url, auth=endpoint.token) as target:
         result = await target.call_tool_mcp("list_notes", {})
-    await control.complete(run.id, evaluation.id, "done")
+    snapshot = await control.complete(run.id, evaluation.id, "done")
+    [record] = snapshot.function_calls
+    return result, interceptor.injection_outcomes, record
 
+
+def agent_text(result: CallToolResult) -> str:
+    return "\n".join(block.text for block in result.content)  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "body"), [(InjectionMode.REPLACE, "replacement"), (InjectionMode.APPEND, "firstreplacement")]
+)
+@pytest.mark.parametrize("size_limit", [None, len(b"replacement")], ids=["no-limit", "at-limit"])
+async def test_host_interceptor_places_a_selected_record_in_the_text_and_seals_what_the_agent_got(
+    control, serve, mode, body, size_limit
+):
+    result, outcomes, record = await call_notes(
+        control, serve, notes_upstream(), note_plan(mode=mode, size_limit=size_limit)
+    )
+
+    injected = {"notes": [{"id": "NOTE-1", "body": body}, {"id": "NOTE-2", "body": "second"}]}
+    assert result.structuredContent == injected
+    # FastMCP's text block mirrors the structured content compactly; it still does, with the payload.
+    assert agent_text(result) == json.dumps(injected, separators=(",", ":"))
+    [outcome] = outcomes
+    assert (outcome.status, outcome.detail) == (
+        OutcomeStatus.APPLIED,
+        "exact selector matched; mirrored text re-serialised",
+    )
+    # The sealed record is exactly what the agent got, text and structured parts, with the outcome.
+    assert (record.result, record.structured_content, record.error) == (agent_text(result), injected, None)
+    assert [
+        (o.instruction_index, o.probe_key, o.occurrence, o.status, o.detail) for o in record.injection_outcomes
+    ] == [(0, "notes:body", 1, "applied", outcome.detail)]
+
+
+@pytest.mark.asyncio
+async def test_host_interceptor_reports_text_that_is_not_a_mirror_as_partial_in_the_sealed_record(control, serve):
+    result, outcomes, record = await call_notes(
+        control, serve, notes_upstream("NOTE-1: first; NOTE-2: second"), note_plan()
+    )
+
+    assert agent_text(result) == "NOTE-1: first; NOTE-2: second"
     assert result.structuredContent == {
         "notes": [{"id": "NOTE-1", "body": "replacement"}, {"id": "NOTE-2", "body": "second"}]
     }
-    [outcome] = interceptor.injection_outcomes
-    assert (outcome.status, outcome.detail) == (OutcomeStatus.APPLIED, "exact selector matched")
+    [outcome] = outcomes
+    assert outcome.status is OutcomeStatus.PARTIAL
+    assert outcome.detail == "exact selector matched structured content only; text content is not JSON"
+    assert (record.result, record.structured_content) == (agent_text(result), result.structuredContent)
+    [sealed] = record.injection_outcomes
+    assert (sealed.status, sealed.detail) == ("partial", outcome.detail)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", [None, "Error: quota exceeded"], ids=["mirror", "not-a-mirror"])
+async def test_host_interceptor_places_and_seals_an_error_result(control, serve, text):
+    result, outcomes, record = await call_notes(control, serve, notes_upstream(text, error=True), note_plan())
+
+    assert result.isError is True
+    injected = {"notes": [{"id": "NOTE-1", "body": "replacement"}, {"id": "NOTE-2", "body": "second"}]}
+    assert result.structuredContent == injected
+    expected_text = json.dumps(injected, separators=(",", ":")) if text is None else text
+    assert agent_text(result) == expected_text
+    [outcome] = outcomes
+    assert outcome.status is (OutcomeStatus.APPLIED if text is None else OutcomeStatus.PARTIAL)
+    assert (record.result, record.error, record.structured_content) == (expected_text, expected_text, injected)
+    assert [o.status for o in record.injection_outcomes] == [outcome.status.value]
 
 
 @pytest.mark.asyncio
 async def test_host_interceptor_reports_duplicate_record_ids_as_unmatched(control, serve):
+    notes = {"notes": [{"id": "NOTE-1", "body": "first"}, {"id": "NOTE-1", "body": "second"}]}
     upstream = FastMCP("duplicate-notes")
-    notes = [{"id": "NOTE-1", "body": "first"}, {"id": "NOTE-1", "body": "second"}]
 
     @upstream.tool()
     def list_notes() -> dict:
-        return {"notes": notes}
+        return notes
 
-    plan = InjectionPlan(
-        (
-            InjectionInstruction(
-                channel=Channel.TOOL_OUTPUT,
-                payload="replacement",
-                target=InjectionTarget(
-                    tool="list_notes",
-                    surface=SelectorSurface.STRUCTURED_CONTENT,
-                    structured_content_path=("notes", RecordSelector("NOTE-1"), "body"),
-                ),
-                mode=InjectionMode.REPLACE,
-            ),
-        )
-    )
-    run, evaluation = open_evaluation(control)
-    recorder = InProcessControlClient(control).recorder(evaluation.session_token)
-    interceptor = HostInterceptor(recorder, upstream=upstream, evaluation_id=evaluation.id, plan=plan)
-    endpoint = await serve(interceptor)
+    result, outcomes, record = await call_notes(control, serve, upstream, note_plan())
 
-    async with Client(endpoint.url, auth=endpoint.token) as target:
-        result = await target.call_tool_mcp("list_notes", {})
-    await control.complete(run.id, evaluation.id, "done")
-
-    assert result.structuredContent == {"notes": notes}
-    [outcome] = interceptor.injection_outcomes
+    assert result.structuredContent == notes
+    [outcome] = outcomes
     assert outcome.status is OutcomeStatus.UNMATCHED
     assert "matched 2 records" in outcome.detail
+    assert (record.result, record.structured_content) == (json.dumps(notes, separators=(",", ":")), notes)
+    assert [(o.status, o.detail) for o in record.injection_outcomes] == [("unmatched", outcome.detail)]
+
+
+@pytest.mark.asyncio
+async def test_host_interceptor_seals_a_too_large_payload_with_the_result_unchanged(control, serve):
+    result, outcomes, record = await call_notes(control, serve, notes_upstream(), note_plan(size_limit=3))
+
+    assert (result.structuredContent, agent_text(result)) == (NOTES, json.dumps(NOTES, separators=(",", ":")))
+    assert outcomes[0].status is OutcomeStatus.TOO_LARGE
+    assert (record.result, record.structured_content) == (agent_text(result), NOTES)
+    assert [o.status for o in record.injection_outcomes] == ["too_large"]
 
 
 @pytest.mark.asyncio
@@ -276,6 +361,29 @@ async def test_the_interceptor_records_over_http_with_the_session_it_was_given(s
         await target.call_tool("get_weather", {"city": "Boston"})
     [call] = control.evaluation(ById(run.id, evaluation.id)).function_calls
     assert (call.function, call.provenance) == ("get_weather", "interceptor")
+    await backend.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_structured_placement_recorded_over_http_reads_back_sealed_over_http(suite, monkeypatch, serve):
+    app = create_app({"weather": suite}, config=AppConfig(closure_wait_seconds=0))
+    backend = Backend("http", app, monkeypatch)
+    control = app.state.control
+    run, evaluation = open_evaluation(control)
+    recorder = backend.control().recorder(evaluation.session_token)
+    plan = note_plan(" ü", mode=InjectionMode.APPEND)
+    endpoint = await serve(HostInterceptor(recorder, upstream=notes_upstream(), evaluation_id=evaluation.id, plan=plan))
+    async with Client(endpoint.url, auth=endpoint.token) as target:
+        result = await target.call_tool_mcp("list_notes", {})
+    await control.complete(run.id, evaluation.id, "done")
+    environment_type = type(control.evaluation(ById(run.id, evaluation.id)).environment)
+
+    snapshot = await backend.control().snapshot(run.id, evaluation.id, environment_type=environment_type)
+
+    [record] = snapshot.function_calls
+    assert (record.result, record.structured_content) == (agent_text(result), result.structuredContent)
+    assert json.loads(agent_text(result))["notes"][0]["body"] == "first ü"
+    assert [o.status for o in record.injection_outcomes] == ["applied"]
     await backend.aclose()
 
 

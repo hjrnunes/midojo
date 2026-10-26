@@ -41,8 +41,8 @@ import asyncio
 import enum
 import logging
 import warnings
-from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple, Protocol, TypeVar, cast
+from collections.abc import Awaitable, Callable, Sequence
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, Protocol, TypedDict, TypeVar, cast
 
 if TYPE_CHECKING:
     from midojo_sdk.client import AgentControlPlaneClient
@@ -60,6 +60,42 @@ A denied or blocked call gives the agent an error result, never a success.
 
 REFUSED: frozenset[Disposition] = frozenset({"denied", "blocked"})
 """The dispositions of a call whose tool never ran: the record's ``blocked`` flag."""
+
+
+class InjectionRecord(TypedDict):
+    """How one injection instruction fared on a call, as the call's finish carries it.
+
+    ``status`` is a :class:`midojo_sdk.injection.OutcomeStatus` value as a
+    plain ``str``: ``applied``, ``partial`` (structured content only),
+    ``fallback``, ``unmatched``, ``too_large``, ``skipped_occurrence`` or
+    ``no_result``. ``detail`` says why. A record names neither the counter
+    scope (an evaluation ID or a session token) nor the payload.
+    """
+
+    instruction_index: int
+    probe_key: str | None
+    occurrence: int
+    status: str
+    detail: str
+
+
+def finish_fields(
+    structured_content: dict[str, Any] | None, injection_outcomes: Sequence[InjectionRecord]
+) -> dict[str, Any]:
+    """The optional finish fields that say something, as keyword arguments.
+
+    A finish passes ``structured_content`` only when the agent got structured
+    content, and ``injection_outcomes`` only when an instruction was admitted
+    for the call, so a recorder written before these fields still records
+    every other call.
+    """
+    fields: dict[str, Any] = {}
+    if structured_content is not None:
+        fields["structured_content"] = structured_content
+    if injection_outcomes:
+        fields["injection_outcomes"] = list(injection_outcomes)
+    return fields
+
 
 RECORD_ATTEMPTS = 3
 """How many times :class:`RetryingRecorder` sends a call's start or finish before its error is raised."""
@@ -159,8 +195,16 @@ class Recorder(Protocol):
         result: str,
         disposition: Disposition,
         error: str | None = None,
+        structured_content: dict[str, Any] | None = None,
+        injection_outcomes: Sequence[InjectionRecord] = (),
     ) -> None:
-        """Finish the call started with ``call_id``, or record it whole when it wasn't started."""
+        """Finish the call started with ``call_id``, or record it whole when it wasn't started.
+
+        ``structured_content`` is the structured content the agent got with
+        ``result`` (its text), and ``injection_outcomes`` how each admitted
+        injection instruction fared on the call. Both are optional: a caller
+        passes them only when it has them (see :func:`finish_fields`).
+        """
         ...
 
 
@@ -304,10 +348,18 @@ class RetryingRecorder:
         result: str,
         disposition: Disposition,
         error: str | None = None,
+        structured_content: dict[str, Any] | None = None,
+        injection_outcomes: Sequence[InjectionRecord] = (),
     ) -> None:
         await self._retry(
             lambda: self.recorder.finish_call(
-                call_id=call_id, function=function, args=args, result=result, disposition=disposition, error=error
+                call_id=call_id,
+                function=function,
+                args=args,
+                result=result,
+                disposition=disposition,
+                error=error,
+                **finish_fields(structured_content, injection_outcomes),
             )
         )
 
@@ -357,13 +409,21 @@ class ReportingRecorder:
         result: str,
         disposition: Disposition,
         error: str | None = None,
+        structured_content: dict[str, Any] | None = None,
+        injection_outcomes: Sequence[InjectionRecord] = (),
     ) -> None:
         await self._record(
             "finish",
             call_id,
             function,
             lambda: self.recorder.finish_call(
-                call_id=call_id, function=function, args=args, result=result, disposition=disposition, error=error
+                call_id=call_id,
+                function=function,
+                args=args,
+                result=result,
+                disposition=disposition,
+                error=error,
+                **finish_fields(structured_content, injection_outcomes),
             ),
         )
 
@@ -440,9 +500,17 @@ class ControlPlaneRecorder:
         result: str,
         disposition: Disposition,
         error: str | None = None,
+        structured_content: dict[str, Any] | None = None,
+        injection_outcomes: Sequence[InjectionRecord] = (),
     ) -> None:
         await self._recorder.finish_call(
-            call_id=call_id, function=function, args=args, result=result, disposition=disposition, error=error
+            call_id=call_id,
+            function=function,
+            args=args,
+            result=result,
+            disposition=disposition,
+            error=error,
+            **finish_fields(structured_content, injection_outcomes),
         )
 
     async def report_capture_failure(self, *, call_id: str, function: str, phase: CapturePhase, reason: str) -> None:

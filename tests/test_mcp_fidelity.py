@@ -8,13 +8,14 @@ it, and compares what the agent receives.
 import asyncio
 import json
 import typing
+from collections.abc import Sequence
 from typing import Any
 
 import httpx
 import pytest
 from midojo_sdk.client import AgentControlPlaneClient
 from midojo_sdk.mcp import BLOCKED_REASON, MidojoMCP, ToolContext, UpstreamClient
-from midojo_sdk.recorder import Disposition
+from midojo_sdk.recorder import Disposition, InjectionRecord
 
 from midojo.types import CallDisposition, FunctionCallRecord
 from tests.scripted_mcp import PROTOCOL_ERROR, SESSION_CALL, TOOLS, ScriptedMCP, wire_session
@@ -59,6 +60,8 @@ class CapturingRecorder:
         result: str,
         disposition: Disposition,
         error: str | None = None,
+        structured_content: dict[str, Any] | None = None,
+        injection_outcomes: Sequence[InjectionRecord] = (),
     ) -> None:
         self.finishes.append(
             {
@@ -68,6 +71,8 @@ class CapturingRecorder:
                 "result": result,
                 "error": error,
                 "disposition": disposition,
+                "structured_content": structured_content,
+                "injection_outcomes": list(injection_outcomes),
             }
         )
 
@@ -214,6 +219,8 @@ async def test_a_blocked_call_gets_an_error_result_and_is_recorded_as_blocked():
         "result": BLOCKED_REASON,
         "error": None,
         "disposition": "blocked",
+        "structured_content": None,
+        "injection_outcomes": [],
     }
 
 

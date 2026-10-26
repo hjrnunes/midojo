@@ -18,6 +18,7 @@ extras); nothing else in ``midojo`` imports it.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any, TypeVar
 
 from midojo_sdk.recorder import (
@@ -27,8 +28,10 @@ from midojo_sdk.recorder import (
     ControlPlaneRejectedError,
     Disposition,
     EnvironmentRevision,
+    InjectionRecord,
     InvalidRequestError,
     RejectionKind,
+    finish_fields,
 )
 from pydantic import BaseModel, ValidationError
 
@@ -89,6 +92,8 @@ class InProcessAgentClient:
         result: str,
         disposition: Disposition,
         error: str | None = None,
+        structured_content: dict[str, Any] | None = None,
+        injection_outcomes: Sequence[InjectionRecord] = (),
     ) -> None:
         req = _request(
             CreateFunctionCallRecord,
@@ -99,6 +104,7 @@ class InProcessAgentClient:
             error=error,
             blocked=disposition in REFUSED,
             disposition=disposition,
+            **finish_fields(structured_content, injection_outcomes),
         )
         try:
             self._control.finish_call(self._target, req)
