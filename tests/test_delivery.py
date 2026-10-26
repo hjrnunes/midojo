@@ -201,6 +201,21 @@ def test_a_fact_whose_probe_isnt_the_instructions_names_no_plan_instruction():
     assert (fact.interceptor_instruction_index, fact.plan_instruction_index) == (0, None)
 
 
+def test_a_fact_on_a_call_to_another_tool_names_no_plan_instruction():
+    calls = [
+        call("c1", outcomes=[outcome(0, emitted=["content_block"])]),
+        # Same place and probe, but the instruction targets lookup: this fact isn't the plan's instruction 0.
+        call("c2", function="other", outcomes=[outcome(0, emitted=["content_block"])]),
+    ]
+
+    on_tool, elsewhere = delivery_facts(plan(tool_output()), calls)
+    [_, any_tool] = delivery_facts(plan(tool_output(tool=None)), calls)
+
+    assert (on_tool.plan_instruction_index, elsewhere.plan_instruction_index) == (0, None)
+    # An instruction with no target tool matches any call.
+    assert any_tool.plan_instruction_index == 0
+
+
 def test_a_call_that_only_has_other_tools_facts_doesnt_matter_to_the_instruction():
     calls = [
         call("c1", outcomes=[outcome(emitted=[], status="unmatched")]),

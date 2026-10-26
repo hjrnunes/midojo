@@ -74,7 +74,7 @@ class DeliveryFact(BaseModel):
     call recorded it; ``plan_instruction_index`` is the same instruction's
     index in the episode's plan, the index :class:`InstructionExposure` uses,
     or None when no tool-output instruction of the plan has that place and
-    probe key. ``selected``, ``transformation`` and ``emitted`` are None when
+    probe key and targets the call's tool (or any tool). ``selected``, ``transformation`` and ``emitted`` are None when
     the interceptor didn't report them.
     """
 
@@ -96,11 +96,14 @@ def delivery_facts(plan: InjectionPlan, function_calls: Iterable[FunctionCallRec
     """Every delivery fact the recorded calls carry, in call then instruction order, with ``plan``'s index of each."""
     tool_output = _tool_output_indexes(plan)
 
-    def plan_index(interceptor_index: int, probe_key: str | None) -> int | None:
+    def plan_index(interceptor_index: int, probe_key: str | None, function: str) -> int | None:
         if not 0 <= interceptor_index < len(tool_output):
             return None
         index = tool_output[interceptor_index]
-        return index if plan.instructions[index].probe_key == probe_key else None
+        instruction = plan.instructions[index]
+        if instruction.probe_key != probe_key or instruction.target.tool not in (None, function):
+            return None
+        return index
 
     return [
         DeliveryFact(
@@ -109,7 +112,7 @@ def delivery_facts(plan: InjectionPlan, function_calls: Iterable[FunctionCallRec
             disposition=call.disposition,
             turn=call.turn,
             interceptor_instruction_index=outcome.instruction_index,
-            plan_instruction_index=plan_index(outcome.instruction_index, outcome.probe_key),
+            plan_instruction_index=plan_index(outcome.instruction_index, outcome.probe_key, call.function),
             probe_key=outcome.probe_key,
             occurrence=outcome.occurrence,
             status=outcome.status,
