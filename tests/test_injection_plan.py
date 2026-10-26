@@ -59,7 +59,7 @@ class ConcurrentUpstream:
         await self.release[number].wait()
         result = CallToolResult(
             content=[TextContent(type="text", text=f"result {number}")],
-            structuredContent={"summary": f"result {number}"},
+            structuredContent={"items": [{"summary": f"result {number}"}]},
         )
         self.results[number] = result
         return result
@@ -130,14 +130,47 @@ async def test_size_limit_reports_without_relocating_payload():
 
 @pytest.mark.asyncio
 async def test_structured_field_selector_changes_only_that_field():
-    target = InjectionTarget(surface=SelectorSurface.STRUCTURED_CONTENT, structured_content_path=("summary",))
-    mcp, upstream, _ = _mcp(InjectionPlan((_instruction(target=target),)))
+    target = InjectionTarget(
+        surface=SelectorSurface.STRUCTURED_CONTENT, structured_content_path=("items", 0, "summary")
+    )
+    mcp, upstream, recorder = _mcp(InjectionPlan((_instruction(target=target),)))
     call = asyncio.create_task(mcp._forward_call("lookup", {"number": 1}))
     await upstream.arrived[1].wait()
     upstream.release[1].set()
     result = _wire_result(await call)
     assert _texts(result) == ["result 1"]
-    assert result.structuredContent == {"summary": "result 1 INJECTED"}
+    assert result.structuredContent == {"items": [{"summary": "result 1 INJECTED"}]}
+    assert recorder.finishes[0]["result"] == "result 1"
+
+
+@pytest.mark.asyncio
+async def test_mixed_content_and_record_selector_injections_record_the_content_text_as_before():
+    class StructuredUpstream:
+        async def call_tool_mcp(self, _name: str, _args: dict[str, Any]) -> CallToolResult:
+            return CallToolResult(
+                content=[TextContent(type="text", text="result")],
+                structuredContent={"notes": [{"id": "NOTE-1", "body": "original"}]},
+            )
+
+    structured_target = InjectionTarget(
+        surface=SelectorSurface.STRUCTURED_CONTENT,
+        structured_content_path=("notes", RecordSelector("NOTE-1"), "body"),
+    )
+    plan = InjectionPlan(
+        (
+            _instruction(payload=" CONTENT"),
+            _instruction(payload=" STRUCTURED", target=structured_target),
+        )
+    )
+    mcp, _, recorder = _mcp(plan)
+    mcp._upstream = StructuredUpstream()  # type: ignore[assignment]
+
+    result = _wire_result(await mcp._forward_call("lookup", {}))
+
+    assert _texts(result) == ["result CONTENT"]
+    assert _structured(result)["notes"][0]["body"] == "original STRUCTURED"
+    assert [outcome.status for outcome in mcp.injection_outcomes] == [OutcomeStatus.APPLIED, OutcomeStatus.APPLIED]
+    assert recorder.finishes[0]["result"] == "result CONTENT"
 
 
 @pytest.mark.asyncio
@@ -190,9 +223,14 @@ async def test_record_selector_honors_size_limit_and_json_string_transformation(
         ),
         ({"notes": {}}, ("notes", RecordSelector("NOTE-1"), "body"), "requires a list"),
         ({"notes": [{"id": "NOTE-1"}]}, ("notes", RecordSelector("NOTE-1"), "body"), "field 'body' is missing"),
+        (
+            {"notes": [{"id": "NOTE-1", "body": "x"}]},
+            ("notes", RecordSelector("NOTE-1")),
+            "selects a record, not a string field",
+        ),
         (None, ("notes", RecordSelector("NOTE-1"), "body"), "requires an object, got NoneType"),
     ],
-    ids=["no-match", "duplicates", "non-list", "missing-field", "text-only-result"],
+    ids=["no-match", "duplicates", "non-list", "missing-field", "selector-leaf", "text-only-result"],
 )
 async def test_record_selector_mismatches_are_strict_and_explain_the_cause(structured, path, reason):
     result, outcome = await _inject_structured(structured, path)
@@ -269,9 +307,11 @@ def test_plan_json_round_trip_carries_record_selectors_through_an_episode():
     )
     encoded = plan.to_json()
     decoded = InjectionPlan.from_json(encoded)
+    data = plan.to_data()
     episode = Episode(plan=decoded)
 
-    assert decoded == plan == episode.plan
+    assert InjectionPlan.from_data(data) == decoded == plan == episode.plan
+    assert plan.to_data() == data and plan.to_data() is not data
     assert json.loads(encoded)["instructions"][0]["target"]["structured_content_path"] == [
         "notes",
         {"field": "id", "equals": "NOTE-1"},
@@ -294,6 +334,25 @@ def test_plain_paths_keep_their_json_shape_and_default_selector_field_decodes():
         if isinstance(step, RecordSelector)
     ]
     assert selector == RecordSelector("NOTE-1")
+
+
+def test_plan_data_and_json_decoders_refuse_unknown_or_missing_fields():
+    valid = InjectionPlan((_instruction(),)).to_data()
+    unknown_instruction = json.loads(json.dumps(valid))
+    unknown_instruction["instructions"][0]["paylod"] = "typo"
+    invalid = [
+        {"instruction": valid["instructions"]},
+        valid | {"unknown": True},
+        unknown_instruction,
+    ]
+
+    for data in invalid:
+        with pytest.raises(ValueError):
+            InjectionPlan.from_data(data)
+        with pytest.raises(ValueError):
+            InjectionPlan.from_json(json.dumps(data))
+    with pytest.raises(ValueError, match="invalid injection plan JSON"):
+        InjectionPlan.from_json("{")
 
 
 def test_plan_is_frozen_and_generator_output_is_bounded():
@@ -320,6 +379,40 @@ def test_plan_is_frozen_and_generator_output_is_bounded():
         output = {"payload": "x", "tool": "search", "field": ["items", 0, "summary"], "mode": "replace"} | changed
         with pytest.raises(GeneratorInstructionError):
             instruction_from_generator(output, permissions)
+
+
+def test_generator_output_accepts_a_json_record_selector_allowed_by_the_plan():
+    selected = ("notes", RecordSelector("NOTE-1"), "body")
+    custom = ("orders", RecordSelector("O-1", field="order_id"), "body")
+    permissions = GeneratorPermissions(
+        tools=frozenset({"search"}),
+        fields=frozenset({selected, custom}),
+        modes=frozenset({InjectionMode.REPLACE}),
+    )
+
+    made = instruction_from_generator(
+        {
+            "payload": "x",
+            "tool": "search",
+            "field": ["notes", {"equals": "NOTE-1"}, "body"],
+            "mode": "replace",
+        },
+        permissions,
+    )
+
+    assert made.target.structured_content_path == selected
+
+    made = instruction_from_generator(
+        {
+            "payload": "x",
+            "tool": "search",
+            "field": ["orders", {"field": "order_id", "equals": "O-1"}, "body"],
+            "mode": "replace",
+        },
+        permissions,
+    )
+
+    assert made.target.structured_content_path == custom
 
 
 def test_template_instructions_must_agree_with_the_substitution_map():

@@ -281,7 +281,11 @@ class InjectionPlan:
         selector is ``{"field": "id", "equals": "NOTE-1"}``; ``from_json``
         also accepts an omitted ``field``, which defaults to ``id``.
         """
-        return json.dumps(_plan_to_data(self), sort_keys=True, separators=(",", ":"))
+        return json.dumps(self.to_data(), sort_keys=True, separators=(",", ":"))
+
+    def to_data(self) -> dict[str, Any]:
+        """Encode this plan as fresh dict/list JSON data."""
+        return _plan_to_data(self)
 
     @classmethod
     def from_json(cls, value: str | bytes | bytearray) -> InjectionPlan:
@@ -290,7 +294,15 @@ class InjectionPlan:
             data = json.loads(value)
         except (TypeError, json.JSONDecodeError) as exc:
             raise ValueError(f"invalid injection plan JSON: {exc}") from None
-        return _plan_from_data(data)
+        return cls.from_data(data)
+
+    @classmethod
+    def from_data(cls, data: Mapping[str, Any]) -> InjectionPlan:
+        """Decode a plan from plain dict/list JSON data."""
+        try:
+            return _plan_from_data(data)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"invalid injection plan data: {exc}") from None
 
 
 @dataclass(frozen=True)
@@ -406,12 +418,19 @@ def instruction_from_generator_for_plan(
 def _path(value: Any, what: str, *, record_selectors: bool = True) -> FieldPath:
     if isinstance(value, str) or not isinstance(value, Sequence):
         raise TypeError(f"{what} must be a sequence")
-    parts = tuple(value)
+    parts: list[PathPart] = []
+    for part in value:
+        if type(part) is dict:
+            if not record_selectors:
+                raise TypeError(f"{what} cannot contain a record selector")
+            parts.append(_selector_from_data(part))
+        else:
+            parts.append(part)
     allowed = {str, int, RecordSelector} if record_selectors else {str, int}
     if any(type(part) not in allowed or (type(part) is int and part < 0) for part in parts):
         suffix = ", or RecordSelector" if record_selectors else ""
         raise TypeError(f"{what} parts must be exact str, non-negative int{suffix} values")
-    return parts
+    return tuple(parts)
 
 
 def _str(value: Any, what: str) -> str:
@@ -438,20 +457,14 @@ def _path_to_data(path: FieldPath) -> list[str | int | dict[str, str | int]]:
 def _path_from_data(value: Any, what: str, *, record_selectors: bool = True) -> FieldPath:
     if type(value) is not list:
         raise TypeError(f"{what} must be a JSON array")
-    parts: list[PathPart] = []
-    for part in value:
-        if type(part) is dict:
-            if not record_selectors:
-                raise TypeError(f"{what} cannot contain a record selector")
-            unknown = set(part) - {"field", "equals"}
-            if unknown:
-                raise ValueError(f"record selector has unknown fields: {sorted(unknown)}")
-            if "equals" not in part:
-                raise ValueError("record selector must contain equals")
-            parts.append(RecordSelector(part["equals"], part.get("field", "id")))
-        else:
-            parts.append(part)
-    return _path(parts, what, record_selectors=record_selectors)
+    return _path(value, what, record_selectors=record_selectors)
+
+
+def _selector_from_data(value: dict[str, Any]) -> RecordSelector:
+    _only_fields(value, {"field", "equals"}, "record selector")
+    if "equals" not in value:
+        raise ValueError("record selector must contain equals")
+    return RecordSelector(value["equals"], value.get("field", "id"))
 
 
 def _plan_to_data(plan: InjectionPlan) -> dict[str, Any]:
@@ -494,10 +507,14 @@ def _plan_to_data(plan: InjectionPlan) -> dict[str, Any]:
 
 def _plan_from_data(value: Any) -> InjectionPlan:
     data = _object(value, "injection plan")
-    raw_instructions = data.get("instructions", [])
+    _only_fields(data, {"instructions", "generator_permissions", "probe_payloads"}, "injection plan")
+    if "instructions" not in data:
+        raise ValueError("injection plan must contain instructions")
+    raw_instructions = data["instructions"]
     if type(raw_instructions) is not list:
         raise TypeError("instructions must be a JSON array")
     permissions_data = _object(data.get("generator_permissions", {}), "generator_permissions")
+    _only_fields(permissions_data, {"tools", "fields", "modes"}, "generator_permissions")
     tools = permissions_data.get("tools", [])
     fields = permissions_data.get("fields", [])
     modes = permissions_data.get("modes", [])
@@ -525,9 +542,37 @@ def _plan_from_data(value: Any) -> InjectionPlan:
 
 def _instruction_from_data(value: Any) -> InjectionInstruction:
     data = _object(value, "instruction")
+    _only_fields(
+        data,
+        {
+            "channel",
+            "payload",
+            "target",
+            "occurrence",
+            "transformation",
+            "size_limit",
+            "mismatch_policy",
+            "mode",
+            "probe_key",
+        },
+        "instruction",
+    )
     if "channel" not in data or "payload" not in data:
         raise ValueError("instruction must contain channel and payload")
     target_data = _object(data.get("target", {}), "target")
+    _only_fields(
+        target_data,
+        {
+            "tool",
+            "surface",
+            "content_block_index",
+            "content_block_type",
+            "structured_content_path",
+            "template_path",
+            "template_key",
+        },
+        "target",
+    )
     target = InjectionTarget(
         tool=target_data.get("tool"),
         surface=SelectorSurface(target_data.get("surface", SelectorSurface.CONTENT_BLOCK.value)),
@@ -540,6 +585,7 @@ def _instruction_from_data(value: Any) -> InjectionInstruction:
         template_key=target_data.get("template_key"),
     )
     occurrence_data = _object(data.get("occurrence", {}), "occurrence")
+    _only_fields(occurrence_data, {"kind", "nth"}, "occurrence")
     occurrence = OccurrenceRule(
         Occurrence(occurrence_data.get("kind", Occurrence.FIRST.value)), occurrence_data.get("nth")
     )
@@ -560,3 +606,8 @@ def _object(value: Any, what: str) -> dict[str, Any]:
     if type(value) is not dict or any(type(key) is not str for key in value):
         raise TypeError(f"{what} must be a JSON object")
     return value
+
+
+def _only_fields(value: Mapping[str, Any], allowed: set[str], what: str) -> None:
+    if unknown := set(value) - allowed:
+        raise ValueError(f"{what} has unknown fields: {sorted(unknown)}")

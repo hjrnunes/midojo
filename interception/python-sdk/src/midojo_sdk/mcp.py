@@ -579,17 +579,10 @@ class MidojoMCP:
             # but this admitted call still consumed its occurrence.
             self._report_no_result(call_id, name, admitted)
             raise
-        injected_structured = False
         for scope, index, instruction, occurrence, order in admitted:
             result, status, detail = _inject_result(result, instruction)
-            if status is OutcomeStatus.APPLIED and instruction.target.surface is SelectorSurface.STRUCTURED_CONTENT:
-                injected_structured = True
             self._outcomes.append(_outcome(scope, index, instruction, call_id, name, occurrence, order, status, detail))
-        seen = (
-            json.dumps(result.structuredContent, separators=(",", ":"))
-            if injected_structured
-            else _text(result.content)
-        )
+        seen = _text(result.content)
         await recorder.finish_call(
             call_id=call_id,
             function=name,
