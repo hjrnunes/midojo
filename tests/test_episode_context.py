@@ -769,6 +769,85 @@ async def test_a_create_lost_twice_is_raised_and_a_refused_one_is_never_resent(s
     assert len(refusing.creates) == 1
 
 
+class HangingCreateTransport(httpx.AsyncBaseTransport):
+    """The control plane's app, except that the first create is applied and its response never comes.
+
+    Each create after it waits for ``release`` (or fails with ``resend_error``), so a test can cancel meanwhile.
+    """
+
+    def __init__(self, app, resend_error: Exception | None = None) -> None:
+        self.app, self.resend_error, self.creates = httpx.ASGITransport(app), resend_error, []
+        self.applied, self.resending, self.release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path.endswith("/evaluations"):
+            self.creates.append(json.loads(request.content))
+            if len(self.creates) == 1:
+                await self.app.handle_async_request(request)
+                self.applied.set()
+                await asyncio.Event().wait()
+            self.resending.set()
+            if self.resend_error is not None:
+                raise self.resend_error
+            await self.release.wait()
+        return await self.app.handle_async_request(request)
+
+
+@pytest.mark.asyncio
+async def test_a_create_cancelled_while_waiting_for_its_response_is_recovered_sealed_and_still_cancelled(suite):
+    app = create_app({"weather": suite}, config=AppConfig(closure_wait_seconds=0))
+    plane: ControlPlane = app.state.control
+    run = plane.create_run("weather")
+    transport = HangingCreateTransport(app)
+    async with httpx.AsyncClient(transport=transport) as http:
+        control = ControlPlaneClient("http://control", http=http)
+        ep = open_episode(suite.episode("weather_new_york"), runtime=RecordingRuntime(), control=control, run_id=run.id)
+
+        async def enter() -> None:
+            async with ep:
+                raise AssertionError("never entered")
+
+        task = asyncio.create_task(enter())
+        await asyncio.wait_for(transport.applied.wait(), timeout=10)
+        task.cancel()
+        # Cancelled again while the resend is in flight: the resend still runs to its end.
+        await asyncio.wait_for(transport.resending.wait(), timeout=10)
+        task.cancel()
+        transport.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    # The resend carried the same key, and was answered with the evaluation the cancelled create opened.
+    first, resent = transport.creates
+    assert first == resent and first["idempotency_key"]
+    [evaluation] = plane.evaluations(run.id)
+    assert ep.evaluation_id == evaluation.id and ep.interrupted
+    assert_sealed_as_interrupted_on(plane, ep)
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_create_whose_recovery_fails_too_is_still_cancelled_with_a_note(suite):
+    app = create_app({"weather": suite}, config=AppConfig(closure_wait_seconds=0))
+    run = app.state.control.create_run("weather")
+    transport = HangingCreateTransport(app, resend_error=httpx.ReadError("lost again", request=_REQUEST))
+    async with httpx.AsyncClient(transport=transport) as http:
+        control = ControlPlaneClient("http://control", http=http)
+        ep = open_episode(suite.episode("weather_new_york"), runtime=RecordingRuntime(), control=control, run_id=run.id)
+
+        async def enter() -> None:
+            async with ep:
+                raise AssertionError("never entered")
+
+        task = asyncio.create_task(enter())
+        await asyncio.wait_for(transport.applied.wait(), timeout=10)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError) as cancelled:
+            await task
+    assert len(transport.creates) == 2
+    assert any("couldn't be recovered: ReadError: lost again" in note for note in cancelled.value.__notes__)
+    with pytest.raises(RuntimeError, match="isn't open yet"):
+        ep.evaluation_id
+
+
 # A seal the control plane refuses outright: over HTTP a 422, in process pydantic's ValidationError.
 REFUSED_SEAL = (httpx.HTTPStatusError, pydantic.ValidationError)
 

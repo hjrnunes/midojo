@@ -337,6 +337,22 @@ class EpisodeContext:
             if _refused(error):
                 raise
             created = await create()
+        except BaseException as stopped:
+            # A cancellation or an interrupt while waiting for the response: the control plane may have opened the
+            # evaluation all the same. The same create is sent again, to its end however often the caller is
+            # cancelled meanwhile, so the evaluation it opened is known and cleanup seals it; then this goes on.
+            try:
+                recovered, _ = await _to_the_end(create())
+            except Exception as lost:
+                stopped.add_note(
+                    f"The evaluation it may have opened couldn't be recovered: {type(lost).__name__}: {lost}"
+                )
+            else:
+                self._opened(recovered)
+            raise
+        self._opened(created)
+
+    def _opened(self, created: CreateEvaluationResponse) -> None:
         self._evaluation_id, self._session_token, self.turns = created.id, created.session_token, tuple(created.turns)
 
     # --- turns ---
