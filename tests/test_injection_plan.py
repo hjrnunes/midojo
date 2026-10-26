@@ -1033,7 +1033,7 @@ def _item(result: CallToolResult) -> str:
 def test_call_arguments_are_sorted_hashable_pairs_of_exact_json_scalars():
     target = InjectionTarget(tool="lookup", call_arguments=(("b", 1), ("a", True), ("c", None), ("d", 1.5)))
     assert target.call_arguments == (("a", True), ("b", 1), ("c", None), ("d", 1.5))
-    assert InjectionTarget(tool="lookup", call_arguments={"b": 1, "a": True, "c": None, "d": 1.5}) == target  # type: ignore[arg-type]
+    assert InjectionTarget(tool="lookup", call_arguments={"b": 1, "a": True, "c": None, "d": 1.5}) == target
     assert hash(target) == hash(dataclasses.replace(target))
     assert InjectionTarget().call_arguments == ()
     invalid = [
@@ -1084,7 +1084,7 @@ def test_call_argument_matching_is_type_exact(expected, actual):
 
 
 def test_every_named_argument_must_match_and_each_failure_is_named():
-    target = InjectionTarget(tool="lookup", call_arguments={"a": 1, "b": "x", "c": False})  # type: ignore[arg-type]
+    target = InjectionTarget(tool="lookup", call_arguments={"a": 1, "b": "x", "c": False})
     assert target.call_argument_mismatch({"a": 1, "b": "x", "c": False}) is None
     assert target.call_argument_mismatch({"a": 2, "c": False}) == (
         "call argument 'a' is 2, not 1; call argument 'b' is missing"
