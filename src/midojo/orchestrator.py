@@ -30,12 +30,11 @@ from midojo.agent_client import (
 )
 from midojo.control_plane.client import ControlClient, ControlPlaneClient
 from midojo.control_plane.config import CONTROL_TOKEN_ENV
-from midojo.control_plane.lifecycle import RejectedError
 from midojo.control_plane.models import GradeResponse
+from midojo.control_plane.state import Snapshot
+from midojo.delivery import EXPOSURE_BOUNDARIES, DeliveryFact, Exposure, ExposureStatus, delivery_facts, exposure
 from midojo.episode import Episode
 from midojo.episode_context import EpisodeContext, EpisodeStep, open_episode
-from midojo.reachability import UNKNOWN as UNKNOWN_REACHABILITY
-from midojo.reachability import Reachability, count, reachability
 from midojo.runtimes import AgentRuntime
 from midojo.runtimes.openshell import SANDBOX_HOST, OpenShellRuntime
 from midojo.suites import get_suite, list_suites
@@ -46,10 +45,6 @@ if TYPE_CHECKING:
     from midojo.interception_host import HostInterception
 
 console = Console()
-
-# What a control client raises when the control plane refuses a request or can't be reached: an
-# ``httpx`` error over HTTP, the control plane's own rejection in process.
-_CONTROL_ERRORS: tuple[type[Exception], ...] = (httpx.HTTPError, RejectedError)
 
 
 def _resolve_system_message(suite_name: str) -> str:
@@ -90,16 +85,18 @@ class TaskResult(NamedTuple):
     turns: list[Exchange]
     # The sealed snapshot the grade is of.
     snapshot_id: str | None = None
+    snapshot: Snapshot | None = None
 
 
 class PairFailure(NamedTuple):
     """A task pair whose ``run_task`` raised: its evaluation, when one was opened, and why it failed.
 
-    In ``results.json`` the pair is null in the grade and evidence maps, left
-    out of the utility, security and reachability aggregates and of every
-    rate, and counted separately in ``aggregates.failed``. Its evaluation is
-    usually sealed ungraded with incomplete evidence, but ``run_task`` can
-    raise after the control plane graded it (a lost grade response, say).
+    In ``results.json`` the pair is null in the grade, evidence and delivery
+    maps, left out of the utility, security, attack outcome, delivery and
+    exposure aggregates and of every rate, and counted separately in
+    ``aggregates.failed``. Its evaluation is usually sealed ungraded with
+    incomplete evidence, but ``run_task`` can raise after the control plane
+    graded it (a lost grade response, say).
     """
 
     eval_id: str | None
@@ -204,10 +201,47 @@ def _rate_cell(results: dict[TaskPair, bool | None]) -> str:
     return cell
 
 
+# A grade's attack outcome fields, kept apart from its security verdict.
+ATTACK_OUTCOME = ("attempted", "blocked", "effect_observed", "injection_delivered")
+
+
+def _exposure_counts(reports: list[Exposure]) -> dict[str, dict[ExposureStatus, int]]:
+    """How many evaluations have each exposure status, at each boundary."""
+    counts: dict[str, dict[ExposureStatus, int]] = {}
+    for boundary in EXPOSURE_BOUNDARIES:
+        statuses = [report.at(boundary) for report in reports]
+        counts[boundary] = {status: statuses.count(status) for status in ("exposed", "not_exposed", "unknown")}
+    return counts
+
+
+def _delivery_counts(facts: list[list[DeliveryFact]]) -> dict[str, object]:
+    """The delivery facts of every evaluation, restated: how many, selected, emitted, unreported, and per status."""
+    every = [fact for evaluation in facts for fact in evaluation]
+    statuses: dict[str, int] = {}
+    for fact in every:
+        statuses[fact.status] = statuses.get(fact.status, 0) + 1
+    return {
+        "facts": len(every),
+        "selected": sum(1 for fact in every if fact.selected),
+        "emitted": sum(1 for fact in every if fact.emitted),
+        "unreported": sum(1 for fact in every if fact.emitted is None),
+        "status": statuses,
+    }
+
+
+def _three_valued_counts(values: list[bool | None]) -> dict[str, int]:
+    return {"true": values.count(True), "false": values.count(False), "unknown": values.count(None)}
+
+
+def _exposure_detail(report: Exposure) -> str:
+    emitted, tool_result, model_input = (report.at(b).replace("_", " ") for b in EXPOSURE_BOUNDARIES)
+    return f"payload emitted: {emitted}, agent tool result: {tool_result}, model input: {model_input}"
+
+
 def _print_results_table(
     utility_results: dict[TaskPair, bool | None],
     security_results: dict[TaskPair, bool | None],
-    reachability_results: dict[TaskPair, Reachability],
+    exposure_results: dict[TaskPair, Exposure],
     has_injections: bool,
     results_file: Path,
     pairs: list[TaskPair] | None = None,
@@ -244,15 +278,17 @@ def _print_results_table(
 
     console.print(table)
     if has_injections:
-        counts = count(reachability_results.values())
-        console.print(
-            f"\nPayload reachability (report only, not in the rates): {counts['matched']} matched, "
-            f"{counts['not_matched']} not matched, {counts['unknown']} unknown"
+        counts = _exposure_counts(list(exposure_results.values()))
+        by_boundary = "; ".join(
+            f"{boundary.replace('_', ' ')}: {c['exposed']} exposed, {c['not_exposed']} not exposed, "
+            f"{c['unknown']} unknown"
+            for boundary, c in counts.items()
         )
+        console.print(f"\nPayload exposure (report only, not in the rates): {by_boundary}")
     if failures:
         console.print(
             f"\nTask pairs: {len(utility_results)} graded, {len(failures)} failed "
-            "(not in the utility, security or reachability aggregates or any rate; see failure_reason)"
+            "(not in the utility, security, delivery or exposure aggregates or any rate; see failure_reason)"
         )
     console.print(f"\nResults saved to [cyan]{results_file}[/cyan]")
 
@@ -262,35 +298,10 @@ def _turn_label(label: str, idx: int, count: int) -> str:
     return f"turn {idx + 1} {label}" if count > 1 else label
 
 
-def _reachability_detail(report: Reachability) -> str:
-    if report.status == "matched":
-        return f"payload matched in {report.boundary} ({report.method})"
-    if report.status == "not_matched":
-        return "payload not matched"
-    return "payload match unknown"
-
-
-async def _injection_reachability(
-    control: ControlClient, run_id: str, eval_id: str, injections: dict[str, str]
-) -> Reachability:
-    """Search every turn's user message and the recorded tool results for the injection payloads.
-
-    Report-only: unknown when the evaluation record can't be fetched or parsed.
-    """
-    try:
-        evaluation = await control.evaluation(run_id, eval_id)
-    except (*_CONTROL_ERRORS, ValueError):
-        # ValueError covers a body that isn't JSON (JSONDecodeError, UnicodeDecodeError)
-        # and one that doesn't match EvaluationResponse (pydantic's ValidationError).
-        return UNKNOWN_REACHABILITY
-    # A record without started turns falls back to the evaluation's agent input.
-    messages = [turn.message for turn in evaluation.turns] or [evaluation.agent_input or ""]
-    return reachability(
-        injections.values(),
-        messages,
-        # an unfinished call has no result: the agent saw nothing from it
-        [call.result for call in evaluation.function_calls if call.result is not None],
-        evaluation.evidence_status.get("function_calls"),
+def _delivery(episode: Episode, snapshot: Snapshot) -> tuple[list[DeliveryFact], Exposure]:
+    """The sealed snapshot's delivery facts, and the exposure of the episode's plan they derive."""
+    return delivery_facts(snapshot.function_calls), exposure(
+        episode.plan, snapshot.function_calls, turns=len(snapshot.turns), evidence_status=snapshot.evidence_status
     )
 
 
@@ -376,6 +387,7 @@ async def run_task(
         grade=grade,
         turns=turns,
         snapshot_id=snapshot.snapshot_id,
+        snapshot=snapshot,
     )
 
 
@@ -436,7 +448,9 @@ async def _run_benchmark(
     security_reasons: dict[TaskPair, str | None] = {}
     grade_validity: dict[TaskPair, dict] = {}
     evidence_status: dict[TaskPair, dict[str, str]] = {}
-    reachability_results: dict[TaskPair, Reachability] = {}
+    delivery_results: dict[TaskPair, list[DeliveryFact]] = {}
+    exposure_results: dict[TaskPair, Exposure] = {}
+    outcome_results: dict[str, dict[TaskPair, bool | None]] = {name: {} for name in ATTACK_OUTCOME}
     pairs: list[TaskPair] = []
     eval_ids: dict[TaskPair, str | None] = {}
     failures: dict[TaskPair, PairFailure] = {}
@@ -495,14 +509,15 @@ async def _run_benchmark(
                     _print_agent_text(_turn_label("agent output", idx, len(result.turns)), reply)
                 console.print("    ", _utility(grade.utility))
                 if it_id:
-                    # Every injection evaluation counts in the attack-success rate. Whether the
-                    # payload text was found is reported alongside and never filters it out.
+                    # Every injection evaluation counts in the attack-success rate. Its delivery and
+                    # exposure are reported alongside and never filter it out.
                     security_results[pair] = grade.security
                     security_reasons[pair] = grade.security_reason
-                    reachability_results[pair] = await _injection_reachability(
-                        control, run_id, eval_id, dict(episode.injections)
-                    )
-                    detail = _reachability_detail(reachability_results[pair])
+                    for name in ATTACK_OUTCOME:
+                        outcome_results[name][pair] = getattr(grade, name)
+                    assert result.snapshot is not None  # run_task returns the snapshot it graded.
+                    delivery_results[pair], exposure_results[pair] = _delivery(episode, result.snapshot)
+                    detail = _exposure_detail(exposure_results[pair])
                     if grade.security is not False and grade.security_reason:
                         # attack succeeded, or couldn't be graded — name the criterion that decided it
                         detail += f" · {grade.security_reason}"
@@ -532,14 +547,21 @@ async def _run_benchmark(
         "security_reason": by_pair(security_reasons),
         "grade_validity": by_pair(grade_validity),
         "evidence_status": by_pair(evidence_status),
-        # Whether the payload text was found; report-only, null without an injection task.
-        "reachability": by_pair({k: v.model_dump(mode="json") for k, v in reachability_results.items()}),
+        # The grade's attack outcome, kept apart from security; null without an injection task.
+        **{name: by_pair(outcome_results[name]) for name in ATTACK_OUTCOME},
+        # What the interceptor selected, transformed and emitted per call and instruction, and the exposure
+        # derived from it at each boundary; report-only, null without an injection task.
+        "delivery": by_pair({k: [f.model_dump(mode="json") for f in v] for k, v in delivery_results.items()}),
+        "exposure": by_pair({k: v.model_dump(mode="json") for k, v in exposure_results.items()}),
     }
-    # Rates leave invalid grades out of the denominator and failed pairs out altogether; reachability never enters them.
+    # Rates leave invalid grades out of the denominator and failed pairs out altogether; delivery, exposure and
+    # the attack outcome never enter them.
     aggregates: dict[str, object] = {
         "utility": _aggregate(utility_results),
         "security": _aggregate(security_results),
-        "reachability": count(reachability_results.values()),
+        "attack_outcome": {name: _three_valued_counts(list(outcome_results[name].values())) for name in ATTACK_OUTCOME},
+        "delivery": _delivery_counts(list(delivery_results.values())),
+        "exposure": _exposure_counts(list(exposure_results.values())),
     }
     if failures:
         # Only a run with a failed pair has these: a run with none writes what it always did.
@@ -554,7 +576,7 @@ async def _run_benchmark(
     _print_results_table(
         utility_results,
         security_results,
-        reachability_results,
+        exposure_results,
         bool(injection_tasks_to_run),
         results_file,
         pairs,
