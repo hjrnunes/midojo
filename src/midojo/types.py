@@ -42,12 +42,25 @@ CallProvenance = Literal["host", "interceptor", "agent"]
 # carry (its text isn't a JSON mirror of the structured content), so an agent reading only the text never saw it.
 InjectionStatus = Literal["applied", "partial", "fallback", "unmatched", "no_result", "too_large", "skipped_occurrence"]
 
+# The transformation an interceptor applied to a payload: the values of ``midojo_sdk.injection.Transformation``.
+InjectionTransformation = Literal["identity", "json_string"]
+
+# A part of a tool result an interceptor returned: its text (content) blocks or its structured content.
+ResultPart = Literal["content_block", "structured_content"]
+
 
 class CallInjectionOutcome(BaseModel):
     """One injection instruction's outcome on a recorded call, as the interceptor reported it in the call's finish.
 
     It names the instruction by its index in the plan the interceptor was
     given, never the payload or the interceptor's counter scope.
+
+    It is also the instruction's delivery fact for the call: what the
+    interceptor ``selected``, how it ``transformation``-ed the payload, and
+    which parts of the result it returned it ``emitted`` the payload in, at
+    its own boundary. The interceptor records a result before it returns it,
+    so a fact never says what the agent, or its model, saw. Each is None when
+    the layer didn't report it (a record made before the fields).
     """
 
     instruction_index: int = Field(ge=0, description="The instruction's index in the interceptor's plan.")
@@ -55,6 +68,24 @@ class CallInjectionOutcome(BaseModel):
     occurrence: int = Field(ge=1, description="Which matching call of the instruction's this was, one-based.")
     status: InjectionStatus
     detail: str = Field(description="Why: the selector that matched or didn't, or what was left unchanged.")
+    selected: bool | None = Field(
+        default=None,
+        description="Whether the instruction's exact selector matched a place in the call's result. None: not reported.",
+    )
+    transformation: InjectionTransformation | None = Field(
+        default=None,
+        description=(
+            "The transformation applied to the payload. None when it was never transformed (its occurrence rule "
+            "skipped the call, or there was no result) or the layer didn't report it."
+        ),
+    )
+    emitted: list[ResultPart] | None = Field(
+        default=None,
+        description=(
+            "The parts of the result the interceptor returned that carry the transformed payload where it placed "
+            "it, checked after every instruction for the call. Empty when none does. None: not reported."
+        ),
+    )
 
 
 class FunctionCallRecord(BaseModel):

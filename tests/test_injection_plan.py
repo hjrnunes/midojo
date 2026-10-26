@@ -834,7 +834,16 @@ async def test_a_mirrored_text_block_is_re_serialised_in_its_own_style(style, mo
     [finish] = recorder.finishes
     assert (finish["result"], finish["structured_content"], finish["error"]) == (_texts(result)[0], expected, None)
     assert finish["injection_outcomes"] == [
-        {"instruction_index": 0, "probe_key": None, "occurrence": 1, "status": "applied", "detail": MIRRORED}
+        {
+            "instruction_index": 0,
+            "probe_key": None,
+            "occurrence": 1,
+            "status": "applied",
+            "detail": MIRRORED,
+            "selected": True,
+            "transformation": "identity",
+            "emitted": ["structured_content", "content_block"],
+        }
     ]
 
 
@@ -980,3 +989,121 @@ async def test_an_all_ascii_mirror_gets_a_non_ascii_payload_unescaped():
     [sent] = _texts(result)
     assert "first ü" in sent
     assert json.loads(sent) == result.structuredContent == _noted("first ü", structured)
+
+
+# --- delivery facts: what the interceptor selected, transformed and emitted ---
+
+
+def _facts(record: InjectionRecord) -> tuple[str, bool | None, str | None, list[str] | None]:
+    return (record["status"], record.get("selected"), record.get("transformation"), record.get("emitted"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("result", "instruction", "facts"),
+    [
+        (_text_result("plain"), _instruction(), ("applied", True, "identity", ["content_block"])),
+        (
+            _text_result("plain"),
+            _instruction(transformation=Transformation.JSON_STRING),
+            ("applied", True, "json_string", ["content_block"]),
+        ),
+        (
+            _text_result(json.dumps(NOTES), structured=NOTES),
+            _structured_instruction(),
+            ("applied", True, "identity", ["structured_content", "content_block"]),
+        ),
+        (
+            _text_result("Notes: first", structured=NOTES),
+            _structured_instruction(),
+            ("partial", True, "identity", ["structured_content"]),
+        ),
+        (_text_result(), _instruction(), ("unmatched", False, "identity", [])),
+        (
+            _text_result(),
+            _instruction(mismatch_policy=MismatchPolicy.FALLBACK_APPEND),
+            ("fallback", False, "identity", ["content_block"]),
+        ),
+        (_text_result("plain"), _instruction(size_limit=1), ("too_large", False, "identity", [])),
+    ],
+    ids=["content", "json-string", "mirror", "partial", "unmatched", "fallback", "too-large"],
+)
+async def test_each_outcome_records_what_was_selected_transformed_and_emitted(result, instruction, facts):
+    _, mcp, recorder = await _forward(result, instruction)
+
+    [finish] = recorder.finishes
+    [record] = finish["injection_outcomes"]
+    assert _facts(record) == facts
+    [outcome] = mcp.injection_outcomes
+    assert (outcome.status.value, outcome.selected, outcome.transformation, [s.value for s in outcome.emitted]) == (
+        facts[0],
+        facts[1],
+        Transformation(facts[2]),
+        facts[3],
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_payload_in_a_json_mirror_is_emitted_in_both_parts_though_the_text_escapes_it():
+    payload = ' "quoted"\nnext line ü'
+
+    result, _, recorder = await _forward(
+        _text_result(json.dumps(NOTES, ensure_ascii=True), structured=NOTES), _structured_instruction(payload=payload)
+    )
+
+    [text] = _texts(result)
+    # The text carries the payload JSON-encoded, never as its raw characters: emission doesn't search for it.
+    assert payload not in text
+    assert json.loads(text)["notes"][0]["body"] == "first" + payload
+    [record] = recorder.finishes[0]["injection_outcomes"]
+    assert _facts(record) == ("applied", True, "identity", ["structured_content", "content_block"])
+
+
+@pytest.mark.asyncio
+async def test_a_skipped_occurrence_or_a_missing_result_was_never_transformed():
+    target = InjectionTarget(tool="lookup", content_block_index=0)
+    plan = InjectionPlan((_instruction(target=target, occurrence=OccurrenceRule(Occurrence.NTH, 2)),))
+    mcp, _, recorder = _mcp(plan)
+    mcp._upstream = FixedUpstream(_text_result("first"))  # type: ignore[assignment]
+    await mcp._forward_call("lookup", {})
+
+    class FailingUpstream:
+        async def call_tool_mcp(self, name: str, args: dict[str, Any]) -> CallToolResult:
+            raise RuntimeError("upstream failed")
+
+    mcp._upstream = FailingUpstream()  # type: ignore[assignment]
+    with pytest.raises(RuntimeError):
+        await mcp._forward_call("lookup", {})
+
+    skipped, failed = (finish["injection_outcomes"] for finish in recorder.finishes)
+    assert [_facts(record) for record in skipped] == [("skipped_occurrence", False, None, [])]
+    assert [_facts(record) for record in failed] == [("no_result", False, None, [])]
+
+
+@pytest.mark.asyncio
+async def test_a_later_instruction_that_replaces_the_text_leaves_the_earlier_one_unemitted():
+    replace_all = _instruction(target=InjectionTarget(), payload="REPLACED", mode=InjectionMode.REPLACE)
+
+    result, _, recorder = await _forward(_text_result("plain"), _instruction(), replace_all)
+
+    assert _texts(result) == ["REPLACED"]
+    first, second = recorder.finishes[0]["injection_outcomes"]
+    # The first placement was applied, but the result returned doesn't carry it.
+    assert _facts(first) == ("applied", True, "identity", [])
+    assert _facts(second) == ("applied", True, "identity", ["content_block"])
+
+
+@pytest.mark.asyncio
+async def test_text_appended_after_a_mirror_keeps_the_mirrored_placement_emitted():
+    appended = _instruction(target=InjectionTarget(content_block_index=0), payload=" TAIL")
+
+    result, _, recorder = await _forward(
+        _text_result(json.dumps(NOTES), structured=NOTES), _structured_instruction(), appended
+    )
+
+    [text] = _texts(result)
+    assert text.endswith(" TAIL")
+    mirrored, tail = recorder.finishes[0]["injection_outcomes"]
+    # The text is no longer a mirror, but it still holds the mirror text the first instruction wrote.
+    assert _facts(mirrored) == ("applied", True, "identity", ["structured_content", "content_block"])
+    assert _facts(tail) == ("applied", True, "identity", ["content_block"])

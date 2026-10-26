@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import dataclasses
 import functools
 import inspect
 import json
@@ -597,10 +598,27 @@ class MidojoMCP:
             # but this admitted call still consumed its occurrence.
             self._report_no_result(call_id, name, admitted)
             raise
+        placements = []
+        for admission in admitted:
+            result, placement = _inject_result(result, admission[2])
+            placements.append((admission, placement))
+        # Emission is checked on the result as returned, so a later instruction that replaced a placement shows.
         outcomes = list(skipped)
-        for scope, index, instruction, occurrence, order in admitted:
-            result, status, detail = _inject_result(result, instruction)
-            outcome = _outcome(scope, index, instruction, call_id, name, occurrence, order, status, detail)
+        for (scope, index, instruction, occurrence, order), placement in placements:
+            outcome = _outcome(
+                scope,
+                index,
+                instruction,
+                call_id,
+                name,
+                occurrence,
+                order,
+                placement.status,
+                placement.detail,
+                selected=placement.status in _SELECTED,
+                transformation=instruction.transformation,
+                emitted=_emitted(result, instruction, placement),
+            )
             self._outcomes.append(outcome)
             outcomes.append(outcome)
         # The record is what the agent gets: its text blocks as one string, and its structured content.
@@ -867,29 +885,94 @@ def _inject_selected_block(
     return None
 
 
-def _inject_result(
-    result: CallToolResult, instruction: InjectionInstruction
-) -> tuple[CallToolResult, OutcomeStatus, str]:
+@dataclasses.dataclass(frozen=True)
+class _Placement:
+    """What one instruction did to a call's result: its outcome, the transformed payload and where it put it.
+
+    ``placed`` names where: ``structured_content``, ``mirror`` (the text
+    re-serialised from the structured content, ``mirror_text``) and
+    ``content_block`` (a text block the instruction wrote or appended).
+    """
+
+    status: OutcomeStatus
+    detail: str
+    payload: str
+    placed: tuple[str, ...] = ()
+    mirror_text: str | None = None
+
+
+# The outcomes whose exact selector matched a place in the result.
+_SELECTED = frozenset({OutcomeStatus.APPLIED, OutcomeStatus.PARTIAL})
+
+
+def _inject_result(result: CallToolResult, instruction: InjectionInstruction) -> tuple[CallToolResult, _Placement]:
     payload = _transform(instruction)
     if instruction.size_limit is not None and len(payload.encode()) > instruction.size_limit:
-        return result, OutcomeStatus.TOO_LARGE, "transformed payload exceeds size_limit"
+        return result, _Placement(OutcomeStatus.TOO_LARGE, "transformed payload exceeds size_limit", payload)
     if instruction.target.surface is SelectorSurface.STRUCTURED_CONTENT:
         updated, problem = _inject_structured(result, instruction, payload)
         if updated is not None and problem is not None:
-            return updated, OutcomeStatus.PARTIAL, f"exact selector matched structured content only; {problem}"
+            detail = f"exact selector matched structured content only; {problem}"
+            return updated, _Placement(OutcomeStatus.PARTIAL, detail, payload, ("structured_content",))
         if updated is not None:
-            return updated, OutcomeStatus.APPLIED, "exact selector matched; mirrored text re-serialised"
+            detail = "exact selector matched; mirrored text re-serialised"
+            [mirror] = updated.content
+            assert isinstance(mirror, TextContent)  # _inject_structured re-serialised it.
+            placement = _Placement(
+                OutcomeStatus.APPLIED, detail, payload, ("structured_content", "mirror"), mirror.text
+            )
+            return updated, placement
         mismatch = problem
     else:
         updated = _inject_content(result, instruction, payload)
         if updated is not None:
-            return updated, OutcomeStatus.APPLIED, "exact selector matched"
+            return updated, _Placement(OutcomeStatus.APPLIED, "exact selector matched", payload, ("content_block",))
         mismatch = "content-block selector did not match"
     if instruction.mismatch_policy is MismatchPolicy.FALLBACK_APPEND:
         content = [*result.content, TextContent(type="text", text=payload)]
         updated = result.model_copy(update={"content": content})
-        return updated, OutcomeStatus.FALLBACK, f"{mismatch}; appended a text block"
-    return result, OutcomeStatus.UNMATCHED, f"{mismatch}; result unchanged"
+        detail = f"{mismatch}; appended a text block"
+        return updated, _Placement(OutcomeStatus.FALLBACK, detail, payload, ("content_block",))
+    return result, _Placement(OutcomeStatus.UNMATCHED, f"{mismatch}; result unchanged", payload)
+
+
+def _emitted(
+    result: CallToolResult, instruction: InjectionInstruction, placement: _Placement
+) -> tuple[SelectorSurface, ...]:
+    """The parts of the returned ``result`` that still carry the placement's payload where it was placed.
+
+    Structured content carries it when the field the instruction selected
+    holds the payload. The text carries a mirrored placement when it is still
+    a JSON mirror of structured content that carries it, or a text block still
+    holds the mirror text this instruction wrote; and a text-block placement
+    when a text block holds the payload. A later instruction that replaced
+    the field or the text leaves it out.
+    """
+    carried: list[SelectorSurface] = []
+    structured = "structured_content" in placement.placed and _field_carries(
+        result.structuredContent, instruction.target.structured_content_path, placement.payload
+    )
+    if structured:
+        carried.append(SelectorSurface.STRUCTURED_CONTENT)
+    texts = [block.text for block in result.content if isinstance(block, TextContent)]
+    if "mirror" in placement.placed:
+        mirror_text = placement.mirror_text
+        mirrored = structured and not isinstance(_json_mirror(result), str)
+        if mirrored or (mirror_text is not None and any(mirror_text in text for text in texts)):
+            carried.append(SelectorSurface.CONTENT_BLOCK)
+    elif "content_block" in placement.placed and any(placement.payload in text for text in texts):
+        carried.append(SelectorSurface.CONTENT_BLOCK)
+    return tuple(carried)
+
+
+def _field_carries(value: Any, path: tuple[str | int | RecordSelector, ...], payload: str) -> bool:
+    """Whether the string field at ``path`` in ``value`` holds ``payload``."""
+    current = value
+    for part in path:
+        current, mismatch = _resolve_path_part(current, part)
+        if mismatch is not None:
+            return False
+    return isinstance(current, str) and payload in current
 
 
 def _records(outcomes: Sequence[InjectionOutcome]) -> list[InjectionRecord]:
@@ -901,6 +984,9 @@ def _records(outcomes: Sequence[InjectionOutcome]) -> list[InjectionRecord]:
             "occurrence": outcome.occurrence,
             "status": outcome.status.value,
             "detail": outcome.detail,
+            "selected": outcome.selected,
+            "transformation": outcome.transformation.value if outcome.transformation is not None else None,
+            "emitted": [surface.value for surface in outcome.emitted],
         }
         for outcome in outcomes
     ]
@@ -916,6 +1002,10 @@ def _outcome(
     admission_order: int,
     status: OutcomeStatus,
     detail: str,
+    *,
+    selected: bool = False,
+    transformation: Transformation | None = None,
+    emitted: tuple[SelectorSurface, ...] = (),
 ) -> InjectionOutcome:
     return InjectionOutcome(
         instruction_index=index,
@@ -927,4 +1017,7 @@ def _outcome(
         admission_order=admission_order,
         status=status,
         detail=detail,
+        selected=selected,
+        transformation=transformation,
+        emitted=emitted,
     )

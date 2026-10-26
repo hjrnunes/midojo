@@ -45,7 +45,7 @@ import enum
 import logging
 import warnings
 from collections.abc import Awaitable, Callable, Sequence
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple, Protocol, TypedDict, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, NotRequired, Protocol, TypedDict, TypeVar, cast
 
 if TYPE_CHECKING:
     from midojo_sdk.client import AgentControlPlaneClient
@@ -74,6 +74,15 @@ class InjectionRecord(TypedDict):
     instruction matched the call but its occurrence rule skipped it) or
     ``no_result``. ``detail`` says why. A record names neither the counter
     scope (an evaluation ID or a session token) nor the payload.
+
+    The delivery facts say what the interceptor did at its own boundary:
+    ``selected``, whether the instruction's exact selector matched a place in
+    the result; ``transformation``, the transformation applied to the payload
+    (``identity`` or ``json_string``; None when it was never transformed); and
+    ``emitted``, the parts of the returned result that carry the transformed
+    payload (``content_block``, ``structured_content``; empty when none does).
+    A layer that doesn't report them leaves them out. They never say what the
+    agent saw: a result is recorded before it is returned.
     """
 
     instruction_index: int
@@ -81,6 +90,9 @@ class InjectionRecord(TypedDict):
     occurrence: int
     status: str
     detail: str
+    selected: NotRequired[bool]
+    transformation: NotRequired[str | None]
+    emitted: NotRequired[list[str]]
 
 
 RECORD_ATTEMPTS = 3
