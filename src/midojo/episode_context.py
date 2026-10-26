@@ -329,27 +329,37 @@ class EpisodeContext:
                 run_id, user_task_id, episode.injection_task_id, dict(episode.injections), idempotency_key=key, **host
             )
 
+        async def resend() -> CreateEvaluationResponse | Exception:
+            # Its error is returned, not raised: a cancellation that arrives meanwhile is never lost behind it.
+            try:
+                return await create()
+            except Exception as error:
+                return error
+
         try:
             created = await create()
-        except Exception as error:
-            # An unknown outcome (its response lost, say): the control plane may have opened the evaluation. The
-            # same create, under the same key, is sent again once, and answers with that evaluation if it did.
-            if _refused(error):
+        except BaseException as error:
+            if isinstance(error, Exception) and _refused(error):
                 raise
-            created = await create()
-        except BaseException as stopped:
-            # A cancellation or an interrupt while waiting for the response: the control plane may have opened the
-            # evaluation all the same. The same create is sent again, to its end however often the caller is
-            # cancelled meanwhile, so the evaluation it opened is known and cleanup seals it; then this goes on.
-            try:
-                recovered, _ = await _to_the_end(create())
-            except Exception as lost:
-                stopped.add_note(
-                    f"The evaluation it may have opened couldn't be recovered: {type(lost).__name__}: {lost}"
+            # An unknown outcome: its response lost, say, or a cancellation or an interrupt while waiting for it. The
+            # control plane may have opened the evaluation, so the same create, under the same key, is sent again
+            # once, and answers with that evaluation if it did. The resend runs to its end however often the caller
+            # is cancelled meanwhile, so the evaluation is known and cleanup seals it before a stop goes on.
+            outcome, cancelled = await _to_the_end(resend())
+            # What goes on after the resend: the cancellation or interrupt that stopped the create, else a
+            # cancellation that arrived during the resend.
+            stop = cancelled if isinstance(error, Exception) else error
+            if isinstance(outcome, Exception):
+                if stop is None:
+                    raise outcome
+                stop.add_note(
+                    f"The evaluation it may have opened couldn't be recovered: {type(outcome).__name__}: {outcome}"
                 )
-            else:
-                self._opened(recovered)
-            raise
+                raise stop
+            self._opened(outcome)
+            if stop is not None:
+                raise stop
+            return
         self._opened(created)
 
     def _opened(self, created: CreateEvaluationResponse) -> None:

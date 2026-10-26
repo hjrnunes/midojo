@@ -824,11 +824,13 @@ async def test_a_create_answered_with_a_malformed_body_is_resent_and_opens_one_e
 class HangingCreateTransport(httpx.AsyncBaseTransport):
     """The control plane's app, except that the first create is applied and its response never comes.
 
-    Each create after it waits for ``release`` (or fails with ``resend_error``), so a test can cancel meanwhile.
+    With ``first_error``, the first create fails with it once applied instead. Each create after it waits for
+    ``release``, then fails with ``resend_error`` if given, so a test can cancel while it is in flight.
     """
 
-    def __init__(self, app, resend_error: Exception | None = None) -> None:
-        self.app, self.resend_error, self.creates = httpx.ASGITransport(app), resend_error, []
+    def __init__(self, app, resend_error: Exception | None = None, first_error: Exception | None = None) -> None:
+        self.app, self.creates = httpx.ASGITransport(app), []
+        self.resend_error, self.first_error = resend_error, first_error
         self.applied, self.resending, self.release = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
@@ -837,11 +839,13 @@ class HangingCreateTransport(httpx.AsyncBaseTransport):
             if len(self.creates) == 1:
                 await self.app.handle_async_request(request)
                 self.applied.set()
+                if self.first_error is not None:
+                    raise self.first_error
                 await asyncio.Event().wait()
             self.resending.set()
+            await self.release.wait()
             if self.resend_error is not None:
                 raise self.resend_error
-            await self.release.wait()
         return await self.app.handle_async_request(request)
 
 
@@ -892,12 +896,70 @@ async def test_a_cancelled_create_whose_recovery_fails_too_is_still_cancelled_wi
         task = asyncio.create_task(enter())
         await asyncio.wait_for(transport.applied.wait(), timeout=10)
         task.cancel()
+        await asyncio.wait_for(transport.resending.wait(), timeout=10)
+        transport.release.set()
         with pytest.raises(asyncio.CancelledError) as cancelled:
-            await task
+            await asyncio.wait_for(task, timeout=10)
     assert len(transport.creates) == 2
     assert any("couldn't be recovered: ReadError: lost again" in note for note in cancelled.value.__notes__)
     with pytest.raises(RuntimeError, match="isn't open yet"):
         ep.evaluation_id
+
+
+@pytest.mark.asyncio
+async def test_a_create_cancelled_during_the_resend_after_a_lost_response_is_recovered_sealed_and_cancelled(suite):
+    app = create_app({"weather": suite}, config=AppConfig(closure_wait_seconds=0))
+    plane: ControlPlane = app.state.control
+    run = plane.create_run("weather")
+    transport = HangingCreateTransport(app, first_error=httpx.ReadError("the response was lost", request=_REQUEST))
+    async with httpx.AsyncClient(transport=transport) as http:
+        control = ControlPlaneClient("http://control", http=http)
+        ep = open_episode(suite.episode("weather_new_york"), runtime=RecordingRuntime(), control=control, run_id=run.id)
+
+        async def enter() -> None:
+            async with ep:
+                raise AssertionError("never entered")
+
+        task = asyncio.create_task(enter())
+        # The first create is applied and its response lost; the caller cancels while the resend is in flight.
+        await asyncio.wait_for(transport.resending.wait(), timeout=10)
+        task.cancel()
+        transport.release.set()
+        with pytest.raises(asyncio.CancelledError) as cancelled:
+            await asyncio.wait_for(task, timeout=10)
+    assert isinstance(cancelled.value.__context__, httpx.ReadError)
+    first, resent = transport.creates
+    assert first == resent and first["idempotency_key"]
+    [evaluation] = plane.evaluations(run.id)
+    assert ep.evaluation_id == evaluation.id and ep.interrupted
+    assert_sealed_as_interrupted_on(plane, ep)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_resend_after_a_lost_response_still_raises_a_cancellation_that_arrived_meanwhile(suite):
+    app = create_app({"weather": suite}, config=AppConfig(closure_wait_seconds=0))
+    run = app.state.control.create_run("weather")
+    transport = HangingCreateTransport(
+        app,
+        first_error=httpx.ReadError("the response was lost", request=_REQUEST),
+        resend_error=httpx.ReadError("lost again", request=_REQUEST),
+    )
+    async with httpx.AsyncClient(transport=transport) as http:
+        control = ControlPlaneClient("http://control", http=http)
+        ep = open_episode(suite.episode("weather_new_york"), runtime=RecordingRuntime(), control=control, run_id=run.id)
+
+        async def enter() -> None:
+            async with ep:
+                raise AssertionError("never entered")
+
+        task = asyncio.create_task(enter())
+        await asyncio.wait_for(transport.resending.wait(), timeout=10)
+        task.cancel()
+        transport.release.set()
+        with pytest.raises(asyncio.CancelledError) as cancelled:
+            await asyncio.wait_for(task, timeout=10)
+    assert len(transport.creates) == 2
+    assert any("couldn't be recovered: ReadError: lost again" in note for note in cancelled.value.__notes__)
 
 
 # A seal the control plane refuses outright: over HTTP a 422, in process pydantic's ValidationError.
