@@ -8,12 +8,34 @@ never guess another field.
 from __future__ import annotations
 
 import enum
+import json
 from collections.abc import Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
 
-type PathPart = str | int
+
+@dataclass(frozen=True)
+class RecordSelector:
+    """Select the sole list record whose ``field`` exactly equals ``value``.
+
+    The field defaults to ``id``. Values are exact ``str`` or ``int`` values:
+    booleans are refused, and an integer never matches its string form.
+    """
+
+    value: str | int
+    field: str = "id"
+
+    def __post_init__(self) -> None:
+        if type(self.field) is not str:
+            raise TypeError("record selector field must be a str")
+        if not self.field:
+            raise ValueError("record selector field must not be empty")
+        if type(self.value) not in {str, int}:
+            raise TypeError("record selector value must be an exact str or int")
+
+
+type PathPart = str | int | RecordSelector
 type FieldPath = tuple[PathPart, ...]
 
 
@@ -85,7 +107,7 @@ class InjectionTarget:
         ):
             raise ValueError("content_block_index must be a non-negative int")
         object.__setattr__(self, "structured_content_path", _path(self.structured_content_path, "field path"))
-        object.__setattr__(self, "template_path", _path(self.template_path, "template path"))
+        object.__setattr__(self, "template_path", _path(self.template_path, "template path", record_selectors=False))
         content_selector = self.content_block_index is not None or self.content_block_type is not None
         template_selector = bool(self.template_path) or self.template_key is not None
         if self.surface is SelectorSurface.CONTENT_BLOCK and (self.structured_content_path or template_selector):
@@ -252,6 +274,24 @@ class InjectionPlan:
             probe_payloads=self.probe_payloads,
         )
 
+    def to_json(self) -> str:
+        """Encode this plan as stable JSON made only from plain JSON values.
+
+        Key and index path steps remain JSON strings and integers. A record
+        selector is ``{"field": "id", "equals": "NOTE-1"}``; ``from_json``
+        also accepts an omitted ``field``, which defaults to ``id``.
+        """
+        return json.dumps(_plan_to_data(self), sort_keys=True, separators=(",", ":"))
+
+    @classmethod
+    def from_json(cls, value: str | bytes | bytearray) -> InjectionPlan:
+        """Decode the plain-data JSON representation produced by :meth:`to_json`."""
+        try:
+            data = json.loads(value)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"invalid injection plan JSON: {exc}") from None
+        return _plan_from_data(data)
+
 
 @dataclass(frozen=True)
 class InterceptorCapability:
@@ -363,12 +403,14 @@ def instruction_from_generator_for_plan(
     return instruction_from_generator(output, plan.generator_permissions, probe_key=probe_key)
 
 
-def _path(value: Any, what: str) -> FieldPath:
+def _path(value: Any, what: str, *, record_selectors: bool = True) -> FieldPath:
     if isinstance(value, str) or not isinstance(value, Sequence):
         raise TypeError(f"{what} must be a sequence")
     parts = tuple(value)
-    if any(type(part) is not str and not (type(part) is int and part >= 0) for part in parts):
-        raise TypeError(f"{what} parts must be exact str or non-negative int values")
+    allowed = {str, int, RecordSelector} if record_selectors else {str, int}
+    if any(type(part) not in allowed or (type(part) is int and part < 0) for part in parts):
+        suffix = ", or RecordSelector" if record_selectors else ""
+        raise TypeError(f"{what} parts must be exact str, non-negative int{suffix} values")
     return parts
 
 
@@ -381,3 +423,140 @@ def _str(value: Any, what: str) -> str:
 def _optional_str(value: Any, what: str) -> None:
     if value is not None:
         _str(value, what)
+
+
+def _path_to_data(path: FieldPath) -> list[str | int | dict[str, str | int]]:
+    encoded: list[str | int | dict[str, str | int]] = []
+    for part in path:
+        if isinstance(part, RecordSelector):
+            encoded.append({"field": part.field, "equals": part.value})
+        else:
+            encoded.append(part)
+    return encoded
+
+
+def _path_from_data(value: Any, what: str, *, record_selectors: bool = True) -> FieldPath:
+    if type(value) is not list:
+        raise TypeError(f"{what} must be a JSON array")
+    parts: list[PathPart] = []
+    for part in value:
+        if type(part) is dict:
+            if not record_selectors:
+                raise TypeError(f"{what} cannot contain a record selector")
+            unknown = set(part) - {"field", "equals"}
+            if unknown:
+                raise ValueError(f"record selector has unknown fields: {sorted(unknown)}")
+            if "equals" not in part:
+                raise ValueError("record selector must contain equals")
+            parts.append(RecordSelector(part["equals"], part.get("field", "id")))
+        else:
+            parts.append(part)
+    return _path(parts, what, record_selectors=record_selectors)
+
+
+def _plan_to_data(plan: InjectionPlan) -> dict[str, Any]:
+    instructions = []
+    for item in plan.instructions:
+        target = item.target
+        instructions.append(
+            {
+                "channel": item.channel.value,
+                "payload": item.payload,
+                "target": {
+                    "tool": target.tool,
+                    "surface": target.surface.value,
+                    "content_block_index": target.content_block_index,
+                    "content_block_type": target.content_block_type,
+                    "structured_content_path": _path_to_data(target.structured_content_path),
+                    "template_path": _path_to_data(target.template_path),
+                    "template_key": target.template_key,
+                },
+                "occurrence": {"kind": item.occurrence.kind.value, "nth": item.occurrence.nth},
+                "transformation": item.transformation.value,
+                "size_limit": item.size_limit,
+                "mismatch_policy": item.mismatch_policy.value,
+                "mode": item.mode.value,
+                "probe_key": item.probe_key,
+            }
+        )
+    permission_fields = [_path_to_data(path) for path in plan.generator_permissions.fields]
+    permission_fields.sort(key=lambda path: json.dumps(path, sort_keys=True, separators=(",", ":")))
+    return {
+        "instructions": instructions,
+        "generator_permissions": {
+            "tools": sorted(plan.generator_permissions.tools),
+            "fields": permission_fields,
+            "modes": sorted(mode.value for mode in plan.generator_permissions.modes),
+        },
+        "probe_payloads": [list(item) for item in plan.probe_payloads],
+    }
+
+
+def _plan_from_data(value: Any) -> InjectionPlan:
+    data = _object(value, "injection plan")
+    raw_instructions = data.get("instructions", [])
+    if type(raw_instructions) is not list:
+        raise TypeError("instructions must be a JSON array")
+    permissions_data = _object(data.get("generator_permissions", {}), "generator_permissions")
+    tools = permissions_data.get("tools", [])
+    fields = permissions_data.get("fields", [])
+    modes = permissions_data.get("modes", [])
+    if type(tools) is not list or type(fields) is not list or type(modes) is not list:
+        raise TypeError("generator permission tools, fields, and modes must be JSON arrays")
+    permissions = GeneratorPermissions(
+        tools=frozenset(tools),
+        fields=frozenset(_path_from_data(path, "permitted field") for path in fields),
+        modes=frozenset(InjectionMode(mode) for mode in modes),
+    )
+    raw_probes = data.get("probe_payloads", [])
+    if type(raw_probes) is not list:
+        raise TypeError("probe_payloads must be a JSON array")
+    probes = []
+    for item in raw_probes:
+        if type(item) is not list or len(item) != 2:
+            raise TypeError("each probe_payloads entry must be a two-item JSON array")
+        probes.append((item[0], item[1]))
+    return InjectionPlan(
+        tuple(_instruction_from_data(item) for item in raw_instructions),
+        generator_permissions=permissions,
+        probe_payloads=tuple(probes),
+    )
+
+
+def _instruction_from_data(value: Any) -> InjectionInstruction:
+    data = _object(value, "instruction")
+    if "channel" not in data or "payload" not in data:
+        raise ValueError("instruction must contain channel and payload")
+    target_data = _object(data.get("target", {}), "target")
+    target = InjectionTarget(
+        tool=target_data.get("tool"),
+        surface=SelectorSurface(target_data.get("surface", SelectorSurface.CONTENT_BLOCK.value)),
+        content_block_index=target_data.get("content_block_index"),
+        content_block_type=target_data.get("content_block_type"),
+        structured_content_path=_path_from_data(
+            target_data.get("structured_content_path", []), "structured content path"
+        ),
+        template_path=_path_from_data(target_data.get("template_path", []), "template path", record_selectors=False),
+        template_key=target_data.get("template_key"),
+    )
+    occurrence_data = _object(data.get("occurrence", {}), "occurrence")
+    occurrence = OccurrenceRule(
+        Occurrence(occurrence_data.get("kind", Occurrence.FIRST.value)), occurrence_data.get("nth")
+    )
+    return InjectionInstruction(
+        channel=Channel(data["channel"]),
+        payload=data["payload"],
+        target=target,
+        occurrence=occurrence,
+        transformation=Transformation(data.get("transformation", Transformation.IDENTITY.value)),
+        size_limit=data.get("size_limit"),
+        mismatch_policy=MismatchPolicy(data.get("mismatch_policy", MismatchPolicy.STRICT.value)),
+        mode=InjectionMode(data.get("mode", InjectionMode.APPEND.value)),
+        probe_key=data.get("probe_key"),
+    )
+
+
+def _object(value: Any, what: str) -> dict[str, Any]:
+    if type(value) is not dict or any(type(key) is not str for key in value):
+        raise TypeError(f"{what} must be a JSON object")
+    return value

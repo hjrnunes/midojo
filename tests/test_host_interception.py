@@ -14,9 +14,17 @@ import socket
 import httpx
 import pytest
 import pytest_asyncio
-from fastmcp import Client
+from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
-from midojo_sdk.injection import Channel, InjectionInstruction, InjectionPlan, InjectionTarget, OutcomeStatus
+from midojo_sdk.injection import (
+    Channel,
+    InjectionInstruction,
+    InjectionPlan,
+    InjectionTarget,
+    OutcomeStatus,
+    RecordSelector,
+    SelectorSurface,
+)
 from sse_starlette.sse import AppStatus
 
 from midojo.control_plane.config import AppConfig
@@ -96,6 +104,46 @@ async def test_the_interceptor_records_in_its_evaluation_and_applies_the_plan(co
         ("list_alerts", True, 0, "interceptor", "forwarded"),
     ]
     assert calls[0].result == f"41°F, rain\n{PAYLOAD}"
+
+
+@pytest.mark.asyncio
+async def test_host_interceptor_selects_a_record_and_seals_the_injected_result(control, serve):
+    upstream = FastMCP("notes")
+
+    @upstream.tool()
+    def list_notes() -> dict:
+        return {"notes": [{"id": "NOTE-1", "body": "first"}, {"id": "NOTE-2", "body": "second"}]}
+
+    plan = InjectionPlan(
+        (
+            InjectionInstruction(
+                channel=Channel.TOOL_OUTPUT,
+                payload=" INJECTED",
+                target=InjectionTarget(
+                    tool="list_notes",
+                    surface=SelectorSurface.STRUCTURED_CONTENT,
+                    structured_content_path=("notes", RecordSelector("NOTE-1"), "body"),
+                ),
+            ),
+        )
+    )
+    run, evaluation = open_evaluation(control)
+    recorder = InProcessControlClient(control).recorder(evaluation.session_token)
+    interceptor = HostInterceptor(recorder, upstream=upstream, evaluation_id=evaluation.id, plan=plan)
+    endpoint = await serve(interceptor)
+
+    async with Client(endpoint.url, auth=endpoint.token) as target:
+        result = await target.call_tool_mcp("list_notes", {})
+    snapshot = await control.complete(run.id, evaluation.id, "done")
+
+    assert result.structuredContent == {
+        "notes": [{"id": "NOTE-1", "body": "first INJECTED"}, {"id": "NOTE-2", "body": "second"}]
+    }
+    [outcome] = interceptor.injection_outcomes
+    assert (outcome.status, outcome.detail) == (OutcomeStatus.APPLIED, "exact selector matched")
+    [record] = snapshot.function_calls
+    assert "first INJECTED" in record.result
+    assert "second INJECTED" not in record.result
 
 
 @pytest.mark.asyncio
