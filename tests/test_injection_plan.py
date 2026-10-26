@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+from collections.abc import Sequence
 from typing import Any
 
 import pytest
@@ -30,7 +31,7 @@ from midojo_sdk.injection import (
     instruction_from_generator_for_plan,
 )
 from midojo_sdk.mcp import MidojoMCP, ToolContext
-from midojo_sdk.recorder import Disposition
+from midojo_sdk.recorder import Disposition, InjectionRecord
 
 from midojo.episode import Episode
 from midojo.suites import get_suite
@@ -38,6 +39,27 @@ from tests.scripted_mcp import ScriptedMCP
 from tests.test_mcp_fidelity import CapturingRecorder
 
 MIRRORED = "exact selector matched; mirrored text re-serialised"
+
+
+class DetailedCapturingRecorder(CapturingRecorder):
+    """A capturing recorder that records a finish's details too (a ``DetailedRecorder``)."""
+
+    async def finish_call_detailed(
+        self,
+        *,
+        call_id: str,
+        function: str,
+        args: dict[str, Any],
+        result: str,
+        disposition: Disposition,
+        error: str | None = None,
+        structured_content: dict[str, Any] | None,
+        injection_outcomes: Sequence[InjectionRecord],
+    ) -> None:
+        await self.finish_call(
+            call_id=call_id, function=function, args=args, result=result, disposition=disposition, error=error
+        )
+        self.finishes[-1] |= {"structured_content": structured_content, "injection_outcomes": list(injection_outcomes)}
 
 
 def _instruction(**changes: Any) -> InjectionInstruction:
@@ -69,8 +91,8 @@ class ConcurrentUpstream:
 
 def _mcp(
     plan: InjectionPlan, *, evaluation_id: str = "evaluation-1"
-) -> tuple[MidojoMCP, ConcurrentUpstream, CapturingRecorder]:
-    recorder = CapturingRecorder()
+) -> tuple[MidojoMCP, ConcurrentUpstream, DetailedCapturingRecorder]:
+    recorder = DetailedCapturingRecorder()
     mcp = MidojoMCP("proxy", recorder=recorder, upstream_transport=object(), plan=plan, evaluation_id=evaluation_id)
     upstream = ConcurrentUpstream()
     mcp._upstream = upstream  # type: ignore[assignment]
@@ -772,7 +794,7 @@ def _noted(body: str, structured: dict[str, Any] = NOTES) -> dict[str, Any]:
 
 async def _forward(
     result: CallToolResult, *instructions: InjectionInstruction
-) -> tuple[CallToolResult, MidojoMCP, CapturingRecorder]:
+) -> tuple[CallToolResult, MidojoMCP, DetailedCapturingRecorder]:
     mcp, _, recorder = _mcp(InjectionPlan(instructions))
     mcp._upstream = FixedUpstream(result)  # type: ignore[assignment]
     return _wire_result(await mcp._forward_call("lookup", {})), mcp, recorder
@@ -924,3 +946,37 @@ async def test_a_call_without_admitted_instructions_records_no_outcomes():
     skipped, unmatched_tool = recorder.finishes
     assert [record["status"] for record in skipped["injection_outcomes"]] == ["skipped_occurrence"]
     assert unmatched_tool["injection_outcomes"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_mirror_in_its_own_key_order_is_re_serialised_in_the_structured_contents_order():
+    structured = {"b": "x", "notes": [{"id": "NOTE-1", "body": "first"}], "a": 1}
+    text = '{"a":1,"notes":[{"body":"first","id":"NOTE-1"}],"b":"x"}'
+
+    result, mcp, _ = await _forward(_text_result(text, structured=structured), _structured_instruction())
+
+    # The text's own key order can't be reproduced: the payload reaches it, in the structured content's order.
+    expected = _noted("first INJECTED", structured)
+    assert _texts(result) == [json.dumps(expected, separators=(",", ":"), ensure_ascii=False)]
+    assert mcp.injection_outcomes[0].status is OutcomeStatus.APPLIED
+
+
+@pytest.mark.asyncio
+async def test_a_mirror_with_a_trailing_newline_loses_it_but_keeps_its_indentation():
+    text = json.dumps(NOTES, indent=2, ensure_ascii=False) + "\n"
+
+    result, _, _ = await _forward(_text_result(text, structured=NOTES), _structured_instruction())
+
+    assert _texts(result) == [json.dumps(_noted("first INJECTED"), indent=2, ensure_ascii=False)]
+
+
+@pytest.mark.asyncio
+async def test_an_all_ascii_mirror_gets_a_non_ascii_payload_unescaped():
+    structured = {"notes": [{"id": "NOTE-1", "body": "first"}]}
+    text = json.dumps(structured, separators=(",", ":"))
+
+    result, _, _ = await _forward(_text_result(text, structured=structured), _structured_instruction(payload=" ü"))
+
+    [sent] = _texts(result)
+    assert "first ü" in sent
+    assert json.loads(sent) == result.structuredContent == _noted("first ü", structured)

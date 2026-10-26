@@ -21,7 +21,6 @@ from midojo_sdk.recorder import (
     InjectionRecord,
     InvalidRequestError,
     RejectionKind,
-    finish_fields,
     retry,
 )
 
@@ -169,18 +168,35 @@ class AgentControlPlaneClient:
         result: str,
         disposition: Disposition,
         error: str | None = None,
-        structured_content: dict[str, Any] | None = None,
-        injection_outcomes: Sequence[InjectionRecord] = (),
     ) -> None:
         """Send a call's finish once, with its disposition.
 
         The body also carries the ``blocked`` flag the disposition implies (a
         denied or blocked call), so a control plane that predates the
-        disposition field still records a refused call as blocked. It carries
-        ``structured_content`` and ``injection_outcomes`` only when given.
+        disposition field still records a refused call as blocked.
         """
         body = _finish_body(call_id, function, args, result, error, disposition in REFUSED, disposition)
-        body.update(finish_fields(structured_content, injection_outcomes))
+        await self._post("/agent/function-calls", body)
+
+    async def finish_call_detailed(
+        self,
+        *,
+        call_id: str,
+        function: str,
+        args: dict[str, Any],
+        result: str,
+        disposition: Disposition,
+        error: str | None = None,
+        structured_content: dict[str, Any] | None,
+        injection_outcomes: Sequence[InjectionRecord],
+    ) -> None:
+        """Send a call's finish once, as ``finish_call`` does, with its structured content and injection outcomes.
+
+        ``injection_outcomes`` is always sent, empty when no instruction
+        matched the call, so the record says the details were reported.
+        """
+        body = _finish_body(call_id, function, args, result, error, disposition in REFUSED, disposition)
+        body |= {"structured_content": structured_content, "injection_outcomes": list(injection_outcomes)}
         await self._post("/agent/function-calls", body)
 
     # --- CaptureReporter ---

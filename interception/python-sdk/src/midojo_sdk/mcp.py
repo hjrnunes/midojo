@@ -55,7 +55,7 @@ from midojo_sdk.recorder import (
     Recorder,
     RetryingRecorder,
     WorldState,
-    finish_fields,
+    finish_detailed,
     reporting,
 )
 from midojo_sdk.session import SESSION_HEADER, session_token
@@ -583,30 +583,14 @@ class MidojoMCP:
         except McpError as e:
             outcomes = [*skipped, *self._report_no_result(call_id, name, admitted)]
             message = e.error.message
-            await recorder.finish_call(
-                call_id=call_id,
-                function=name,
-                args=arguments,
-                result=message,
-                error=message,
-                disposition="forwarded",
-                **finish_fields(None, _records(outcomes)),
-            )
+            await _finish_forwarded(recorder, call_id, name, arguments, message, message, None, outcomes)
             errors = _protocol_errors.get()
             if errors is not None:
                 errors.append(e)
             raise
         except Exception as e:
             outcomes = [*skipped, *self._report_no_result(call_id, name, admitted)]
-            await recorder.finish_call(
-                call_id=call_id,
-                function=name,
-                args=arguments,
-                result=str(e),
-                error=str(e),
-                disposition="forwarded",
-                **finish_fields(None, _records(outcomes)),
-            )
+            await _finish_forwarded(recorder, call_id, name, arguments, str(e), str(e), None, outcomes)
             raise
         except BaseException:
             # Cancellation leaves the started disposition record unfinished,
@@ -621,15 +605,8 @@ class MidojoMCP:
             outcomes.append(outcome)
         # The record is what the agent gets: its text blocks as one string, and its structured content.
         seen = _text(result.content)
-        await recorder.finish_call(
-            call_id=call_id,
-            function=name,
-            args=arguments,
-            result=seen,
-            error=seen if result.isError else None,
-            disposition="forwarded",
-            **finish_fields(result.structuredContent, _records(outcomes)),
-        )
+        error = seen if result.isError else None
+        await _finish_forwarded(recorder, call_id, name, arguments, seen, error, result.structuredContent, outcomes)
         forwarded = _UpstreamResult(
             content=result.content, structured_content=result.structuredContent, meta=result.meta
         )
@@ -641,6 +618,44 @@ class MidojoMCP:
 
     def run(self, **kwargs) -> None:
         self._fastmcp.run(**kwargs)
+
+
+async def _finish_forwarded(
+    recorder: Recorder,
+    call_id: str,
+    name: str,
+    arguments: dict[str, Any],
+    result: str,
+    error: str | None,
+    structured_content: dict[str, Any] | None,
+    outcomes: Sequence[InjectionOutcome],
+) -> None:
+    """Finish a forwarded call with its details, or with its text only when ``recorder`` can't record them.
+
+    A recorder without the capability (see ``DetailedRecorder``) never fails
+    the call over it: the agent still gets its result, and the record, with
+    no ``injection_outcomes``, says the details weren't reported.
+    """
+    detailed = await finish_detailed(
+        recorder,
+        call_id=call_id,
+        function=name,
+        args=arguments,
+        result=result,
+        disposition="forwarded",
+        error=error,
+        structured_content=structured_content,
+        injection_outcomes=_records(outcomes),
+    )
+    if not detailed and (structured_content is not None or outcomes):
+        logger.warning(
+            "%s can't record a finish's details: %s (%s) is recorded with its text only, without its structured "
+            "content or %d injection outcome(s)",
+            type(recorder).__name__,
+            name,
+            call_id,
+            len(outcomes),
+        )
 
 
 def _text(content: Sequence[ContentBlock]) -> str:
@@ -788,13 +803,19 @@ _JSON_LAYOUTS: tuple[tuple[int | None, tuple[str, str]], ...] = (
 
 
 def _json_style(text: str, value: Any) -> dict[str, Any]:
-    """``json.dumps`` options that reproduce ``text`` from ``value``, to serialise the injected value the same way.
+    """``json.dumps`` options for the injected value: the predefined style that reproduces ``text`` exactly, if any.
 
-    It tries compact, spaced, and two- and four-space indented layouts, each
-    with and without ASCII escapes and sorted keys. When none reproduces the
-    text exactly (another serialiser's number format, say), it keeps the
-    layout: indented by the first indented line's width when the text spans
-    lines, compact otherwise, non-ASCII text as is and keys in their order.
+    The styles are compact, spaced, and two- and four-space indented layouts,
+    each with and without ASCII escapes and with keys in the structured
+    content's order or sorted; the first that gives exactly ``text`` from
+    ``value`` is used. Nothing else is reproduced: not a key order of the
+    text's own (other than sorted), trailing whitespace or a final newline,
+    or another serialiser's number format. For such text it falls back to
+    compact for one line, or indented by the width of the second line's
+    leading spaces (two when it has none) otherwise, with keys in the
+    structured content's order. Unescaped non-ASCII is tried first, so an
+    all-ASCII original, which can't show which it used, and any fallback get
+    a non-ASCII payload unescaped.
     """
     for indent, separators in _JSON_LAYOUTS:
         for ensure_ascii in (False, True):

@@ -39,6 +39,7 @@ from midojo.control_plane.models import CreateFunctionCallStart
 from midojo.control_plane.service import ById, ControlPlane, token_hash
 from midojo.interception_host import HostInterception, HostInterceptor
 from midojo.tool_endpoint import ToolEndpoint
+from midojo.types import CallInjectionOutcome, FunctionCallRecord
 from tests.backends import Backend
 from tests.fixtures.scripted_target.upstream import scripted_upstream
 
@@ -110,7 +111,7 @@ async def test_the_interceptor_records_in_its_evaluation_and_applies_the_plan(co
     ]
     # The sealed records are what the agent got: a text-only result has no structured part.
     assert [(c.result, c.structured_content) for c in calls] == [(f"41°F, rain\n{PAYLOAD}", None), ("no alerts", None)]
-    assert [[(o.status, o.probe_key) for o in c.injection_outcomes] for c in calls] == [
+    assert [[(o.status, o.probe_key) for o in sealed_outcomes(c)] for c in calls] == [
         [("applied", "weather_alert:main")],
         [],
     ]
@@ -173,6 +174,12 @@ async def call_notes(control: ControlPlane, serve, upstream: FastMCP, plan: Inje
     return result, interceptor.injection_outcomes, record
 
 
+def sealed_outcomes(record: FunctionCallRecord) -> list[CallInjectionOutcome]:
+    """A sealed record's injection outcomes, which the interceptor's detailed finish always reports."""
+    assert record.injection_outcomes is not None
+    return record.injection_outcomes
+
+
 def agent_text(result: CallToolResult) -> str:
     return "\n".join(block.text for block in result.content)  # type: ignore[union-attr]
 
@@ -200,9 +207,9 @@ async def test_host_interceptor_places_a_selected_record_in_the_text_and_seals_w
     )
     # The sealed record is exactly what the agent got, text and structured parts, with the outcome.
     assert (record.result, record.structured_content, record.error) == (agent_text(result), injected, None)
-    assert [
-        (o.instruction_index, o.probe_key, o.occurrence, o.status, o.detail) for o in record.injection_outcomes
-    ] == [(0, "notes:body", 1, "applied", outcome.detail)]
+    assert [(o.instruction_index, o.probe_key, o.occurrence, o.status, o.detail) for o in sealed_outcomes(record)] == [
+        (0, "notes:body", 1, "applied", outcome.detail)
+    ]
 
 
 @pytest.mark.asyncio
@@ -219,7 +226,7 @@ async def test_host_interceptor_reports_text_that_is_not_a_mirror_as_partial_in_
     assert outcome.status is OutcomeStatus.PARTIAL
     assert outcome.detail == "exact selector matched structured content only; text content is not JSON"
     assert (record.result, record.structured_content) == (agent_text(result), result.structuredContent)
-    [sealed] = record.injection_outcomes
+    [sealed] = sealed_outcomes(record)
     assert (sealed.status, sealed.detail) == ("partial", outcome.detail)
 
 
@@ -236,7 +243,7 @@ async def test_host_interceptor_places_and_seals_an_error_result(control, serve,
     [outcome] = outcomes
     assert outcome.status is (OutcomeStatus.APPLIED if text is None else OutcomeStatus.PARTIAL)
     assert (record.result, record.error, record.structured_content) == (expected_text, expected_text, injected)
-    assert [o.status for o in record.injection_outcomes] == [outcome.status.value]
+    assert [o.status for o in sealed_outcomes(record)] == [outcome.status.value]
 
 
 @pytest.mark.asyncio
@@ -255,7 +262,7 @@ async def test_host_interceptor_reports_duplicate_record_ids_as_unmatched(contro
     assert outcome.status is OutcomeStatus.UNMATCHED
     assert "matched 2 records" in outcome.detail
     assert (record.result, record.structured_content) == (json.dumps(notes, separators=(",", ":")), notes)
-    assert [(o.status, o.detail) for o in record.injection_outcomes] == [("unmatched", outcome.detail)]
+    assert [(o.status, o.detail) for o in sealed_outcomes(record)] == [("unmatched", outcome.detail)]
 
 
 @pytest.mark.asyncio
@@ -265,7 +272,7 @@ async def test_host_interceptor_seals_a_too_large_payload_with_the_result_unchan
     assert (result.structuredContent, agent_text(result)) == (NOTES, json.dumps(NOTES, separators=(",", ":")))
     assert outcomes[0].status is OutcomeStatus.TOO_LARGE
     assert (record.result, record.structured_content) == (agent_text(result), NOTES)
-    assert [o.status for o in record.injection_outcomes] == ["too_large"]
+    assert [o.status for o in sealed_outcomes(record)] == ["too_large"]
 
 
 @pytest.mark.asyncio
@@ -383,7 +390,7 @@ async def test_a_structured_placement_recorded_over_http_reads_back_sealed_over_
     [record] = snapshot.function_calls
     assert (record.result, record.structured_content) == (agent_text(result), result.structuredContent)
     assert json.loads(agent_text(result))["notes"][0]["body"] == "first ü"
-    assert [o.status for o in record.injection_outcomes] == ["applied"]
+    assert [o.status for o in sealed_outcomes(record)] == ["applied"]
     await backend.aclose()
 
 

@@ -31,7 +31,6 @@ from midojo_sdk.recorder import (
     InjectionRecord,
     InvalidRequestError,
     RejectionKind,
-    finish_fields,
 )
 from pydantic import BaseModel, ValidationError
 
@@ -92,8 +91,34 @@ class InProcessAgentClient:
         result: str,
         disposition: Disposition,
         error: str | None = None,
-        structured_content: dict[str, Any] | None = None,
-        injection_outcomes: Sequence[InjectionRecord] = (),
+    ) -> None:
+        await self._finish(call_id, function, args, result, disposition, error)
+
+    async def finish_call_detailed(
+        self,
+        *,
+        call_id: str,
+        function: str,
+        args: dict[str, Any],
+        result: str,
+        disposition: Disposition,
+        error: str | None = None,
+        structured_content: dict[str, Any] | None,
+        injection_outcomes: Sequence[InjectionRecord],
+    ) -> None:
+        """Finish a call as ``finish_call`` does, with its structured content and injection outcomes (always a list)."""
+        details = {"structured_content": structured_content, "injection_outcomes": list(injection_outcomes)}
+        await self._finish(call_id, function, args, result, disposition, error, **details)
+
+    async def _finish(
+        self,
+        call_id: str,
+        function: str,
+        args: dict[str, Any],
+        result: str,
+        disposition: Disposition,
+        error: str | None,
+        **details: Any,
     ) -> None:
         req = _request(
             CreateFunctionCallRecord,
@@ -104,7 +129,7 @@ class InProcessAgentClient:
             error=error,
             blocked=disposition in REFUSED,
             disposition=disposition,
-            **finish_fields(structured_content, injection_outcomes),
+            **details,
         )
         try:
             self._control.finish_call(self._target, req)

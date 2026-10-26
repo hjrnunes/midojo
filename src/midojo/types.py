@@ -97,15 +97,20 @@ class FunctionCallRecord(BaseModel):
     structured_content: dict | None = Field(
         default=None,
         description=(
-            "The structured content the agent got with `result` (its text), exactly as it got it. None when the "
-            "result had none, the call is unfinished, or the interception layer didn't say."
+            "The structured content the agent got with `result` (its text), exactly as it got it, when the layer "
+            "reported the call's details (`injection_outcomes` is a list). None when the result had none, the call "
+            "is unfinished, or the layer reported its text only."
         ),
     )
-    injection_outcomes: list[CallInjectionOutcome] = Field(
-        default_factory=list,
+    injection_outcomes: list[CallInjectionOutcome] | None = Field(
+        default=None,
         description=(
-            "How each injection instruction admitted for the call fared, as the interception layer reported it: "
-            "`partial` when only `structured_content` carries the payload. Empty when none was admitted."
+            "How each injection instruction that matched the call fared, as the interception layer reported it: "
+            "the instructions it admitted for the call, and those whose occurrence rule skipped it "
+            "(`skipped_occurrence`); `partial` when only `structured_content` carries the payload. Empty when no "
+            "instruction matched. None when the layer recorded the call's text only (a plain finish, a layer or "
+            "recorder without details, or a record made before the field): the record then doesn't say whether "
+            "the result had structured content or an injection was placed in it."
         ),
     )
     complete: bool = Field(

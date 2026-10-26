@@ -7,7 +7,10 @@ environment that tools defined by the layer act on. Both are bound to one
 evaluation by whoever builds them, so tools never carry or choose an
 evaluation. They are separate on purpose: a forwarding or recording-only layer
 needs a ``Recorder`` and nothing else, while a tool that simulates state also
-takes a ``WorldState``.
+takes a ``WorldState``. A recorder that is also a :class:`DetailedRecorder`
+records the parts of a result beyond its text (its structured content and the
+call's injection outcomes); one that isn't still records every call, with its
+text only (:func:`finish_detailed`).
 
 They keep three kinds of evidence apart. A record is an intercepted request,
 never proof of an effect. A simulated effect is a change to the simulated
@@ -63,11 +66,12 @@ REFUSED: frozenset[Disposition] = frozenset({"denied", "blocked"})
 
 
 class InjectionRecord(TypedDict):
-    """How one injection instruction fared on a call, as the call's finish carries it.
+    """How one injection instruction fared on a call, as the call's detailed finish carries it.
 
     ``status`` is a :class:`midojo_sdk.injection.OutcomeStatus` value as a
     plain ``str``: ``applied``, ``partial`` (structured content only),
-    ``fallback``, ``unmatched``, ``too_large``, ``skipped_occurrence`` or
+    ``fallback``, ``unmatched``, ``too_large``, ``skipped_occurrence`` (the
+    instruction matched the call but its occurrence rule skipped it) or
     ``no_result``. ``detail`` says why. A record names neither the counter
     scope (an evaluation ID or a session token) nor the payload.
     """
@@ -77,24 +81,6 @@ class InjectionRecord(TypedDict):
     occurrence: int
     status: str
     detail: str
-
-
-def finish_fields(
-    structured_content: dict[str, Any] | None, injection_outcomes: Sequence[InjectionRecord]
-) -> dict[str, Any]:
-    """The optional finish fields that say something, as keyword arguments.
-
-    A finish passes ``structured_content`` only when the agent got structured
-    content, and ``injection_outcomes`` only when an instruction was admitted
-    for the call, so a recorder written before these fields still records
-    every other call.
-    """
-    fields: dict[str, Any] = {}
-    if structured_content is not None:
-        fields["structured_content"] = structured_content
-    if injection_outcomes:
-        fields["injection_outcomes"] = list(injection_outcomes)
-    return fields
 
 
 RECORD_ATTEMPTS = 3
@@ -195,21 +181,99 @@ class Recorder(Protocol):
         result: str,
         disposition: Disposition,
         error: str | None = None,
-        structured_content: dict[str, Any] | None = None,
-        injection_outcomes: Sequence[InjectionRecord] = (),
     ) -> None:
-        """Finish the call started with ``call_id``, or record it whole when it wasn't started.
-
-        ``structured_content`` is the structured content the agent got with
-        ``result`` (its text), and ``injection_outcomes`` how each admitted
-        injection instruction fared on the call. Both are optional: a caller
-        passes them only when it has them (see :func:`finish_fields`).
-        """
+        """Finish the call started with ``call_id``, or record it whole when it wasn't started."""
         ...
 
 
 CallRecorder = Recorder
 """The earlier name of :class:`Recorder`."""
+
+
+class DetailedRecorder(Recorder, Protocol):
+    """A :class:`Recorder` that also records the parts of a result beyond its text: an optional capability.
+
+    ``finish_call_detailed`` finishes a call as ``finish_call`` does, and also
+    records the structured content the agent got with ``result`` (its text)
+    and how each injection instruction that matched the call fared. A
+    recorder has the capability when :func:`records_details` says so: the
+    HTTP and in-process clients do, and :class:`RetryingRecorder` and
+    :class:`ReportingRecorder` have the capability of the recorder they wrap.
+
+    A recorder without it still records the call, with ``finish_call``
+    (:func:`finish_detailed` falls back to it): the text only. The control
+    plane keeps such a record with ``injection_outcomes`` None, which says the
+    result's other parts and the call's injection outcomes weren't reported,
+    not that there were none; a detailed finish always sends a list, empty
+    when no instruction matched the call.
+    """
+
+    async def finish_call_detailed(
+        self,
+        *,
+        call_id: str,
+        function: str,
+        args: dict[str, Any],
+        result: str,
+        disposition: Disposition,
+        error: str | None = None,
+        structured_content: dict[str, Any] | None,
+        injection_outcomes: Sequence[InjectionRecord],
+    ) -> None:
+        """Finish the call started with ``call_id``, with the structured content and injection outcomes too.
+
+        ``structured_content`` is None when the agent got none.
+        """
+        ...
+
+
+def records_details(recorder: object) -> bool:
+    """Whether ``recorder`` is a :class:`DetailedRecorder`.
+
+    A wrapping recorder says so with its own ``records_details`` attribute,
+    taken from the recorder it wraps; any other recorder is one when it has a
+    ``finish_call_detailed`` method.
+    """
+    declared = getattr(recorder, "records_details", None)
+    if isinstance(declared, bool):
+        return declared
+    return callable(getattr(recorder, "finish_call_detailed", None))
+
+
+async def finish_detailed(
+    recorder: Recorder,
+    *,
+    call_id: str,
+    function: str,
+    args: dict[str, Any],
+    result: str,
+    disposition: Disposition,
+    error: str | None = None,
+    structured_content: dict[str, Any] | None,
+    injection_outcomes: Sequence[InjectionRecord],
+) -> bool:
+    """Finish a call with its details when ``recorder`` records them, else with ``finish_call``: the text only.
+
+    Returns whether the details were recorded. The fallback never fails the
+    finish because of the details: a recorder written before them records
+    the call as it always did.
+    """
+    if records_details(recorder):
+        await cast("DetailedRecorder", recorder).finish_call_detailed(
+            call_id=call_id,
+            function=function,
+            args=args,
+            result=result,
+            disposition=disposition,
+            error=error,
+            structured_content=structured_content,
+            injection_outcomes=injection_outcomes,
+        )
+        return True
+    await recorder.finish_call(
+        call_id=call_id, function=function, args=args, result=result, disposition=disposition, error=error
+    )
+    return False
 
 
 class CaptureReporter(Protocol):
@@ -348,18 +412,42 @@ class RetryingRecorder:
         result: str,
         disposition: Disposition,
         error: str | None = None,
-        structured_content: dict[str, Any] | None = None,
-        injection_outcomes: Sequence[InjectionRecord] = (),
     ) -> None:
         await self._retry(
             lambda: self.recorder.finish_call(
+                call_id=call_id, function=function, args=args, result=result, disposition=disposition, error=error
+            )
+        )
+
+    @property
+    def records_details(self) -> bool:
+        """Whether the wrapped recorder records a finish's details (see :class:`DetailedRecorder`)."""
+        return records_details(self.recorder)
+
+    async def finish_call_detailed(
+        self,
+        *,
+        call_id: str,
+        function: str,
+        args: dict[str, Any],
+        result: str,
+        disposition: Disposition,
+        error: str | None = None,
+        structured_content: dict[str, Any] | None,
+        injection_outcomes: Sequence[InjectionRecord],
+    ) -> None:
+        """Finish the call through the wrapped recorder, with its details when that recorder records them."""
+        await self._retry(
+            lambda: finish_detailed(
+                self.recorder,
                 call_id=call_id,
                 function=function,
                 args=args,
                 result=result,
                 disposition=disposition,
                 error=error,
-                **finish_fields(structured_content, injection_outcomes),
+                structured_content=structured_content,
+                injection_outcomes=injection_outcomes,
             )
         )
 
@@ -371,7 +459,7 @@ class RetryingRecorder:
         report = _reporter(self.recorder)
         await self._retry(lambda: report(call_id=call_id, function=function, phase=phase, reason=reason))
 
-    async def _retry(self, send: Callable[[], Awaitable[None]]) -> None:
+    async def _retry(self, send: Callable[[], Awaitable[object]]) -> None:
         await retry(send, retryable=self._retryable, attempts=self._attempts, backoff_seconds=self._backoff_seconds)
 
 
@@ -409,21 +497,48 @@ class ReportingRecorder:
         result: str,
         disposition: Disposition,
         error: str | None = None,
-        structured_content: dict[str, Any] | None = None,
-        injection_outcomes: Sequence[InjectionRecord] = (),
     ) -> None:
         await self._record(
             "finish",
             call_id,
             function,
             lambda: self.recorder.finish_call(
+                call_id=call_id, function=function, args=args, result=result, disposition=disposition, error=error
+            ),
+        )
+
+    @property
+    def records_details(self) -> bool:
+        """Whether the wrapped recorder records a finish's details (see :class:`DetailedRecorder`)."""
+        return records_details(self.recorder)
+
+    async def finish_call_detailed(
+        self,
+        *,
+        call_id: str,
+        function: str,
+        args: dict[str, Any],
+        result: str,
+        disposition: Disposition,
+        error: str | None = None,
+        structured_content: dict[str, Any] | None,
+        injection_outcomes: Sequence[InjectionRecord],
+    ) -> None:
+        """Finish the call through the wrapped recorder, with its details when that recorder records them."""
+        await self._record(
+            "finish",
+            call_id,
+            function,
+            lambda: finish_detailed(
+                self.recorder,
                 call_id=call_id,
                 function=function,
                 args=args,
                 result=result,
                 disposition=disposition,
                 error=error,
-                **finish_fields(structured_content, injection_outcomes),
+                structured_content=structured_content,
+                injection_outcomes=injection_outcomes,
             ),
         )
 
@@ -431,7 +546,7 @@ class ReportingRecorder:
         await _reporter(self.recorder)(call_id=call_id, function=function, phase=phase, reason=reason)
 
     async def _record(
-        self, phase: CapturePhase, call_id: str, function: str, send: Callable[[], Awaitable[None]]
+        self, phase: CapturePhase, call_id: str, function: str, send: Callable[[], Awaitable[object]]
     ) -> None:
         try:
             await send()
@@ -500,17 +615,38 @@ class ControlPlaneRecorder:
         result: str,
         disposition: Disposition,
         error: str | None = None,
-        structured_content: dict[str, Any] | None = None,
-        injection_outcomes: Sequence[InjectionRecord] = (),
     ) -> None:
         await self._recorder.finish_call(
+            call_id=call_id, function=function, args=args, result=result, disposition=disposition, error=error
+        )
+
+    @property
+    def records_details(self) -> bool:
+        """Whether the wrapped recorder records a finish's details (see :class:`DetailedRecorder`)."""
+        return records_details(self._recorder)
+
+    async def finish_call_detailed(
+        self,
+        *,
+        call_id: str,
+        function: str,
+        args: dict[str, Any],
+        result: str,
+        disposition: Disposition,
+        error: str | None = None,
+        structured_content: dict[str, Any] | None,
+        injection_outcomes: Sequence[InjectionRecord],
+    ) -> None:
+        """Finish the call through the wrapped recorder, with its details when that recorder records them."""
+        await self._recorder.finish_call_detailed(
             call_id=call_id,
             function=function,
             args=args,
             result=result,
             disposition=disposition,
             error=error,
-            **finish_fields(structured_content, injection_outcomes),
+            structured_content=structured_content,
+            injection_outcomes=injection_outcomes,
         )
 
     async def report_capture_failure(self, *, call_id: str, function: str, phase: CapturePhase, reason: str) -> None:

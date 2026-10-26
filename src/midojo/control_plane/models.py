@@ -65,15 +65,17 @@ class FunctionCallBody(FunctionCallStart):
         default=None,
         description=(
             "The structured content the agent got with `result` (its text), exactly as it got it. Optional: None "
-            "when the result had none or the layer doesn't say."
+            "when the result had none or the layer reports the text only."
         ),
     )
-    injection_outcomes: list[CallInjectionOutcome] = Field(
-        default_factory=list,
+    injection_outcomes: list[CallInjectionOutcome] | None = Field(
+        default=None,
         description=(
-            "How each injection instruction the interception layer admitted for the call fared: applied, partial "
-            "(the payload is in `structured_content` only: the text isn't a JSON mirror of it), fallback, "
-            "unmatched, too_large, skipped_occurrence or no_result. Optional: empty when none was admitted."
+            "How each injection instruction that matched the call fared: those the interception layer admitted for "
+            "it (applied, partial: the payload is in `structured_content` only, as the text isn't a JSON mirror of "
+            "it; fallback, unmatched, too_large or no_result) and those whose occurrence rule skipped it "
+            "(skipped_occurrence). Empty when none matched. Optional: left out (None), the record carries the "
+            "result's text only and says nothing about its structured content or injections."
         ),
     )
 
