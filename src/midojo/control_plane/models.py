@@ -135,7 +135,13 @@ class FunctionCallResponse(FunctionCallBody):
     model_config = ConfigDict(from_attributes=True)
 
     call_id: str = Field(description="The client's call_id, or a UUID the server assigned when the client sent none.")
-    result: str | None = Field(default=None, description="What the agent saw. None while the call is unfinished.")
+    result: str | None = Field(
+        default=None,
+        description=(
+            "What the interception layer returned to the agent, recorded before it was returned: not proof the "
+            "agent received it. None while the call is unfinished."
+        ),
+    )
     complete: bool = Field(
         default=True, description="False while the call is started but not finished: it has no result yet."
     )

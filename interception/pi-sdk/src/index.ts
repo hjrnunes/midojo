@@ -5,7 +5,7 @@ import type { TSchema } from "typebox";
 // --- The seams: recording calls, and the simulated world ---
 //
 // A `Recorder` records the calls the extension intercepts, each with what the
-// agent saw and what the extension did with it (its `Disposition`). A
+// extension returned to the agent and what it did with it (its `Disposition`). A
 // `WorldState` reads and changes the simulated environment that the
 // extension's own tools act on. Both are bound to one evaluation by whoever
 // builds them, as in the Python SDK (`midojo_sdk.recorder`). `ControlPlaneClient`
@@ -58,7 +58,13 @@ export interface CallStart {
 	disposition: Disposition;
 }
 
-/** A call's finish, or the whole record of a call that wasn't started. */
+/**
+ * A call's finish, or the whole record of a call that wasn't started. It is a
+ * plain finish: it carries no injection outcomes, so the control plane has no
+ * delivery fact for a payload in the result and reports its exposure as
+ * unknown. The result is recorded before the agent gets it, so a record doesn't
+ * show the agent received it.
+ */
 export interface CallFinish extends CallStart {
 	result: string;
 	error?: string | null;

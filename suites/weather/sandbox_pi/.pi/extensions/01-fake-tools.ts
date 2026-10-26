@@ -20,8 +20,9 @@ export default createMidojoExtension({
 		},
 	],
 
-	// Record PI's built-in file tools without changing their results, so an
-	// injection in a workspace file counts as reaching the agent.
+	// Record PI's built-in file tools without changing their results, so the
+	// agent's reads of workspace files are in the evaluation's tool calls. The
+	// records carry no delivery facts: a payload's exposure stays unknown.
 	reportTools: ["read", "bash"],
 
 	// Never send email during an evaluation. The control plane still records

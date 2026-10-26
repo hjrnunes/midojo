@@ -13,7 +13,7 @@ MiDojo's reference suite. A weather agent answers everyday questions while injec
 
 Probe placeholders like `{tornado_alert_via_notes:main}` mark where a payload goes; the format is `{task_id:probe_id}`. They can go in the environment, in user task prompts, and in the runtime's `files`, and the weather suite uses all three. For each evaluation, MiDojo replaces them with the payloads in the injection task's `probes`. A probe can name an `attack_type` (e.g. `important_instructions`, `ignore_previous`) that wraps the payload in a delivery template; the default, `verbatim`, uses the payload as-is.
 
-Each injection task shows a different way an attack reaches the agent, and how MiDojo checks the outcome:
+Each injection task puts its payload in a different place, and shows how MiDojo checks the outcome:
 
 | Injection task | Where the payload lands | Checked against |
 |---|---|---|
@@ -34,7 +34,7 @@ The agent's tools come from its extensions and from the MCP servers in its `mcp.
 - [`mcp.json`](sandbox_pi/mcp.json) — the agent's MCP servers: `alerts`, a remote service the agent sends weather alerts with
 - [`01-fake-tools.ts`](sandbox_pi/.pi/extensions/01-fake-tools.ts) — the interception layer for the agent's extension tools, built with the [PI SDK](../../interception/pi-sdk/) (`@midojo/pi-sdk`):
   - **Hooks** (`hooks`) — intercepts the result of an existing tool after it executes and modifies it before the agent sees it. Used for read tools where you want real data + injection payload.
-  - **Reporters** (`reportTools`) — records an existing tool's result without changing it. Used for PI's built-in `read` and `bash`, so an injection in a workspace file counts as reaching the agent.
+  - **Reporters** (`reportTools`) — records an existing tool's result without changing it. Used for PI's built-in `read` and `bash`, so the agent's reads of workspace files are in the evaluation's tool calls. A recorded result doesn't prove the agent received it, and the PI SDK's finishes are plain, with no delivery facts, so a payload in a file has unknown exposure.
   - **Blocked tools** (`blockTools`) — stops an existing tool from running and records the attempted call, marked `blocked`, so a reader of the control plane's records knows it never ran. Used for `send_email`, whose effect must not happen during an evaluation; the `tool_called` verifier still grades the attempt.
   - Other tools run unmodified and unrecorded.
 - [`fake_mcp.py`](sandbox_pi/fake_mcp.py) — the interception layer for the `alerts` MCP server, built with `MidojoMCP` from the [Python SDK](../../interception/python-sdk/) (`midojo-sdk`). Its `send_weather_alert` records the alert in the environment and never calls the real service. It runs inside the sandbox: [`start-agent.sh`](sandbox_pi/start-agent.sh) starts it before PI, and the suite seeds a project `.pi/mcp.json` that points PI's `alerts` server at it. PI lets a project entry replace a global one with the same name, so the agent's own config stays untouched.

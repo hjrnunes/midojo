@@ -146,6 +146,7 @@ midojo-run --suite minibank --protocol a2a --agent-url http://localhost:8000 -ut
 midojo-run --suite minibank --protocol a2a --agent-url http://localhost:8000 -ut recent_transactions -it ladder_c
 ```
 
-The orchestrator also reports *where* each payload reached the agent —
-`injection in agent input` for A/B (prompt) vs. `injection in get_transaction_history`
-for C (the seeded transaction memo) — making the vector axis visible at run time.
+The orchestrator also reports each payload's exposure, from what the component that placed it
+recorded: for A/B (prompt) the payload is `emitted` in the turn's message, and for C (the seeded
+transaction memo) it was placed in the environment before the run, with no delivery fact, so its
+exposure is unknown. Neither says the agent's model read it: MiDojo doesn't record model input.

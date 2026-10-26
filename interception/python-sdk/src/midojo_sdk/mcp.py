@@ -683,7 +683,7 @@ async def _finish_forwarded(
 
 
 def _text(content: Sequence[ContentBlock]) -> str:
-    """What the agent saw, as one string: text blocks as sent, other blocks as their wire JSON."""
+    """What the agent is sent, as one string: text blocks as sent, other blocks as their wire JSON."""
     return "\n".join(
         block.text if isinstance(block, TextContent) else block.model_dump_json(by_alias=True, exclude_none=True)
         for block in content

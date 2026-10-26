@@ -1,7 +1,7 @@
 """The two seams an interception layer talks to: recording calls, and the simulated world.
 
 A :class:`Recorder` records the requests the layer intercepts: each call the
-agent made, what the agent saw, and what the layer did with it (its
+agent made, what the layer returned to it, and what the layer did with it (its
 :data:`Disposition`). A :class:`WorldState` reads and changes the simulated
 environment that tools defined by the layer act on. Both are bound to one
 evaluation by whoever builds them, so tools never carry or choose an
