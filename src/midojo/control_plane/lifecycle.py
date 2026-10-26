@@ -20,7 +20,8 @@ The rules kept here:
 
 * sessions: an agent's event is admitted only with the evaluation's session
   (matching token hash, not expired), and only for reads, calls and the
-  environment;
+  environment; rotating a session gives it a new token hash, keeping its
+  expiry, at any stage, unless it was revoked or has expired;
 * call-ID idempotency and conflicts: one record per ``call_id``; a replay with
   the same body returns the stored record, at any stage, and another body is a
   conflict until the seal, and a late fact after it;
@@ -120,6 +121,8 @@ class Rejection(enum.StrEnum):
     UNKNOWN_RUN = "unknown_run"
     UNKNOWN_EVALUATION = "unknown_evaluation"
     UNKNOWN_TASK = "unknown_task"
+    # An idempotency key a run already answered another request under.
+    IDEMPOTENCY_CONFLICT = "idempotency_conflict"
     # Sessions.
     INVALID_SESSION = "invalid_session"
     SESSION_CLOSED = "session_closed"
@@ -230,6 +233,17 @@ class Read:
 class OpenSession:
     token_hash: str
     expires_at: float
+
+
+@dataclass(frozen=True)
+class RotateSession:
+    """Replace the live session's token hash with ``token_hash``, keeping its expiry: the old token stops resolving.
+
+    ``now`` (epoch seconds) is when it's asked for: an expired session isn't rotated.
+    """
+
+    token_hash: str
+    now: float
 
 
 @dataclass(frozen=True)
@@ -361,6 +375,7 @@ class RecordGrade:
 Event = (
     Read
     | OpenSession
+    | RotateSession
     | CloseSession
     | StartCall
     | FinishCall
@@ -401,7 +416,10 @@ def transition(evaluation: Evaluation, authority: Authority, event: Event) -> Ou
     except Exception as error:
         if (refusal := _held_values(event)) is None:
             raise
-        kind, what, _ = refusal
+        kind, what, values = refusal
+        # Too deep to copy: the check stops at the nesting limit, so it finds that on the caller's event uncopied.
+        if isinstance(error, RecursionError) and (problem := unsupported_value(values())) is not None:
+            return Rejected(kind, f"The {what} can't be kept: {problem}")
         return Rejected(kind, f"The {what} can't be kept: it can't be copied ({type(error).__name__})")
     # Checked on the copy the rules decide on, never on the caller's event, which may still change.
     if (unsupported := _unsupported(event)) is not None:
@@ -412,6 +430,8 @@ def transition(evaluation: Evaluation, authority: Authority, event: Event) -> Ou
             return Accepted(evaluation, evaluation)
         case OpenSession():
             return _open_session(evaluation, event)
+        case RotateSession():
+            return _rotate_session(evaluation, event)
         case CloseSession():
             effects = (SessionUnbound(evaluation.session.token_hash),) if evaluation.session else ()
             return Accepted(_replace(evaluation, session=None), None, effects)
@@ -547,6 +567,20 @@ def _open_session(evaluation: Evaluation, event: OpenSession) -> Outcome:
     return Accepted(next_value, next_value.session, effects)
 
 
+def _rotate_session(evaluation: Evaluation, event: RotateSession) -> Outcome:
+    # At any stage: the old token stops resolving, and the new one is held to the stage's rules (a write after
+    # closure is a late fact), so nothing else about the evaluation changes.
+    # A revoked session stays revoked: rotating never opens one.
+    if (session := evaluation.session) is None:
+        return Rejected(Rejection.SESSION_CLOSED, "The evaluation's session was revoked")
+    # Nor does it revive an expired one, or extend its expiry.
+    if session.expires_at <= event.now:
+        return Rejected(Rejection.SESSION_CLOSED, "The evaluation's session has expired")
+    next_value = _replace(evaluation, session=Session(event.token_hash, session.expires_at))
+    effects = (SessionUnbound(session.token_hash), SessionBound(event.token_hash))
+    return Accepted(next_value, next_value.session, effects)
+
+
 # --- late facts ---
 
 
@@ -591,6 +625,17 @@ def _call_payload(req: BaseModel) -> dict[str, Any]:
     call is kept whatever bytes its args hold.
     """
     return to_jsonable_python(_as_text(req.model_dump()))
+
+
+def json_data(model: BaseModel) -> Any:
+    """``model`` as JSON-compatible data, as ``model_dump(mode="json")`` gives it, whatever bytes it holds.
+
+    ``model_dump(mode="json")`` raises for bytes that aren't UTF-8; here their
+    undecodable bytes are escaped (``\\xff``) instead, and non-finite floats
+    become null, as there. Such a value doesn't come back as it was, so a
+    snapshot rebuilt from it fails its digest check.
+    """
+    return to_jsonable_python(_as_text(model.model_dump()), inf_nan_mode="null")
 
 
 def _as_text(value: Any) -> Any:

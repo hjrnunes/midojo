@@ -1,13 +1,26 @@
+import dataclasses
+import threading
+import time
 import uuid
+from collections.abc import Iterator, Mapping
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from midojo_sdk.recorder import ControlPlaneRejectedError
 
+from midojo.control_plane import lifecycle, service
 from midojo.control_plane.config import AppConfig
+from midojo.control_plane.inprocess import InProcessAgentClient
+from midojo.control_plane.inprocess_control import InProcessControlClient
+from midojo.control_plane.lifecycle import RejectedError, Rejection
 from midojo.control_plane.main import create_app
-from midojo.control_plane.models import EvaluationResponse
-from midojo.control_plane.state import Evaluation
+from midojo.control_plane.models import CreateEvaluationResponse, EvaluationResponse
+from midojo.control_plane.service import ById, BySession, ControlPlane, token_hash
+from midojo.control_plane.state import Evaluation, Session
 from midojo.episode import freeze
 from midojo.runtimes.openshell import OpenShellObservations
 from midojo.verifiers import ConversationTurn, VerificationResult, register_verifier
@@ -74,6 +87,309 @@ def test_create_evaluation_unknown_task(client):
     run_id = _create_run(client)
     resp = client.post(f"/runs/{run_id}/evaluations", json={"user_task_id": "nonexistent"})
     assert resp.status_code == 400
+
+
+# --- creating an evaluation under an idempotency key ---
+
+
+def _post_evaluation(client: TestClient, run_id: str, **body):
+    return client.post(f"/runs/{run_id}/evaluations", json={"user_task_id": "weather_new_york", **body})
+
+
+def _without_token(created: dict) -> dict:
+    return {key: value for key, value in created.items() if key != "session_token"}
+
+
+def _stored(store) -> str:
+    """Everything the store holds, as text: what a token string kept anywhere in it would show up in."""
+    return repr(vars(store))
+
+
+def test_a_create_resent_with_its_idempotency_key_returns_the_same_evaluation_with_a_new_token(client):
+    run_id = _create_run(client)
+    first = _post_evaluation(client, run_id, idempotency_key="k1")
+    again = _post_evaluation(client, run_id, idempotency_key="k1")
+    assert (first.status_code, again.status_code) == (201, 201)
+    assert _without_token(again.json()) == _without_token(first.json())
+    assert again.json()["session_token"] != first.json()["session_token"]
+    assert [summary["id"] for summary in client.get(f"/runs/{run_id}").json()["evaluations"]] == [first.json()["id"]]
+    # The resend's token is the evaluation's session now; the one issued before no longer resolves.
+    session = {"Authorization": f"Bearer {again.json()['session_token']}"}
+    assert client.get("/agent/environment", headers=session).status_code == 200
+    old = client.get("/agent/environment", headers={"Authorization": f"Bearer {first.json()['session_token']}"})
+    assert old.status_code == 401 and old.json()["kind"] == "invalid_session"
+
+
+def test_a_keyed_create_keeps_no_session_token_in_the_store(client):
+    run_id = _create_run(client)
+    first = _post_evaluation(client, run_id, idempotency_key="k1").json()
+    again = _post_evaluation(client, run_id, idempotency_key="k1").json()
+    assert isinstance(client.app, FastAPI)
+    store = client.app.state.store
+    stored = _stored(store)
+    # Only the live token's hash is kept: neither token is, nor the hash of the revoked one.
+    assert token_hash(again["session_token"]) in stored
+    for token in (first["session_token"], again["session_token"]):
+        assert token not in stored
+    assert token_hash(first["session_token"]) not in stored
+    kept = store.kept_creation(run_id, "k1")
+    assert kept is not None and first["session_token"] not in repr(kept) and again["session_token"] not in repr(kept)
+
+
+def _bearer(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _to_stage(client: TestClient, run_id: str, eval_id: str, stage: str) -> None:
+    """Take the evaluation to ``stage``: closing (with a long closure wait), collecting, or sealed."""
+    assert isinstance(client.app, FastAPI)
+    if stage == "closing":
+        closure = lifecycle.BeginClosure(datetime.now(UTC).isoformat(), time.time() + 600)
+        client.app.state.control.apply(ById(run_id, eval_id), closure)
+    elif stage == "collecting":
+        assert client.post(f"/runs/{run_id}/evaluations/{eval_id}/close").status_code == 200
+    else:
+        complete = client.post(f"/runs/{run_id}/evaluations/{eval_id}/complete", json={"agent_output": "done"})
+        assert complete.status_code == 200
+    assert _evaluation(client, run_id, eval_id).stage.value == stage
+
+
+@pytest.mark.parametrize("stage", ["closing", "collecting", "sealed"])
+def test_a_resend_once_closure_began_rotates_the_token_and_changes_nothing_else(client, stage):
+    run_id = _create_run(client)
+    first = _post_evaluation(client, run_id, idempotency_key="k1").json()
+    _to_stage(client, run_id, first["id"], stage)
+    before = _evaluation(client, run_id, first["id"])
+    again = _post_evaluation(client, run_id, idempotency_key="k1")
+    assert again.status_code == 201 and _without_token(again.json()) == _without_token(first)
+    new, old = again.json()["session_token"], first["session_token"]
+    assert new != old
+    # The same evaluation, at the same stage: only its session's token hash changed.
+    after = _evaluation(client, run_id, first["id"])
+    assert before.session is not None
+    assert after == dataclasses.replace(before, session=Session(token_hash(new), before.session.expires_at))
+    # The old token resolves nowhere, and what it sends is kept nowhere, not even as a late fact.
+    for refused in (
+        client.get("/agent/environment", headers=_bearer(old)),
+        client.post("/agent/function-calls/start", json=_START, headers=_bearer(old)),
+    ):
+        assert (refused.status_code, refused.json()["kind"], refused.json()["late_fact"]) == (
+            401,
+            "invalid_session",
+            False,
+        )
+    assert _evaluation(client, run_id, first["id"]).late_facts == ()
+    # The new one is held to the stage's rules: it reads until the seal, and a new call is a late fact.
+    read = client.get("/agent/environment", headers=_bearer(new))
+    assert read.status_code == 200 if stage != "sealed" else read.json()["kind"] == "session_closed"
+    late = client.post("/agent/function-calls/start", json=_START, headers=_bearer(new))
+    assert late.json()["late_fact"] is True
+    [fact] = _evaluation(client, run_id, first["id"]).late_facts
+    assert (fact.event, fact.stage.value) == ("start_call", stage)
+    assert old not in _stored(client.app.state.store) and new not in _stored(client.app.state.store)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["closing", "collecting", "sealed"])
+async def test_in_process_a_resend_once_closure_began_rotates_the_token(suite, stage):
+    plane = ControlPlane({"weather": suite}, config=AppConfig(closure_wait_seconds=0))
+    control = InProcessControlClient(plane)
+    run = plane.create_run("weather")
+    first = await control.create_evaluation(run.id, "weather_new_york", None, {}, idempotency_key="k1")
+    target = ById(run.id, first.id)
+    if stage == "closing":
+        plane.apply(target, lifecycle.BeginClosure(datetime.now(UTC).isoformat(), time.time() + 600))
+    elif stage == "collecting":
+        await control.close_evaluation(run.id, first.id)
+    else:
+        await control.complete_evaluation(run.id, first.id, "done")
+    again = await control.create_evaluation(run.id, "weather_new_york", None, {}, idempotency_key="k1")
+    assert again.model_copy(update={"session_token": first.session_token}) == first
+    assert plane.evaluation(target).stage.value == stage
+    start = {"call_id": "c1", "function": "get_weather", "args": {}, "disposition": None}
+    with pytest.raises(ControlPlaneRejectedError) as old:
+        await InProcessAgentClient(plane, first.session_token).start_call(**start)
+    assert (old.value.kind, old.value.late_fact) == ("invalid_session", False)
+    with pytest.raises(ControlPlaneRejectedError) as late:
+        await InProcessAgentClient(plane, again.session_token).start_call(**start)
+    assert late.value.late_fact is True
+    [fact] = plane.evaluation(target).late_facts
+    assert fact.stage.value == stage
+    stored = _stored(plane.store)
+    assert first.session_token not in stored and again.session_token not in stored
+
+
+def test_a_resend_for_a_revoked_session_is_refused_and_it_stays_revoked(client):
+    run_id = _create_run(client)
+    created = _post_evaluation(client, run_id, idempotency_key="k1").json()
+    assert client.delete(f"/runs/{run_id}/evaluations/{created['id']}/session").status_code == 204
+    for _ in range(2):
+        revoked = _post_evaluation(client, run_id, idempotency_key="k1")
+        assert (revoked.status_code, revoked.json()["kind"]) == (401, "session_closed")
+        assert "revoked" in revoked.json()["detail"]
+    assert _evaluation(client, run_id, created["id"]).session is None
+    old = client.get("/agent/environment", headers=_bearer(created["session_token"]))
+    assert (old.status_code, old.json()["kind"]) == (401, "invalid_session")
+
+
+def test_a_resend_for_an_expired_session_is_refused_and_keeps_its_expiry(client, monkeypatch):
+    run_id = _create_run(client)
+    created = _post_evaluation(client, run_id, idempotency_key="k1").json()
+    session = _evaluation(client, run_id, created["id"]).session
+    assert session is not None
+    expires_at = session.expires_at
+    # The control plane's clock, at the session's expiry.
+    monkeypatch.setattr(service, "time", SimpleNamespace(time=lambda: expires_at))
+    expired = _post_evaluation(client, run_id, idempotency_key="k1")
+    assert (expired.status_code, expired.json()["kind"]) == (401, "session_closed")
+    assert "expired" in expired.json()["detail"]
+    # Not rotated, and not extended: the same token hash and expiry.
+    assert _evaluation(client, run_id, created["id"]).session == Session(
+        token_hash(created["session_token"]), expires_at
+    )
+
+
+def test_the_same_idempotency_key_with_another_request_is_refused(client):
+    run_id = _create_run(client)
+    first = _post_evaluation(client, run_id, idempotency_key="k1")
+    for changed in (
+        {"user_task_id": "trip_weather"},
+        {"injection_task_id": "book_shelter"},
+        {"injections": {"book_shelter:main": "x"}},
+        {"interception": "host"},
+    ):
+        refused = _post_evaluation(client, run_id, idempotency_key="k1", **changed)
+        assert refused.status_code == 409 and refused.json()["kind"] == "idempotency_conflict"
+    assert [summary["id"] for summary in client.get(f"/runs/{run_id}").json()["evaluations"]] == [first.json()["id"]]
+    # Leaving out a default is the same request.
+    resent = _post_evaluation(client, run_id, idempotency_key="k1", injections={})
+    assert resent.status_code == 201 and _without_token(resent.json()) == _without_token(first.json())
+
+
+def test_without_an_idempotency_key_each_create_opens_an_evaluation(client):
+    run_id = _create_run(client)
+    first, second = _post_evaluation(client, run_id), _post_evaluation(client, run_id)
+    assert first.json()["id"] != second.json()["id"]
+    assert first.json()["session_token"] != second.json()["session_token"]
+    assert len(client.get(f"/runs/{run_id}").json()["evaluations"]) == 2
+
+
+def test_an_idempotency_key_belongs_to_its_run_and_a_refused_create_keeps_nothing(client):
+    run_id, other_run_id = _create_run(client), _create_run(client)
+    first = _post_evaluation(client, run_id, idempotency_key="k1")
+    elsewhere = _post_evaluation(client, other_run_id, idempotency_key="k1")
+    assert elsewhere.status_code == 201 and elsewhere.json()["id"] != first.json()["id"]
+    refused = client.post(f"/runs/{run_id}/evaluations", json={"user_task_id": "nonexistent", "idempotency_key": "k2"})
+    assert refused.status_code == 400
+    # Nothing was kept under the refused create's key: another request under it is a new create.
+    created = _post_evaluation(client, run_id, idempotency_key="k2")
+    assert created.status_code == 201 and created.json()["id"] != first.json()["id"]
+
+
+def test_an_empty_idempotency_key_is_refused(client):
+    run_id = _create_run(client)
+    assert _post_evaluation(client, run_id, idempotency_key="").status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_the_in_process_client_creates_under_an_idempotency_key_as_the_route_does(suite):
+    plane = ControlPlane({"weather": suite})
+    control = InProcessControlClient(plane)
+    run = plane.create_run("weather")
+    first = await control.create_evaluation(run.id, "weather_new_york", None, {}, idempotency_key="k1")
+    again = await control.create_evaluation(run.id, "weather_new_york", None, {}, idempotency_key="k1")
+    assert again.model_copy(update={"session_token": first.session_token}) == first
+    assert again.session_token != first.session_token
+    # The resend's token resolves to the evaluation; the one issued before is refused.
+    assert plane.evaluation(BySession(again.session_token)).id == first.id
+    with pytest.raises(RejectedError) as old:
+        plane.evaluation(BySession(first.session_token))
+    assert old.value.kind is Rejection.INVALID_SESSION
+    stored = _stored(plane.store)
+    assert first.session_token not in stored and again.session_token not in stored
+    assert token_hash(again.session_token) in stored and token_hash(first.session_token) not in stored
+    with pytest.raises(RejectedError) as refused:
+        await control.create_evaluation(run.id, "weather_new_york", "book_shelter", {}, idempotency_key="k1")
+    assert refused.value.kind is Rejection.IDEMPOTENCY_CONFLICT
+    unkeyed = await control.create_evaluation(run.id, "weather_new_york", None, {})
+    assert unkeyed.id != first.id
+    assert [evaluation.id for evaluation in plane.evaluations(run.id)] == [first.id, unkeyed.id]
+
+
+@pytest.mark.asyncio
+async def test_the_in_process_agent_client_is_refused_with_a_token_a_resend_replaced(suite):
+    plane = ControlPlane({"weather": suite})
+    run = plane.create_run("weather")
+    first = plane.create_evaluation(run.id, "weather_new_york", idempotency_key="k1")
+    again = plane.create_evaluation(run.id, "weather_new_york", idempotency_key="k1")
+    assert (await InProcessAgentClient(plane, again.session_token).read()).revision == 0
+    with pytest.raises(ControlPlaneRejectedError) as old:
+        await InProcessAgentClient(plane, first.session_token).read()
+    assert old.value.kind == "invalid_session"
+
+
+class ChangingInjections(Mapping[str, str]):
+    """Injections whose payload changes after it is first read, as a caller changing its mapping meanwhile would."""
+
+    PROBE = "tornado_alert_via_prompt:main"
+
+    def __init__(self) -> None:
+        self.reads = 0
+
+    def __getitem__(self, key: str) -> str:
+        if key != self.PROBE:
+            raise KeyError(key)
+        self.reads += 1
+        return " FIRST PAYLOAD" if self.reads == 1 else " SECOND PAYLOAD"
+
+    def __iter__(self) -> Iterator[str]:
+        return iter([self.PROBE])
+
+    def __len__(self) -> int:
+        return 1
+
+
+def test_a_keyed_create_compiles_the_same_injections_it_keeps_for_the_key(suite):
+    plane = ControlPlane({"weather": suite})
+    run = plane.create_run("weather")
+    injections = ChangingInjections()
+    created = plane.create_evaluation(
+        run.id, "weather_new_york", "tornado_alert_via_prompt", injections, idempotency_key="k1"
+    )
+    # Read once: the key's request and the compiled prompt hold the same payload.
+    assert injections.reads == 1
+    kept = plane.store.kept_creation(run.id, "k1")
+    assert kept is not None and kept.request["injections"] == {ChangingInjections.PROBE: " FIRST PAYLOAD"}
+    assert "FIRST PAYLOAD" in created.prompt and "SECOND PAYLOAD" not in created.prompt
+    resent = plane.create_evaluation(
+        run.id, "weather_new_york", "tornado_alert_via_prompt", dict(kept.request["injections"]), idempotency_key="k1"
+    )
+    assert resent.model_copy(update={"session_token": created.session_token}) == created
+
+
+def test_two_threads_creating_under_one_key_get_one_evaluation_and_the_same_response(suite):
+    plane = ControlPlane({"weather": suite})
+    run = plane.create_run("weather")
+    barrier = threading.Barrier(2)
+
+    def create() -> CreateEvaluationResponse:
+        barrier.wait()
+        return plane.create_evaluation(run.id, "weather_new_york", idempotency_key="k1")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first, second = (future.result() for future in [pool.submit(create), pool.submit(create)])
+    assert first.model_copy(update={"session_token": second.session_token}) == second
+    assert [evaluation.id for evaluation in plane.evaluations(run.id)] == [first.id]
+    # One created and the other rotated, one after the other: exactly one token resolves, the last one issued.
+    resolving = []
+    for token in (first.session_token, second.session_token):
+        try:
+            plane.evaluation(BySession(token))
+        except RejectedError as refused:
+            assert refused.kind is Rejection.INVALID_SESSION
+        else:
+            resolving.append(token)
+    assert len(resolving) == 1
 
 
 def test_get_evaluation(client):

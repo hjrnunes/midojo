@@ -23,6 +23,7 @@ import threading
 import uuid
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
+from typing import Any
 
 import httpx
 import pydantic
@@ -35,7 +36,7 @@ from midojo_sdk.recorder import ControlPlaneRejectedError, RejectionKind
 
 import midojo
 from midojo.control_plane import lifecycle
-from midojo.control_plane.client import ControlPlaneClient
+from midojo.control_plane.client import ControlPlaneClient, UnreadableResponseError
 from midojo.control_plane.config import AppConfig
 from midojo.control_plane.inprocess_control import InProcessControlClient
 from midojo.control_plane.lifecycle import (
@@ -49,15 +50,15 @@ from midojo.control_plane.lifecycle import (
 )
 from midojo.control_plane.main import create_app
 from midojo.control_plane.models import CreateFunctionCallRecord, CreateFunctionCallStart
-from midojo.control_plane.service import ById, ControlPlane
+from midojo.control_plane.service import ById, BySession, ControlPlane
 from midojo.control_plane.state import Stage, snapshot_digest, unsupported_value
-from midojo.episode import Episode
+from midojo.episode import MAX_NESTING_DEPTH, Episode
 from midojo.episode_context import AgentBinding, EpisodeContext, _refused, open_episode
 from midojo.interception_host import HostInterception, HostInterceptor
 from midojo.runtimes import ResettableRuntime, UnmanagedRuntime
 from midojo.runtimes.openshell import OpenShellObservations
 from midojo.tool_endpoint import HOST_MODE_WITHHELD_ENV, ToolEndpoint
-from midojo.types import FunctionCallRecord
+from midojo.types import Environment, FunctionCallRecord
 from tests.fixtures.scripted_target import target as scripted_target
 from tests.fixtures.scripted_target.upstream import scripted_upstream
 
@@ -256,6 +257,32 @@ def test_a_snapshot_is_refused_before_the_seal(suite):
     assert refused_in_process.value.kind is Rejection.NOT_SEALED
     response = TestClient(app).get(f"/runs/{run.id}/evaluations/{evaluation.id}/snapshot")
     assert (response.status_code, response.json()["kind"]) == (400, "not_sealed")
+
+
+@pytest.mark.asyncio
+async def test_a_snapshot_holding_bytes_that_arent_utf8_is_served_escaped_and_refused_on_its_digest(suite):
+    app = create_app({"weather": suite}, config=AppConfig(closure_wait_seconds=0))
+    plane: ControlPlane = app.state.control
+    run = plane.create_run("weather")
+    evaluation = plane.create_evaluation(run.id, "weather_new_york")
+    args = {"raw": b"\xff\x00", "nested": [bytearray(b"\xfe")], "text": b"rain"}
+    plane.finish_call(
+        ById(run.id, evaluation.id), CreateFunctionCallRecord(call_id="c", function="f", args=args, result="ok")
+    )
+    sealed = await plane.complete(run.id, evaluation.id, "done")
+    assert sealed.function_calls[0].args == args
+    # The route serves it, undecodable bytes escaped as in a late fact's payload, rather than failing.
+    response = TestClient(app).get(f"/runs/{run.id}/evaluations/{evaluation.id}/snapshot")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["snapshot_id"] == sealed.snapshot_id
+    assert body["function_calls"][0]["args"] == {"raw": "\\xff\x00", "nested": ["\\xfe"], "text": "rain"}
+    # Escaped text isn't the bytes that were sealed: the rebuilt snapshot fails its digest check.
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app)) as http:
+        control = ControlPlaneClient("http://control", http=http)
+        with pytest.raises(ValueError, match="didn't survive the round trip"):
+            await control.snapshot(run.id, evaluation.id, environment_type=suite.environment_type)
+    assert plane.snapshot(run.id, evaluation.id) is sealed
 
 
 def test_a_binding_is_exactly_one_of_a_session_and_a_tool_endpoint():
@@ -681,6 +708,316 @@ async def counted_seals(suite, over: str):
         yield plane, ep, outputs
 
 
+class LostCreateTransport(httpx.AsyncBaseTransport):
+    """The control plane's app, except that the first ``lost`` creates are applied and their responses lost."""
+
+    def __init__(self, app, lost: int) -> None:
+        self.app, self.lost, self.creates, self.tokens = httpx.ASGITransport(app), lost, [], []
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        response = await self.app.handle_async_request(request)
+        if request.method == "POST" and request.url.path.endswith("/evaluations"):
+            self.creates.append(json.loads(request.content))
+            # The token each create's response carried, lost or not.
+            self.tokens.append(json.loads(await response.aread()).get("session_token"))
+            if len(self.creates) <= self.lost:
+                raise httpx.ReadError("the response was lost", request=request)
+        return response
+
+
+@pytest.mark.asyncio
+async def test_a_create_whose_response_is_lost_is_resent_once_and_opens_one_evaluation(suite):
+    app = create_app({"weather": suite}, config=AppConfig(closure_wait_seconds=0))
+    plane: ControlPlane = app.state.control
+    run = plane.create_run("weather")
+    transport = LostCreateTransport(app, lost=1)
+    async with httpx.AsyncClient(transport=transport) as http:
+        control = ControlPlaneClient("http://control", http=http)
+        episode = suite.episode("weather_new_york")
+        async with open_episode(episode, runtime=RecordingRuntime(), control=control, run_id=run.id) as ep:
+            await ep.turn("weather?", _reply("rain"))
+    # The resend carried the same key, and was answered with the evaluation the lost create opened.
+    first, resent = transport.creates
+    assert first == resent and first["idempotency_key"]
+    [evaluation] = plane.evaluations(run.id)
+    assert ep.evaluation_id == evaluation.id and not ep.interrupted
+    assert ep.sealed.agent_output == "rain"
+
+
+@pytest.mark.asyncio
+async def test_after_a_lost_create_the_context_holds_the_token_the_resend_returned(suite):
+    app = create_app({"weather": suite}, config=AppConfig(closure_wait_seconds=0))
+    plane: ControlPlane = app.state.control
+    run = plane.create_run("weather")
+    transport = LostCreateTransport(app, lost=1)
+    runtime = RecordingRuntime()
+    async with httpx.AsyncClient(transport=transport) as http:
+        control = ControlPlaneClient("http://control", http=http)
+        async with open_episode(
+            suite.episode("weather_new_york"), runtime=runtime, control=control, run_id=run.id
+        ) as ep:
+            lost, received = transport.tokens
+            # The resend rotated the session: the context and the runtime got the token it received, which
+            # resolves, and the lost response's token doesn't.
+            assert lost != received and ep.binding.session_token == received
+            assert runtime.setups[0]["session_token"] == received
+            assert plane.evaluation(BySession(received)).id == ep.evaluation_id
+            with pytest.raises(RejectedError) as refused:
+                plane.evaluation(BySession(lost))
+            assert refused.value.kind is Rejection.INVALID_SESSION
+            await ep.turn("weather?", _reply("rain"))
+    assert not ep.interrupted and ep.sealed.agent_output == "rain"
+
+
+@pytest.mark.asyncio
+async def test_in_process_after_a_lost_create_the_context_holds_the_token_the_resend_returned(suite):
+    plane = ControlPlane({"weather": suite}, config=AppConfig(closure_wait_seconds=0))
+    run = plane.create_run("weather")
+    control = InProcessControlClient(plane)
+    real, received = control.create_evaluation, []
+
+    async def losing_the_first(*args, **kwargs):
+        created = await real(*args, **kwargs)
+        received.append(created.session_token)
+        if len(received) == 1:
+            raise ConnectionError("the response was lost")
+        return created
+
+    control.create_evaluation = losing_the_first  # type: ignore[method-assign]
+    async with open_episode(
+        suite.episode("weather_new_york"), runtime=RecordingRuntime(), control=control, run_id=run.id
+    ) as ep:
+        lost, resent = received
+        assert ep.binding.session_token == resent != lost
+        assert plane.evaluation(BySession(resent)).id == ep.evaluation_id
+        with pytest.raises(RejectedError) as refused:
+            plane.evaluation(BySession(lost))
+        assert refused.value.kind is Rejection.INVALID_SESSION
+        await ep.turn("weather?", _reply("rain"))
+    assert [evaluation.id for evaluation in plane.evaluations(run.id)] == [ep.evaluation_id]
+    assert not ep.interrupted and ep.sealed.agent_output == "rain"
+
+
+@pytest.mark.asyncio
+async def test_a_create_lost_twice_is_raised_and_a_refused_one_is_never_resent(suite):
+    app = create_app({"weather": suite}, config=AppConfig(closure_wait_seconds=0))
+    plane: ControlPlane = app.state.control
+    run = plane.create_run("weather")
+    transport = LostCreateTransport(app, lost=2)
+    async with httpx.AsyncClient(transport=transport) as http:
+        control = ControlPlaneClient("http://control", http=http)
+        with pytest.raises(httpx.ReadError):
+            async with open_episode(
+                suite.episode("weather_new_york"), runtime=RecordingRuntime(), control=control, run_id=run.id
+            ):
+                raise AssertionError("never entered")
+    # Sent twice under one key: the control plane opened one evaluation, which no one learned of.
+    assert len(transport.creates) == 2 and transport.creates[0] == transport.creates[1]
+    assert len(plane.evaluations(run.id)) == 1
+    refusing = LostCreateTransport(app, lost=0)
+    async with httpx.AsyncClient(transport=refusing) as http:
+        control = ControlPlaneClient("http://control", http=http)
+        with pytest.raises(httpx.HTTPStatusError):
+            async with open_episode(
+                suite.episode("weather_new_york"), runtime=RecordingRuntime(), control=control, run_id="no-such-run"
+            ):
+                raise AssertionError("never entered")
+    assert len(refusing.creates) == 1
+
+
+# A successful create's body the client can't read: not JSON, or JSON that isn't a CreateEvaluationResponse.
+MALFORMED_BODIES = [pytest.param(b"<html>ok</html>", id="not_json"), pytest.param(b'{"id": 5}', id="not_the_model")]
+
+
+class MalformedCreateTransport(httpx.AsyncBaseTransport):
+    """The control plane's app, except that the first create is applied and answered 201 with ``body``."""
+
+    def __init__(self, app, body: bytes) -> None:
+        self.app, self.body, self.creates = httpx.ASGITransport(app), body, []
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        response = await self.app.handle_async_request(request)
+        if request.method == "POST" and request.url.path.endswith("/evaluations"):
+            self.creates.append(json.loads(request.content))
+            if len(self.creates) == 1:
+                return httpx.Response(201, content=self.body, request=request)
+        return response
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", MALFORMED_BODIES)
+async def test_a_successful_response_the_client_cant_read_is_never_taken_for_a_refusal(suite, body):
+    app = create_app({"weather": suite}, config=AppConfig(closure_wait_seconds=0))
+    run = app.state.control.create_run("weather")
+    async with httpx.AsyncClient(transport=MalformedCreateTransport(app, body)) as http:
+        control = ControlPlaneClient("http://control", http=http)
+        with pytest.raises(UnreadableResponseError) as unreadable:
+            await control.create_evaluation(run.id, "weather_new_york", None, {})
+    assert not isinstance(unreadable.value, ValueError) and isinstance(unreadable.value.__cause__, ValueError)
+    assert unreadable.value.response.status_code == 201
+    assert not _refused(unreadable.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", MALFORMED_BODIES)
+async def test_a_create_answered_with_a_malformed_body_is_resent_and_opens_one_evaluation(suite, body):
+    app = create_app({"weather": suite}, config=AppConfig(closure_wait_seconds=0))
+    plane: ControlPlane = app.state.control
+    run = plane.create_run("weather")
+    transport = MalformedCreateTransport(app, body)
+    async with httpx.AsyncClient(transport=transport) as http:
+        control = ControlPlaneClient("http://control", http=http)
+        episode = suite.episode("weather_new_york")
+        async with open_episode(episode, runtime=RecordingRuntime(), control=control, run_id=run.id) as ep:
+            await ep.turn("weather?", _reply("rain"))
+    first, resent = transport.creates
+    assert first == resent and first["idempotency_key"]
+    [evaluation] = plane.evaluations(run.id)
+    assert ep.evaluation_id == evaluation.id and not ep.interrupted
+    assert ep.sealed.agent_output == "rain"
+
+
+class HangingCreateTransport(httpx.AsyncBaseTransport):
+    """The control plane's app, except that the first create is applied and its response never comes.
+
+    With ``first_error``, the first create fails with it once applied instead. Each create after it waits for
+    ``release``, then fails with ``resend_error`` if given, so a test can cancel while it is in flight.
+    """
+
+    def __init__(self, app, resend_error: Exception | None = None, first_error: Exception | None = None) -> None:
+        self.app, self.creates = httpx.ASGITransport(app), []
+        self.resend_error, self.first_error = resend_error, first_error
+        self.applied, self.resending, self.release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path.endswith("/evaluations"):
+            self.creates.append(json.loads(request.content))
+            if len(self.creates) == 1:
+                await self.app.handle_async_request(request)
+                self.applied.set()
+                if self.first_error is not None:
+                    raise self.first_error
+                await asyncio.Event().wait()
+            self.resending.set()
+            await self.release.wait()
+            if self.resend_error is not None:
+                raise self.resend_error
+        return await self.app.handle_async_request(request)
+
+
+@pytest.mark.asyncio
+async def test_a_create_cancelled_while_waiting_for_its_response_is_recovered_sealed_and_still_cancelled(suite):
+    app = create_app({"weather": suite}, config=AppConfig(closure_wait_seconds=0))
+    plane: ControlPlane = app.state.control
+    run = plane.create_run("weather")
+    transport = HangingCreateTransport(app)
+    async with httpx.AsyncClient(transport=transport) as http:
+        control = ControlPlaneClient("http://control", http=http)
+        ep = open_episode(suite.episode("weather_new_york"), runtime=RecordingRuntime(), control=control, run_id=run.id)
+
+        async def enter() -> None:
+            async with ep:
+                raise AssertionError("never entered")
+
+        task = asyncio.create_task(enter())
+        await asyncio.wait_for(transport.applied.wait(), timeout=10)
+        task.cancel()
+        # Cancelled again while the resend is in flight: the resend still runs to its end.
+        await asyncio.wait_for(transport.resending.wait(), timeout=10)
+        task.cancel()
+        transport.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    # The resend carried the same key, and was answered with the evaluation the cancelled create opened.
+    first, resent = transport.creates
+    assert first == resent and first["idempotency_key"]
+    [evaluation] = plane.evaluations(run.id)
+    assert ep.evaluation_id == evaluation.id and ep.interrupted
+    assert_sealed_as_interrupted_on(plane, ep)
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_create_whose_recovery_fails_too_is_still_cancelled_with_a_note(suite):
+    app = create_app({"weather": suite}, config=AppConfig(closure_wait_seconds=0))
+    run = app.state.control.create_run("weather")
+    transport = HangingCreateTransport(app, resend_error=httpx.ReadError("lost again", request=_REQUEST))
+    async with httpx.AsyncClient(transport=transport) as http:
+        control = ControlPlaneClient("http://control", http=http)
+        ep = open_episode(suite.episode("weather_new_york"), runtime=RecordingRuntime(), control=control, run_id=run.id)
+
+        async def enter() -> None:
+            async with ep:
+                raise AssertionError("never entered")
+
+        task = asyncio.create_task(enter())
+        await asyncio.wait_for(transport.applied.wait(), timeout=10)
+        task.cancel()
+        await asyncio.wait_for(transport.resending.wait(), timeout=10)
+        transport.release.set()
+        with pytest.raises(asyncio.CancelledError) as cancelled:
+            await asyncio.wait_for(task, timeout=10)
+    assert len(transport.creates) == 2
+    assert any("couldn't be recovered: ReadError: lost again" in note for note in cancelled.value.__notes__)
+    with pytest.raises(RuntimeError, match="isn't open yet"):
+        ep.evaluation_id
+
+
+@pytest.mark.asyncio
+async def test_a_create_cancelled_during_the_resend_after_a_lost_response_is_recovered_sealed_and_cancelled(suite):
+    app = create_app({"weather": suite}, config=AppConfig(closure_wait_seconds=0))
+    plane: ControlPlane = app.state.control
+    run = plane.create_run("weather")
+    transport = HangingCreateTransport(app, first_error=httpx.ReadError("the response was lost", request=_REQUEST))
+    async with httpx.AsyncClient(transport=transport) as http:
+        control = ControlPlaneClient("http://control", http=http)
+        ep = open_episode(suite.episode("weather_new_york"), runtime=RecordingRuntime(), control=control, run_id=run.id)
+
+        async def enter() -> None:
+            async with ep:
+                raise AssertionError("never entered")
+
+        task = asyncio.create_task(enter())
+        # The first create is applied and its response lost; the caller cancels while the resend is in flight.
+        await asyncio.wait_for(transport.resending.wait(), timeout=10)
+        task.cancel()
+        transport.release.set()
+        with pytest.raises(asyncio.CancelledError) as cancelled:
+            await asyncio.wait_for(task, timeout=10)
+    assert isinstance(cancelled.value.__context__, httpx.ReadError)
+    first, resent = transport.creates
+    assert first == resent and first["idempotency_key"]
+    [evaluation] = plane.evaluations(run.id)
+    assert ep.evaluation_id == evaluation.id and ep.interrupted
+    assert_sealed_as_interrupted_on(plane, ep)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_resend_after_a_lost_response_still_raises_a_cancellation_that_arrived_meanwhile(suite):
+    app = create_app({"weather": suite}, config=AppConfig(closure_wait_seconds=0))
+    run = app.state.control.create_run("weather")
+    transport = HangingCreateTransport(
+        app,
+        first_error=httpx.ReadError("the response was lost", request=_REQUEST),
+        resend_error=httpx.ReadError("lost again", request=_REQUEST),
+    )
+    async with httpx.AsyncClient(transport=transport) as http:
+        control = ControlPlaneClient("http://control", http=http)
+        ep = open_episode(suite.episode("weather_new_york"), runtime=RecordingRuntime(), control=control, run_id=run.id)
+
+        async def enter() -> None:
+            async with ep:
+                raise AssertionError("never entered")
+
+        task = asyncio.create_task(enter())
+        await asyncio.wait_for(transport.resending.wait(), timeout=10)
+        task.cancel()
+        transport.release.set()
+        with pytest.raises(asyncio.CancelledError) as cancelled:
+            await asyncio.wait_for(task, timeout=10)
+    assert len(transport.creates) == 2
+    assert any("couldn't be recovered: ReadError: lost again" in note for note in cancelled.value.__notes__)
+
+
 # A seal the control plane refuses outright: over HTTP a 422, in process pydantic's ValidationError.
 REFUSED_SEAL = (httpx.HTTPStatusError, pydantic.ValidationError)
 
@@ -748,6 +1085,11 @@ _REQUEST = httpx.Request("POST", "http://control/complete")
         pytest.param(httpx.ConnectError("lost", request=_REQUEST), False, id="connect_error"),
         pytest.param(httpx.ReadError("lost", request=_REQUEST), False, id="read_error"),
         pytest.param(httpx.ReadTimeout("slow", request=_REQUEST), False, id="timeout"),
+        pytest.param(
+            UnreadableResponseError("unreadable", response=httpx.Response(201, request=_REQUEST)),
+            False,
+            id="unreadable_response",
+        ),
         pytest.param(asyncio.CancelledError(), False, id="cancelled"),
         pytest.param(KeyboardInterrupt(), False, id="keyboard_interrupt"),
     ],
@@ -810,6 +1152,40 @@ async def test_a_host_retries_a_failed_snapshot_fetch_by_sealing_again_and_nothi
     evaluation = plane.evaluation(ById(None, ep.evaluation_id))
     assert [(fact.event, fact.by) for fact in evaluation.late_facts] == [("start_call", "interceptor")]
     assert snapshot.function_calls == ()
+
+
+@pytest.mark.asyncio
+async def test_a_retried_snapshot_read_never_leaves_both_a_snapshot_and_a_snapshot_error(monkeypatch):
+    plane = ControlPlane({}, config=AppConfig(closure_wait_seconds=0))
+    real = InProcessControlClient.snapshot
+    failures = [OSError("the read failed")]
+
+    async def snapshot_failing_once(self, run_id, eval_id, *, environment_type):
+        if failures:
+            raise failures.pop()
+        return await real(self, run_id, eval_id, environment_type=environment_type)
+
+    monkeypatch.setattr(InProcessControlClient, "snapshot", snapshot_failing_once)
+    # Every state the context passes through, as each write to either field leaves it.
+    states: list[tuple[bool, bool]] = []
+    set_attribute = EpisodeContext.__setattr__
+
+    def recording_setattr(self, name, value):
+        set_attribute(self, name, value)
+        if name in ("_snapshot", "_snapshot_error"):
+            states.append(
+                (self.__dict__.get("_snapshot") is not None, self.__dict__.get("_snapshot_error") is not None)
+            )
+
+    monkeypatch.setattr(EpisodeContext, "__setattr__", recording_setattr)
+    async with open_episode(weather_episode(), runtime=RecordingRuntime(), control=plane) as ep:
+        with pytest.raises(OSError, match="the read failed"):
+            await ep.seal("rain")
+        snapshot = await ep.seal()
+    assert ep.result.snapshot is snapshot and ep.result.snapshot_error is None
+    # The failed read set the error, the retry cleared it, and only then was the snapshot stored.
+    assert (False, True) in states and states[-1] == (True, False)
+    assert (True, True) not in states
 
 
 @pytest.mark.asyncio
@@ -1421,6 +1797,92 @@ def test_a_call_or_change_holding_a_value_that_contains_itself_is_refused_where_
     snapshot = asyncio.run(plane.complete(None, opened.id, "done"))
     assert snapshot.function_calls == () and snapshot.observations == {}
     assert snapshot.environment.blob == b"" and snapshot.snapshot_id == snapshot_digest(snapshot)  # type: ignore[attr-defined]
+
+
+def nested(depth: int) -> list:
+    """``depth`` lists, each inside the last, around a str."""
+    value: Any = "leaf"
+    for _ in range(depth):
+        value = [value]
+    return value
+
+
+def test_a_value_nested_deeper_than_the_limit_is_unsupported_not_a_recursion_error():
+    assert unsupported_value(nested(MAX_NESTING_DEPTH)) is None
+    assert unsupported_value({"x": {"y": nested(MAX_NESTING_DEPTH - 2)}}) is None
+    for too_deep in (nested(MAX_NESTING_DEPTH + 1), {"x": {"y": nested(MAX_NESTING_DEPTH - 1)}}, nested(10_000)):
+        problem = unsupported_value(too_deep)
+        assert problem is not None and f"nested more than {MAX_NESTING_DEPTH} deep" in problem
+    # Each kind of container counts as a level.
+    wraps = [lambda v: (v,), lambda v: {"k": v}, lambda v: frozenset({v}), lambda v: {v}]
+    for wrap in wraps:
+        for depth, accepted in ((MAX_NESTING_DEPTH, True), (MAX_NESTING_DEPTH + 1, False)):
+            # Tuples inside, hashable all the way down, so a set can hold them.
+            inner: Any = "leaf"
+            for _ in range(depth - 1):
+                inner = (inner,)
+            assert (unsupported_value(wrap(inner)) is None) is accepted
+
+
+class Deep(Environment):
+    data: Any = None
+
+
+class DeepByDefault(Environment):
+    data: Any = pydantic.Field(default_factory=lambda: nested(MAX_NESTING_DEPTH))
+
+
+def test_a_call_change_or_observation_nested_too_deep_is_refused_where_it_enters_and_the_limit_seals():
+    plane = ControlPlane({}, config=AppConfig(closure_wait_seconds=0))
+    opened = plane.open_evaluation(weather_episode(environment_type=Deep))
+    target = ById(None, opened.id)
+    # Each is checked as its model dumps it: the record's dump is the first level, its args the second; an
+    # environment change's values are the first, as are the observations' dump.
+    for depth in (MAX_NESTING_DEPTH + 1, 10_000):
+        with pytest.raises(RejectedError) as started:
+            plane.start_call(target, CreateFunctionCallStart(call_id="s", function="f", args={"x": nested(depth - 2)}))
+        with pytest.raises(RejectedError) as finished:
+            plane.finish_call(
+                target,
+                CreateFunctionCallRecord(call_id="f", function="f", args={"x": nested(depth - 2)}, result="ok"),
+            )
+        with pytest.raises(RejectedError) as changed:
+            plane.change_environment(target, {"data": nested(depth - 1)})
+        with pytest.raises(RejectedError) as observed:
+            plane.apply(target, RecordObservations("openshell", Observed(value=nested(depth - 1)), AT))
+        for refused, kind in [
+            (started, Rejection.UNSUPPORTED_VALUE),
+            (finished, Rejection.UNSUPPORTED_VALUE),
+            (changed, Rejection.INVALID_ENVIRONMENT),
+            (observed, Rejection.UNSUPPORTED_VALUE),
+        ]:
+            assert refused.value.kind is kind and not refused.value.late
+            assert f"nested more than {MAX_NESTING_DEPTH} deep" in str(refused.value)
+    # At the limit, each is kept, and the seal encodes it.
+    deepest = nested(MAX_NESTING_DEPTH - 2)
+    plane.start_call(target, CreateFunctionCallStart(call_id="c", function="f", args={"x": deepest}))
+    assert plane.start_call(target, CreateFunctionCallStart(call_id="c", function="f", args={"x": deepest}))[1] is False
+    plane.finish_call(target, CreateFunctionCallRecord(call_id="c", function="f", args={"x": deepest}, result="ok"))
+    plane.change_environment(target, {"data": nested(MAX_NESTING_DEPTH - 1)})
+    plane.apply(target, RecordObservations("openshell", Observed(value=nested(MAX_NESTING_DEPTH - 1)), AT))
+    snapshot = asyncio.run(plane.complete(None, opened.id, "done"))
+    assert snapshot.function_calls[0].args == {"x": deepest}
+    assert snapshot.environment.data == nested(MAX_NESTING_DEPTH - 1)  # type: ignore[attr-defined]
+    assert snapshot.snapshot_id == snapshot_digest(snapshot)
+    assert midojo.grade(weather_episode(environment_type=Deep), snapshot).snapshot_id == snapshot.snapshot_id
+
+
+def test_an_episode_environment_nested_too_deep_is_refused_with_a_value_error():
+    plane = ControlPlane({}, config=AppConfig(closure_wait_seconds=0))
+    # The environment mapping is the first level.
+    opened = plane.open_evaluation(weather_episode(environment={"deep": nested(MAX_NESTING_DEPTH - 1)}))
+    assert plane.evaluation(ById(None, opened.id)).environment.deep == nested(MAX_NESTING_DEPTH - 1)  # type: ignore[attr-defined]
+    for depth in (MAX_NESTING_DEPTH, 10_000):
+        with pytest.raises(ValueError, match=f"nested at most {MAX_NESTING_DEPTH} deep"):
+            weather_episode(environment={"deep": nested(depth)})
+    # An environment type can still build one too deep: opening it is refused.
+    with pytest.raises(ValueError, match=f"nested more than {MAX_NESTING_DEPTH} deep"):
+        plane.open_evaluation(weather_episode(environment_type=DeepByDefault))
 
 
 class Observed(pydantic.BaseModel):

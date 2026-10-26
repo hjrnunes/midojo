@@ -28,6 +28,7 @@ from midojo.control_plane.lifecycle import (
     Rejection,
     ReplaceEnvironment,
     ReplyTurn,
+    RotateSession,
     Seal,
     StartCall,
     StartTurn,
@@ -104,6 +105,7 @@ def _grade() -> GradeResponse:
 ALL_EVENTS = [
     Read(),
     OpenSession("other", 300.0),
+    RotateSession("other", now=100.0),
     CloseSession(),
     _start(),
     _finish(),
@@ -226,7 +228,15 @@ def test_an_agent_event_needs_the_live_session(authority):
 
 
 @pytest.mark.parametrize(
-    "event", [CloseSession(), StartTurn("m", AT), Seal("o", AT), RecordGrade(_grade()), BeginClosure(AT, 1.0)]
+    "event",
+    [
+        CloseSession(),
+        RotateSession("new", now=100.0),
+        StartTurn("m", AT),
+        Seal("o", AT),
+        RecordGrade(_grade()),
+        BeginClosure(AT, 1.0),
+    ],
 )
 def test_a_session_cannot_drive_the_host_lifecycle(event):
     outcome = transition(_evaluation(), AGENT, event)
@@ -246,6 +256,29 @@ def test_opening_a_session_replaces_the_previous_one_only_while_open():
     assert isinstance(transition(_closing(_evaluation()), HOST, OpenSession("new", 300.0)), Rejected)
     closed = _accept(_sealed(_evaluation()), CloseSession())
     assert (closed.evaluation.session, closed.effects) == (None, (lifecycle.SessionUnbound(TOKEN),))
+
+
+@pytest.mark.parametrize("stage", ["open", "closing", "collecting", "sealed"])
+def test_rotating_a_session_replaces_only_its_token_hash_at_any_stage(stage):
+    staged = {"open": lambda evaluation: evaluation, "closing": _closing, "collecting": _collecting, "sealed": _sealed}
+    evaluation = staged[stage](_evaluation())
+    outcome = _accept(evaluation, RotateSession("new", now=100.0))
+    # The expiry is kept, and nothing else about the evaluation changes: not its stage either.
+    assert outcome.evaluation == dataclasses.replace(evaluation, session=Session("new", 200.0))
+    assert outcome.result == Session("new", 200.0)
+    assert outcome.effects == (lifecycle.SessionUnbound(TOKEN), lifecycle.SessionBound("new"))
+
+
+def test_rotating_never_reopens_a_revoked_session_or_revives_an_expired_one():
+    revoked = _accept(_evaluation(), CloseSession()).evaluation
+    assert transition(revoked, HOST, RotateSession("new", now=100.0)) == Rejected(
+        Rejection.SESSION_CLOSED, "The evaluation's session was revoked"
+    )
+    # At its expiry (200.0) or after: refused, and the expiry is never extended.
+    for now in (200.0, 300.0):
+        assert transition(_evaluation(), HOST, RotateSession("new", now=now)) == Rejected(
+            Rejection.SESSION_CLOSED, "The evaluation's session has expired"
+        )
 
 
 # --- the environment: revisions and atomic changes ---

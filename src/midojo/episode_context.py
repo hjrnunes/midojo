@@ -49,6 +49,7 @@ from midojo.tool_endpoint import ToolEndpoint
 from midojo.types import InterceptionMode
 
 if TYPE_CHECKING:
+    from midojo.control_plane.models import CreateEvaluationResponse
     from midojo.control_plane.service import ControlPlane
     from midojo.interception_host import HostInterception, HostInterceptor
 
@@ -321,9 +322,47 @@ class EpisodeContext:
             raise ValueError("In a run, the control plane compiles the episode from its suite: it needs a user_task_id")
         # The run's control plane compiles the same suite pair, and its turns are the ones the host sends.
         host: dict[str, InterceptionMode] = {"interception": "host"} if self.interception is not None else {}
-        created = await self.control.create_evaluation(
-            self.run_id, episode.user_task_id, episode.injection_task_id, dict(episode.injections), **host
-        )
+        run_id, user_task_id, key = self.run_id, episode.user_task_id, uuid.uuid4().hex
+
+        async def create() -> CreateEvaluationResponse:
+            return await self.control.create_evaluation(
+                run_id, user_task_id, episode.injection_task_id, dict(episode.injections), idempotency_key=key, **host
+            )
+
+        async def resend() -> CreateEvaluationResponse | Exception:
+            # Its error is returned, not raised: a cancellation that arrives meanwhile is never lost behind it.
+            try:
+                return await create()
+            except Exception as error:
+                return error
+
+        try:
+            created = await create()
+        except BaseException as error:
+            if isinstance(error, Exception) and _refused(error):
+                raise
+            # An unknown outcome: its response lost, say, or a cancellation or an interrupt while waiting for it. The
+            # control plane may have opened the evaluation, so the same create, under the same key, is sent again
+            # once, and answers with that evaluation if it did. The resend runs to its end however often the caller
+            # is cancelled meanwhile, so the evaluation is known and cleanup seals it before a stop goes on.
+            outcome, cancelled = await _to_the_end(resend())
+            # What goes on after the resend: the cancellation or interrupt that stopped the create, else a
+            # cancellation that arrived during the resend.
+            stop = cancelled if isinstance(error, Exception) else error
+            if isinstance(outcome, Exception):
+                if stop is None:
+                    raise outcome
+                stop.add_note(
+                    f"The evaluation it may have opened couldn't be recovered: {type(outcome).__name__}: {outcome}"
+                )
+                raise stop
+            self._opened(outcome)
+            if stop is not None:
+                raise stop
+            return
+        self._opened(created)
+
+    def _opened(self, created: CreateEvaluationResponse) -> None:
         self._evaluation_id, self._session_token, self.turns = created.id, created.session_token, tuple(created.turns)
 
     # --- turns ---
@@ -423,17 +462,20 @@ class EpisodeContext:
         self._seal_request = None
 
     async def _read_snapshot(self) -> None:
-        """Read the sealed snapshot back; on a failure, keep it as the reason, and raise it."""
+        """Read the sealed snapshot back; on a failure, keep it as the reason, and raise it.
+
+        The old error is cleared before the snapshot is stored, so the context
+        never holds both a snapshot and a snapshot error.
+        """
         environment_type = self.episode.environment_type
         assert environment_type is not None  # An episode infers one when it isn't given.
         try:
-            self._snapshot = await self.control.snapshot(
-                self.run_id, self.evaluation_id, environment_type=environment_type
-            )
+            snapshot = await self.control.snapshot(self.run_id, self.evaluation_id, environment_type=environment_type)
         except BaseException as error:
             self._snapshot_error = error
             raise
         self._snapshot_error = None
+        self._snapshot = snapshot
 
     async def __aexit__(
         self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None
@@ -558,7 +600,9 @@ def _refused(error: BaseException) -> bool:
 
     A ValueError is one: a rejection in process (``RejectedError``), a request
     pydantic's validation refused, or one refused before it was sent. Over
-    HTTP, so is a 4xx response. A refused write can still be kept as a late
+    HTTP, so is a 4xx response. A 2xx whose body can't be read is not: the
+    control plane accepted the request, and the HTTP client raises it as an
+    ``UnreadableResponseError`` (an ``httpx.HTTPError``), never a ValueError. A refused write can still be kept as a late
     fact (a seal with another output on a sealed evaluation, say), but the
     seal and the snapshot are as they were. Anything else (a transport error,
     a timeout, a 5xx, a cancellation) leaves the outcome unknown: the request

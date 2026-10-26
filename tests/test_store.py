@@ -11,7 +11,7 @@ import re
 
 import pytest
 
-from midojo.control_plane.state import Evaluation, Stage
+from midojo.control_plane.state import Creation, Evaluation, Stage
 from midojo.control_plane.store import InMemoryStore
 from midojo.types import Environment, FunctionCallRecord
 
@@ -154,10 +154,24 @@ def test_no_public_store_method_hands_out_or_keeps_a_resident_value(store):
         "get_evaluation",
         "list_evaluations",
         "writer",
+        "kept_creation",
+        "keep_creation",
         "bind_session",
         "unbind_session",
         "session_target",
     }
+
+
+def test_a_kept_creation_is_copied_in_and_out_and_belongs_to_its_run(store):
+    request = {"user_task_id": "u", "injection_task_id": None, "injections": {"a": "b"}, "interception": "agent"}
+    store.keep_creation("r", "k", Creation(request, "e", ("p",)))
+    request["injections"]["a"] = "changed"
+    kept = store.kept_creation("r", "k")
+    assert kept == Creation({**request, "injections": {"a": "b"}}, "e", ("p",))
+    kept.request["injections"]["a"] = "changed"
+    again = store.kept_creation("r", "k")
+    assert again is not None and again.request["injections"] == {"a": "b"}
+    assert store.kept_creation("other", "k") is None and store.kept_creation("r", "other") is None
 
 
 def test_the_writer_capability_has_one_holder(store):
