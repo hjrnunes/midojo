@@ -1,4 +1,7 @@
+import threading
 import uuid
+from collections.abc import Iterator, Mapping
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from fastapi import FastAPI
@@ -8,7 +11,7 @@ from midojo.control_plane.config import AppConfig
 from midojo.control_plane.inprocess_control import InProcessControlClient
 from midojo.control_plane.lifecycle import RejectedError, Rejection
 from midojo.control_plane.main import create_app
-from midojo.control_plane.models import EvaluationResponse
+from midojo.control_plane.models import CreateEvaluationResponse, EvaluationResponse
 from midojo.control_plane.service import ControlPlane
 from midojo.control_plane.state import Evaluation
 from midojo.episode import freeze
@@ -153,6 +156,60 @@ async def test_the_in_process_client_creates_under_an_idempotency_key_as_the_rou
     unkeyed = await control.create_evaluation(run.id, "weather_new_york", None, {})
     assert unkeyed.id != first.id
     assert [evaluation.id for evaluation in plane.evaluations(run.id)] == [first.id, unkeyed.id]
+
+
+class ChangingInjections(Mapping[str, str]):
+    """Injections whose payload changes after it is first read, as a caller changing its mapping meanwhile would."""
+
+    PROBE = "tornado_alert_via_prompt:main"
+
+    def __init__(self) -> None:
+        self.reads = 0
+
+    def __getitem__(self, key: str) -> str:
+        if key != self.PROBE:
+            raise KeyError(key)
+        self.reads += 1
+        return " FIRST PAYLOAD" if self.reads == 1 else " SECOND PAYLOAD"
+
+    def __iter__(self) -> Iterator[str]:
+        return iter([self.PROBE])
+
+    def __len__(self) -> int:
+        return 1
+
+
+def test_a_keyed_create_compiles_the_same_injections_it_keeps_for_the_key(suite):
+    plane = ControlPlane({"weather": suite})
+    run = plane.create_run("weather")
+    injections = ChangingInjections()
+    created = plane.create_evaluation(
+        run.id, "weather_new_york", "tornado_alert_via_prompt", injections, idempotency_key="k1"
+    )
+    # Read once: the key's request and the compiled prompt hold the same payload.
+    assert injections.reads == 1
+    kept = plane.store.kept_creation(run.id, "k1")
+    assert kept is not None and kept.request["injections"] == {ChangingInjections.PROBE: " FIRST PAYLOAD"}
+    assert "FIRST PAYLOAD" in created.prompt and "SECOND PAYLOAD" not in created.prompt
+    resent = plane.create_evaluation(
+        run.id, "weather_new_york", "tornado_alert_via_prompt", dict(kept.request["injections"]), idempotency_key="k1"
+    )
+    assert resent == created
+
+
+def test_two_threads_creating_under_one_key_get_one_evaluation_and_the_same_response(suite):
+    plane = ControlPlane({"weather": suite})
+    run = plane.create_run("weather")
+    barrier = threading.Barrier(2)
+
+    def create() -> CreateEvaluationResponse:
+        barrier.wait()
+        return plane.create_evaluation(run.id, "weather_new_york", idempotency_key="k1")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first, second = (future.result() for future in [pool.submit(create), pool.submit(create)])
+    assert first == second
+    assert [evaluation.id for evaluation in plane.evaluations(run.id)] == [first.id]
 
 
 def test_get_evaluation(client):

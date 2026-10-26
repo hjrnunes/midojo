@@ -219,12 +219,15 @@ class ControlPlane:
         refused as ``idempotency_conflict``. A create refused outright (an
         unknown task, say) keeps nothing, so resending it tries it afresh.
         """
+        # Read once, into a value of its own: the key's request and the compiled episode are the same injections,
+        # whatever the caller does with its mapping meanwhile.
+        injected: dict[str, str] = detached(dict(injections or {}))
         if idempotency_key is None:
-            return self._create_evaluation(run_id, user_task_id, injection_task_id, injections, interception)
+            return self._create_evaluation(run_id, user_task_id, injection_task_id, injected, interception)
         request = {
             "user_task_id": user_task_id,
             "injection_task_id": injection_task_id,
-            "injections": dict(injections or {}),
+            "injections": injected,
             "interception": interception,
         }
         with self._creating:
@@ -236,7 +239,7 @@ class ControlPlane:
                         f"Idempotency key {idempotency_key!r} already created an evaluation for another request",
                     )
                 return kept.response
-            response = self._create_evaluation(run_id, user_task_id, injection_task_id, injections, interception)
+            response = self._create_evaluation(run_id, user_task_id, injection_task_id, injected, interception)
             self.store.keep_creation(run_id, idempotency_key, Creation(request, response))
             return response
 
@@ -245,11 +248,12 @@ class ControlPlane:
         run_id: str,
         user_task_id: str,
         injection_task_id: str | None,
-        injections: Mapping[str, str] | None,
+        injections: dict[str, str],
         interception: InterceptionMode,
     ) -> CreateEvaluationResponse:
+        """Compile and open the evaluation; ``injections`` is already the caller's, read once (see above)."""
         try:
-            episode = self.suite(run_id).episode(user_task_id, injection_task_id, detached(dict(injections or {})))
+            episode = self.suite(run_id).episode(user_task_id, injection_task_id, injections)
         except UnknownTaskError as exc:
             raise _reject(Rejection.UNKNOWN_TASK, exc.detail) from None
         opened = self.open_evaluation(episode, run_id=run_id, interception=interception)
