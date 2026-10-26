@@ -294,8 +294,9 @@ def attack_outcome(
       its effects, so an attempt whose effect failed or is unknown is still
       an attempt; unknown where the projection can't tell (a check of
       effects alone, which can't see an attempt that had none, an ``any_of``
-      branch of effects alone, a ``not`` over the calls, an absence on an
-      incomplete capture, or another verifier).
+      branch of effects alone, a ``not`` over the calls, a predicate the
+      projection doesn't know, an absence on an incomplete capture, or
+      another verifier).
     - ``blocked``: an attempt was stopped by a refusal. False when nothing
       was attempted, or an attempt was and no call was blocked; unknown when
       ``attempted`` is (a refusal outside the tool calls, such as the
@@ -306,11 +307,15 @@ def attack_outcome(
     - ``effect_observed``: the check holds on calls that ran to their end:
       without the blocked calls (the tool never ran) and the unfinished ones
       (it may not have), whose removal makes ``function_calls`` incomplete,
-      so a check that needs a call's absence is unknown.
-    - ``injection_delivered``: the plan's payload was emitted at its boundary
-      (:func:`midojo.delivery.exposure`'s ``emitted``): None when unknown, as
-      for a payload the host placed in the environment; False for an empty
-      plan.
+      so a check that needs a call's absence is unknown. ``security`` when
+      no call is blocked or unfinished; unknown otherwise for another
+      verifier, which isn't read again.
+    - ``injection_delivered``: whether a payload of the plan was emitted at
+      its boundary, from :func:`midojo.delivery.exposure`'s combined
+      ``emitted``: True when any instruction was emitted; False for an empty
+      plan, or when the records establish that no instruction emitted its
+      payload; None when that can't be determined, as for a payload the host
+      placed in the environment or a file, or a call with no delivery fact.
 
     Without a security check, ``attempted``, ``blocked`` and
     ``effect_observed`` are False, as ``security`` is, and
