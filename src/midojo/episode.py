@@ -52,6 +52,12 @@ _IMMUTABLE_SCALARS = frozenset(
 )
 
 
+# The deepest data an episode or an evaluation keeps: a mapping, list or other container counts as one level, and
+# a container inside it as another. Well below Python's recursion limit, so copying, dumping, checking and
+# encoding what is kept never hits it; deeper data is refused where it enters.
+MAX_NESTING_DEPTH = 100
+
+
 class UnknownTaskError(KeyError):
     """A suite has no task with the requested ID. ``detail`` says which."""
 
@@ -69,15 +75,23 @@ def freeze(value: Any) -> Any:
     ``time``, ``timedelta``; a date or time only with no time zone or a
     ``datetime.timezone`` whose offset is exactly a ``timedelta`` and whose name
     exactly a ``str``). Anything else, a subclass of these included, raises
-    TypeError: nothing is converted.
+    TypeError: nothing is converted. Mappings, lists and tuples nested more
+    than :data:`MAX_NESTING_DEPTH` deep raise ValueError.
     """
+    return _freeze(value, 0)
+
+
+def _freeze(value: Any, depth: int) -> Any:
+    """:func:`freeze` of ``value``, which is inside ``depth`` mappings, lists or tuples."""
+    if isinstance(value, Mapping | list | tuple) and depth >= MAX_NESTING_DEPTH:
+        raise ValueError(f"episode data must be nested at most {MAX_NESTING_DEPTH} deep")
     if isinstance(value, Mapping):
         frozen: dict[str, Any] = {}
         for key, item in value.items():
-            frozen[_exact_str(key, "a key in episode data")] = freeze(item)
+            frozen[_exact_str(key, "a key in episode data")] = _freeze(item, depth + 1)
         return MappingProxyType(frozen)
     if isinstance(value, list | tuple):
-        return tuple(freeze(item) for item in value)
+        return tuple(_freeze(item, depth + 1) for item in value)
     if type(value) not in _IMMUTABLE_SCALARS:
         raise TypeError(f"episode data must be JSON-like, not {type(value).__name__}")
     tzinfo = getattr(value, "tzinfo", None)

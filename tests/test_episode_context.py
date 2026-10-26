@@ -23,6 +23,7 @@ import threading
 import uuid
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
+from typing import Any
 
 import httpx
 import pydantic
@@ -51,13 +52,13 @@ from midojo.control_plane.main import create_app
 from midojo.control_plane.models import CreateFunctionCallRecord, CreateFunctionCallStart
 from midojo.control_plane.service import ById, ControlPlane
 from midojo.control_plane.state import Stage, snapshot_digest, unsupported_value
-from midojo.episode import Episode
+from midojo.episode import MAX_NESTING_DEPTH, Episode
 from midojo.episode_context import AgentBinding, EpisodeContext, _refused, open_episode
 from midojo.interception_host import HostInterception, HostInterceptor
 from midojo.runtimes import ResettableRuntime, UnmanagedRuntime
 from midojo.runtimes.openshell import OpenShellObservations
 from midojo.tool_endpoint import HOST_MODE_WITHHELD_ENV, ToolEndpoint
-from midojo.types import FunctionCallRecord
+from midojo.types import Environment, FunctionCallRecord
 from tests.fixtures.scripted_target import target as scripted_target
 from tests.fixtures.scripted_target.upstream import scripted_upstream
 
@@ -1481,6 +1482,92 @@ def test_a_call_or_change_holding_a_value_that_contains_itself_is_refused_where_
     snapshot = asyncio.run(plane.complete(None, opened.id, "done"))
     assert snapshot.function_calls == () and snapshot.observations == {}
     assert snapshot.environment.blob == b"" and snapshot.snapshot_id == snapshot_digest(snapshot)  # type: ignore[attr-defined]
+
+
+def nested(depth: int) -> list:
+    """``depth`` lists, each inside the last, around a str."""
+    value: Any = "leaf"
+    for _ in range(depth):
+        value = [value]
+    return value
+
+
+def test_a_value_nested_deeper_than_the_limit_is_unsupported_not_a_recursion_error():
+    assert unsupported_value(nested(MAX_NESTING_DEPTH)) is None
+    assert unsupported_value({"x": {"y": nested(MAX_NESTING_DEPTH - 2)}}) is None
+    for too_deep in (nested(MAX_NESTING_DEPTH + 1), {"x": {"y": nested(MAX_NESTING_DEPTH - 1)}}, nested(10_000)):
+        problem = unsupported_value(too_deep)
+        assert problem is not None and f"nested more than {MAX_NESTING_DEPTH} deep" in problem
+    # Each kind of container counts as a level.
+    wraps = [lambda v: (v,), lambda v: {"k": v}, lambda v: frozenset({v}), lambda v: {v}]
+    for wrap in wraps:
+        for depth, accepted in ((MAX_NESTING_DEPTH, True), (MAX_NESTING_DEPTH + 1, False)):
+            # Tuples inside, hashable all the way down, so a set can hold them.
+            inner: Any = "leaf"
+            for _ in range(depth - 1):
+                inner = (inner,)
+            assert (unsupported_value(wrap(inner)) is None) is accepted
+
+
+class Deep(Environment):
+    data: Any = None
+
+
+class DeepByDefault(Environment):
+    data: Any = pydantic.Field(default_factory=lambda: nested(MAX_NESTING_DEPTH))
+
+
+def test_a_call_change_or_observation_nested_too_deep_is_refused_where_it_enters_and_the_limit_seals():
+    plane = ControlPlane({}, config=AppConfig(closure_wait_seconds=0))
+    opened = plane.open_evaluation(weather_episode(environment_type=Deep))
+    target = ById(None, opened.id)
+    # Each is checked as its model dumps it: the record's dump is the first level, its args the second; an
+    # environment change's values are the first, as are the observations' dump.
+    for depth in (MAX_NESTING_DEPTH + 1, 10_000):
+        with pytest.raises(RejectedError) as started:
+            plane.start_call(target, CreateFunctionCallStart(call_id="s", function="f", args={"x": nested(depth - 2)}))
+        with pytest.raises(RejectedError) as finished:
+            plane.finish_call(
+                target,
+                CreateFunctionCallRecord(call_id="f", function="f", args={"x": nested(depth - 2)}, result="ok"),
+            )
+        with pytest.raises(RejectedError) as changed:
+            plane.change_environment(target, {"data": nested(depth - 1)})
+        with pytest.raises(RejectedError) as observed:
+            plane.apply(target, RecordObservations("openshell", Observed(value=nested(depth - 1)), AT))
+        for refused, kind in [
+            (started, Rejection.UNSUPPORTED_VALUE),
+            (finished, Rejection.UNSUPPORTED_VALUE),
+            (changed, Rejection.INVALID_ENVIRONMENT),
+            (observed, Rejection.UNSUPPORTED_VALUE),
+        ]:
+            assert refused.value.kind is kind and not refused.value.late
+            assert f"nested more than {MAX_NESTING_DEPTH} deep" in str(refused.value)
+    # At the limit, each is kept, and the seal encodes it.
+    deepest = nested(MAX_NESTING_DEPTH - 2)
+    plane.start_call(target, CreateFunctionCallStart(call_id="c", function="f", args={"x": deepest}))
+    assert plane.start_call(target, CreateFunctionCallStart(call_id="c", function="f", args={"x": deepest}))[1] is False
+    plane.finish_call(target, CreateFunctionCallRecord(call_id="c", function="f", args={"x": deepest}, result="ok"))
+    plane.change_environment(target, {"data": nested(MAX_NESTING_DEPTH - 1)})
+    plane.apply(target, RecordObservations("openshell", Observed(value=nested(MAX_NESTING_DEPTH - 1)), AT))
+    snapshot = asyncio.run(plane.complete(None, opened.id, "done"))
+    assert snapshot.function_calls[0].args == {"x": deepest}
+    assert snapshot.environment.data == nested(MAX_NESTING_DEPTH - 1)  # type: ignore[attr-defined]
+    assert snapshot.snapshot_id == snapshot_digest(snapshot)
+    assert midojo.grade(weather_episode(environment_type=Deep), snapshot).snapshot_id == snapshot.snapshot_id
+
+
+def test_an_episode_environment_nested_too_deep_is_refused_with_a_value_error():
+    plane = ControlPlane({}, config=AppConfig(closure_wait_seconds=0))
+    # The environment mapping is the first level.
+    opened = plane.open_evaluation(weather_episode(environment={"deep": nested(MAX_NESTING_DEPTH - 1)}))
+    assert plane.evaluation(ById(None, opened.id)).environment.deep == nested(MAX_NESTING_DEPTH - 1)  # type: ignore[attr-defined]
+    for depth in (MAX_NESTING_DEPTH, 10_000):
+        with pytest.raises(ValueError, match=f"nested at most {MAX_NESTING_DEPTH} deep"):
+            weather_episode(environment={"deep": nested(depth)})
+    # An environment type can still build one too deep: opening it is refused.
+    with pytest.raises(ValueError, match=f"nested more than {MAX_NESTING_DEPTH} deep"):
+        plane.open_evaluation(weather_episode(environment_type=DeepByDefault))
 
 
 class Observed(pydantic.BaseModel):

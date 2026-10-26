@@ -26,7 +26,7 @@ from typing import Any
 from pydantic import BaseModel
 from pydantic_core import TzInfo
 
-from midojo.episode import Episode
+from midojo.episode import MAX_NESTING_DEPTH, Episode
 from midojo.observations import FUNCTION_CALLS, EvidenceStatus
 from midojo.types import Environment, FunctionCallRecord, InterceptionMode, SuiteName
 
@@ -297,10 +297,13 @@ def unsupported_value(value: Any) -> str | None:
     fail to encode at all. A read-only mapping view isn't one either: it
     can't be copied, and the control plane copies what it keeps. Nor is a
     list, tuple, dict or set that contains itself, at any depth: it has no
-    finite encoding.
+    finite encoding. Nor are containers nested more than
+    :data:`~midojo.episode.MAX_NESTING_DEPTH` deep (``value`` itself, when a
+    container, is the first level): the check stops there, so it never hits
+    the recursion limit, and what it accepts can be copied and encoded.
     """
     try:
-        _canonical(value)
+        _canonical(value, limit=MAX_NESTING_DEPTH)
     except _UnsupportedValueError as unsupported:
         return str(unsupported)
     return None
@@ -326,7 +329,7 @@ _FIXED_OFFSETS = (timezone, TzInfo)
 _CONTAINERS = (list, tuple, dict, set, frozenset)
 
 
-def _canonical(value: Any, path: str = "", within: frozenset[int] = frozenset()) -> Any:
+def _canonical(value: Any, path: str = "", within: frozenset[int] = frozenset(), limit: int | None = None) -> Any:
     """A JSON value that encodes ``value`` losslessly: unequal values encode differently. Raises ``_UnsupportedValueError``.
 
     Exactly ``str``, ``int`` and ``bool``, and None, are themselves; any other
@@ -337,7 +340,8 @@ def _canonical(value: Any, path: str = "", within: frozenset[int] = frozenset())
     its ``[key, value]`` items sorted by their encoding, a date, datetime or
     time in ISO format, and a timedelta as days, seconds and microseconds.
     ``within`` holds the containers ``value`` is inside of: a container that
-    contains itself has no finite encoding.
+    contains itself has no finite encoding. With a ``limit``, a container
+    inside ``limit`` others is refused too.
     """
     kind = type(value)
     if value is None or kind in (str, int, bool):
@@ -349,17 +353,22 @@ def _canonical(value: Any, path: str = "", within: frozenset[int] = frozenset())
     if kind in _CONTAINERS:
         if id(value) in within:
             raise _UnsupportedValueError(path, value, "that contains itself")
+        if limit is not None and len(within) >= limit:
+            raise _UnsupportedValueError(path, value, f"nested more than {limit} deep")
         within = within | {id(value)}
     if kind in (list, tuple):
-        return [kind.__name__, [_canonical(item, f"{path}[{index}]", within) for index, item in enumerate(value)]]
+        return [
+            kind.__name__,
+            [_canonical(item, f"{path}[{index}]", within, limit) for index, item in enumerate(value)],
+        ]
     if kind is dict:
         items = []
         for index, (key, item) in enumerate(value.items()):
-            encoded = _canonical(key, f"{path}<key {index}>", within)
-            items.append([encoded, _canonical(item, f"{path}[{_dumps(encoded)}]", within)])
+            encoded = _canonical(key, f"{path}<key {index}>", within, limit)
+            items.append([encoded, _canonical(item, f"{path}[{_dumps(encoded)}]", within, limit)])
         return ["mapping", sorted(items, key=_dumps)]
     if kind in (set, frozenset):
-        return [kind.__name__, sorted((_canonical(item, f"{path}<item>", within) for item in value), key=_dumps)]
+        return [kind.__name__, sorted((_canonical(item, f"{path}<item>", within, limit) for item in value), key=_dumps)]
     if kind in (datetime, time) and (value.tzinfo is None or type(value.tzinfo) in _FIXED_OFFSETS):
         return [kind.__name__, value.isoformat()]
     if kind is date:

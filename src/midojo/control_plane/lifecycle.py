@@ -401,7 +401,10 @@ def transition(evaluation: Evaluation, authority: Authority, event: Event) -> Ou
     except Exception as error:
         if (refusal := _held_values(event)) is None:
             raise
-        kind, what, _ = refusal
+        kind, what, values = refusal
+        # Too deep to copy: the check stops at the nesting limit, so it finds that on the caller's event uncopied.
+        if isinstance(error, RecursionError) and (problem := unsupported_value(values())) is not None:
+            return Rejected(kind, f"The {what} can't be kept: {problem}")
         return Rejected(kind, f"The {what} can't be kept: it can't be copied ({type(error).__name__})")
     # Checked on the copy the rules decide on, never on the caller's event, which may still change.
     if (unsupported := _unsupported(event)) is not None:
