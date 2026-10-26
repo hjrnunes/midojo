@@ -1,5 +1,5 @@
-// Report the agent's file reads to the midojo control plane so injections
-// seeded into /sandbox/workdir files are visible to the reachability check.
+// Report the agent's file reads to the midojo control plane so its reads of
+// files seeded into /sandbox/workdir show up in the evaluation's tool calls.
 //
 // `reportTools` records each named tool's result verbatim — it never alters
 // what the agent sees. We report `read` (pi's built-in file-read tool) and

@@ -80,10 +80,11 @@ tokens are never put in names or labels.
 This image bundles the midojo `pi-sdk` and a report-only extension
 (`.pi/agent/extensions/00-midojo.ts`, in pi's global agent dir so it loads
 regardless of the agent's working directory) that reports the agent's file reads
-to the control plane. That is how a payload seeded into a `/sandbox/workdir` file
-becomes visible to midojo's reachability check, which reports whether the
-payload was found but never changes a grade. Without it, no file reads are
-recorded and the payload is reported as not matched.
+to the control plane. That is how the agent's reads of a file seeded into
+`/sandbox/workdir` show up in the evaluation's recorded tool calls. A seeded
+file's payload has no delivery fact (no interceptor placed it), so midojo
+reports its exposure as unknown either way. Without the extension, no file
+reads are recorded.
 
 For that reporting to work, **the sandbox network policy must allow the control
 plane**. midojo does not add this rule for you (a network policy is a security

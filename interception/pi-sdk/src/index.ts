@@ -158,8 +158,8 @@ export interface MidojoExtensionConfig {
 	 * Names of existing tools whose results are reported to the control plane
 	 * verbatim. Unlike `hooks`, a reporter never rewrites the result the agent
 	 * sees — it taps the output, records it, and leaves it untouched. Use this to
-	 * make a tool's result (e.g. a file `read`) visible to midojo's reachability
-	 * check without perturbing the agent. Names already handled by `hooks` are
+	 * record a tool's result (e.g. a file `read`) in the evaluation's tool calls
+	 * without perturbing the agent. Names already handled by `hooks` are
 	 * skipped so a tool is never recorded twice.
 	 */
 	reportTools?: string[];

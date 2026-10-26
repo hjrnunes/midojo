@@ -26,7 +26,7 @@ agent_runtime:
       readWrite: [/sandbox, /tmp, /dev/null]
     networkPolicies:
       # midojo control plane. The in-sandbox agent SDK POSTs its tool calls
-      # here so seeded-file injections are visible to the reachability check;
+      # here so reads of seeded files show up in the evaluation's tool calls;
       # without this rule, no tool calls are recorded. The host is always
       # host.openshell.internal (how the sandbox reaches the machine running
       # midojo-serve); the port must match --control-url (8090 in the
