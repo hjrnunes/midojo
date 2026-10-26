@@ -1107,3 +1107,51 @@ async def test_text_appended_after_a_mirror_keeps_the_mirrored_placement_emitted
     # The text is no longer a mirror, but it still holds the mirror text the first instruction wrote.
     assert _facts(mirrored) == ("applied", True, "identity", ["structured_content", "content_block"])
     assert _facts(tail) == ("applied", True, "identity", ["content_block"])
+
+
+@pytest.mark.asyncio
+async def test_the_same_text_in_another_block_doesnt_make_a_replaced_placement_emitted():
+    first = _instruction(target=InjectionTarget(content_block_index=0), payload="X", mode=InjectionMode.REPLACE)
+    second = _instruction(target=InjectionTarget(content_block_index=0), payload="Y", mode=InjectionMode.REPLACE)
+
+    # The upstream's second block already holds the first payload's text, where no instruction put it.
+    result, _, recorder = await _forward(_text_result("plain", "X"), first, second)
+
+    assert _texts(result) == ["Y", "X"]
+    replaced, kept = recorder.finishes[0]["injection_outcomes"]
+    assert _facts(replaced) == ("applied", True, "identity", [])
+    assert _facts(kept) == ("applied", True, "identity", ["content_block"])
+
+
+@pytest.mark.asyncio
+async def test_the_same_text_appended_by_a_later_instruction_doesnt_make_a_replaced_placement_emitted():
+    first = _instruction(target=InjectionTarget(content_block_index=0), payload="X", mode=InjectionMode.REPLACE)
+    second = _instruction(target=InjectionTarget(content_block_index=0), payload="Y", mode=InjectionMode.REPLACE)
+    third = _instruction(target=InjectionTarget(), payload="X")
+
+    result, _, recorder = await _forward(_text_result("plain"), first, second, third)
+
+    assert _texts(result) == ["Y", "X"]
+    replaced, rewritten, appended = recorder.finishes[0]["injection_outcomes"]
+    assert _facts(replaced) == ("applied", True, "identity", [])
+    assert _facts(rewritten) == ("applied", True, "identity", ["content_block"])
+    assert _facts(appended) == ("applied", True, "identity", ["content_block"])
+
+
+@pytest.mark.asyncio
+async def test_a_mirror_rewritten_while_another_block_holds_its_text_is_not_emitted_in_the_text():
+    mirror_text = json.dumps(_noted("first INJECTED"))
+    # A later instruction appends a block holding exactly the mirror's text, and another rewrites the mirror.
+    appended = _instruction(target=InjectionTarget(), payload=mirror_text)
+    rewrite = _instruction(target=InjectionTarget(content_block_index=0), payload="Y", mode=InjectionMode.REPLACE)
+
+    result, _, recorder = await _forward(
+        _text_result(json.dumps(NOTES), structured=NOTES), _structured_instruction(), appended, rewrite
+    )
+
+    assert _texts(result) == ["Y", mirror_text]
+    mirrored, copied, rewritten = recorder.finishes[0]["injection_outcomes"]
+    # The structured field still carries the first payload; the text it was mirrored into doesn't.
+    assert _facts(mirrored) == ("applied", True, "identity", ["structured_content"])
+    assert _facts(copied) == ("applied", True, "identity", ["content_block"])
+    assert _facts(rewritten) == ("applied", True, "identity", ["content_block"])
