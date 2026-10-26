@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 import httpx
 from pydantic import BaseModel
@@ -24,6 +24,39 @@ from midojo.types import Environment, FunctionCallRecord, InterceptionMode
 if TYPE_CHECKING:
     from midojo_sdk.recorder import Recorder
 
+ResponseModel = TypeVar("ResponseModel", bound=BaseModel)
+
+
+class UnreadableResponseError(httpx.HTTPError):
+    """A successful (2xx) response whose body isn't the model it should be: it couldn't be decoded or validated.
+
+    The control plane accepted the request, so this is never a refusal: what
+    it did is unknown to the caller (``episode_context._refused`` is False),
+    as after a lost response. The decoding error is its ``__cause__``.
+    """
+
+    def __init__(self, message: str, *, response: httpx.Response) -> None:
+        super().__init__(message)
+        self.request = response.request
+        self.response = response
+
+
+def _read(response: httpx.Response, model: type[ResponseModel]) -> ResponseModel:
+    """``response``'s body as ``model``.
+
+    Raises ``HTTPStatusError`` for an error status, and :class:`UnreadableResponseError` for a 2xx body that doesn't
+    decode or validate: never a ValueError, which callers take for a refusal.
+    """
+    response.raise_for_status()
+    try:
+        return model.model_validate(response.json())
+    except ValueError as error:
+        raise UnreadableResponseError(
+            f"{response.request.method} {response.request.url.path} answered {response.status_code}, but its body "
+            f"isn't a {model.__name__}: {type(error).__name__}",
+            response=response,
+        ) from error
+
 
 class ControlClient(Protocol):
     """Drives runs and evaluations on one control plane, for the orchestrator.
@@ -31,7 +64,9 @@ class ControlClient(Protocol):
     :class:`ControlPlaneClient` implements it over HTTP, and
     :class:`midojo.control_plane.inprocess_control.InProcessControlClient` in
     the control plane's own process. Both return the same response models; a
-    failure raises an ``httpx`` error over HTTP, and the control plane's
+    failure raises an ``httpx`` error over HTTP (a 2xx whose body isn't the
+    response model is an :class:`UnreadableResponseError`, never a
+    ValueError: a ValueError is a refusal), and the control plane's
     ``RejectedError`` (or a ``LookupError`` or ``ValueError`` for a request
     the routes would refuse as malformed) in process.
 
@@ -119,8 +154,7 @@ class ControlPlaneClient:
         response = await self._http.post(
             f"{self._base_url}/runs", headers=self._headers, json={"suite_name": suite_name}
         )
-        response.raise_for_status()
-        return CreateRunResponse.model_validate(response.json())
+        return _read(response, CreateRunResponse)
 
     async def create_evaluation(
         self,
@@ -144,8 +178,7 @@ class ControlPlaneClient:
                 **keyed,
             },
         )
-        response.raise_for_status()
-        return CreateEvaluationResponse.model_validate(response.json())
+        return _read(response, CreateEvaluationResponse)
 
     async def start_turn(self, run_id: str | None, eval_id: str, message: str) -> TurnResponse:
         response = await self._http.post(
@@ -153,8 +186,7 @@ class ControlPlaneClient:
             headers=self._headers,
             json={"message": message},
         )
-        response.raise_for_status()
-        return TurnResponse.model_validate(response.json())
+        return _read(response, TurnResponse)
 
     async def record_turn_reply(self, run_id: str | None, eval_id: str, index: int, reply: str) -> TurnResponse:
         response = await self._http.post(
@@ -162,14 +194,12 @@ class ControlPlaneClient:
             headers=self._headers,
             json={"reply": reply},
         )
-        response.raise_for_status()
-        return TurnResponse.model_validate(response.json())
+        return _read(response, TurnResponse)
 
     async def close_evaluation(self, run_id: str | None, eval_id: str) -> CloseResponse:
         """Stop admitting new calls, and wait (up to the control plane's closure wait) for admitted ones to finish."""
         response = await self._http.post(f"{self._evaluation_url(run_id, eval_id)}/close", headers=self._headers)
-        response.raise_for_status()
-        return CloseResponse.model_validate(response.json())
+        return _read(response, CloseResponse)
 
     async def complete_evaluation(
         self, run_id: str | None, eval_id: str, agent_output: str, incomplete: Sequence[str] = ()
@@ -184,13 +214,11 @@ class ControlPlaneClient:
 
     async def grade_evaluation(self, run_id: str | None, eval_id: str) -> GradeResponse:
         response = await self._http.post(f"{self._evaluation_url(run_id, eval_id)}/grade", headers=self._headers)
-        response.raise_for_status()
-        return GradeResponse.model_validate(response.json())
+        return _read(response, GradeResponse)
 
     async def evaluation(self, run_id: str | None, eval_id: str) -> EvaluationResponse:
         response = await self._http.get(f"{self._evaluation_url(run_id, eval_id)}", headers=self._headers)
-        response.raise_for_status()
-        return EvaluationResponse.model_validate(response.json())
+        return _read(response, EvaluationResponse)
 
     async def record_observations(self, run_id: str | None, eval_id: str, source: str, observed: BaseModel) -> None:
         response = await self._http.post(
@@ -202,8 +230,7 @@ class ControlPlaneClient:
 
     async def snapshot(self, run_id: str | None, eval_id: str, *, environment_type: type[Environment]) -> Snapshot:
         response = await self._http.get(f"{self._evaluation_url(run_id, eval_id)}/snapshot", headers=self._headers)
-        response.raise_for_status()
-        return snapshot_from_response(SnapshotResponse.model_validate(response.json()), environment_type)
+        return snapshot_from_response(_read(response, SnapshotResponse), environment_type)
 
     def recorder(self, session_token: str) -> Recorder:
         """The session's recorder over HTTP, on this client's connection pool, resending after a transient failure."""

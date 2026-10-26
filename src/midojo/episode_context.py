@@ -590,7 +590,9 @@ def _refused(error: BaseException) -> bool:
 
     A ValueError is one: a rejection in process (``RejectedError``), a request
     pydantic's validation refused, or one refused before it was sent. Over
-    HTTP, so is a 4xx response. A refused write can still be kept as a late
+    HTTP, so is a 4xx response. A 2xx whose body can't be read is not: the
+    control plane accepted the request, and the HTTP client raises it as an
+    ``UnreadableResponseError`` (an ``httpx.HTTPError``), never a ValueError. A refused write can still be kept as a late
     fact (a seal with another output on a sealed evaluation, say), but the
     seal and the snapshot are as they were. Anything else (a transport error,
     a timeout, a 5xx, a cancellation) leaves the outcome unknown: the request

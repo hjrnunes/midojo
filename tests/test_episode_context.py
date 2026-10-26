@@ -36,7 +36,7 @@ from midojo_sdk.recorder import ControlPlaneRejectedError, RejectionKind
 
 import midojo
 from midojo.control_plane import lifecycle
-from midojo.control_plane.client import ControlPlaneClient
+from midojo.control_plane.client import ControlPlaneClient, UnreadableResponseError
 from midojo.control_plane.config import AppConfig
 from midojo.control_plane.inprocess_control import InProcessControlClient
 from midojo.control_plane.lifecycle import (
@@ -769,6 +769,58 @@ async def test_a_create_lost_twice_is_raised_and_a_refused_one_is_never_resent(s
     assert len(refusing.creates) == 1
 
 
+# A successful create's body the client can't read: not JSON, or JSON that isn't a CreateEvaluationResponse.
+MALFORMED_BODIES = [pytest.param(b"<html>ok</html>", id="not_json"), pytest.param(b'{"id": 5}', id="not_the_model")]
+
+
+class MalformedCreateTransport(httpx.AsyncBaseTransport):
+    """The control plane's app, except that the first create is applied and answered 201 with ``body``."""
+
+    def __init__(self, app, body: bytes) -> None:
+        self.app, self.body, self.creates = httpx.ASGITransport(app), body, []
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        response = await self.app.handle_async_request(request)
+        if request.method == "POST" and request.url.path.endswith("/evaluations"):
+            self.creates.append(json.loads(request.content))
+            if len(self.creates) == 1:
+                return httpx.Response(201, content=self.body, request=request)
+        return response
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", MALFORMED_BODIES)
+async def test_a_successful_response_the_client_cant_read_is_never_taken_for_a_refusal(suite, body):
+    app = create_app({"weather": suite}, config=AppConfig(closure_wait_seconds=0))
+    run = app.state.control.create_run("weather")
+    async with httpx.AsyncClient(transport=MalformedCreateTransport(app, body)) as http:
+        control = ControlPlaneClient("http://control", http=http)
+        with pytest.raises(UnreadableResponseError) as unreadable:
+            await control.create_evaluation(run.id, "weather_new_york", None, {})
+    assert not isinstance(unreadable.value, ValueError) and isinstance(unreadable.value.__cause__, ValueError)
+    assert unreadable.value.response.status_code == 201
+    assert not _refused(unreadable.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", MALFORMED_BODIES)
+async def test_a_create_answered_with_a_malformed_body_is_resent_and_opens_one_evaluation(suite, body):
+    app = create_app({"weather": suite}, config=AppConfig(closure_wait_seconds=0))
+    plane: ControlPlane = app.state.control
+    run = plane.create_run("weather")
+    transport = MalformedCreateTransport(app, body)
+    async with httpx.AsyncClient(transport=transport) as http:
+        control = ControlPlaneClient("http://control", http=http)
+        episode = suite.episode("weather_new_york")
+        async with open_episode(episode, runtime=RecordingRuntime(), control=control, run_id=run.id) as ep:
+            await ep.turn("weather?", _reply("rain"))
+    first, resent = transport.creates
+    assert first == resent and first["idempotency_key"]
+    [evaluation] = plane.evaluations(run.id)
+    assert ep.evaluation_id == evaluation.id and not ep.interrupted
+    assert ep.sealed.agent_output == "rain"
+
+
 class HangingCreateTransport(httpx.AsyncBaseTransport):
     """The control plane's app, except that the first create is applied and its response never comes.
 
@@ -915,6 +967,11 @@ _REQUEST = httpx.Request("POST", "http://control/complete")
         pytest.param(httpx.ConnectError("lost", request=_REQUEST), False, id="connect_error"),
         pytest.param(httpx.ReadError("lost", request=_REQUEST), False, id="read_error"),
         pytest.param(httpx.ReadTimeout("slow", request=_REQUEST), False, id="timeout"),
+        pytest.param(
+            UnreadableResponseError("unreadable", response=httpx.Response(201, request=_REQUEST)),
+            False,
+            id="unreadable_response",
+        ),
         pytest.param(asyncio.CancelledError(), False, id="cancelled"),
         pytest.param(KeyboardInterrupt(), False, id="keyboard_interrupt"),
     ],
