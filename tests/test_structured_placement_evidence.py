@@ -279,3 +279,46 @@ async def test_a_detailed_finish_falls_back_to_the_plain_one(wrap):
         )
 
     assert legacy.finishes == [{"call_id": "c1", "result": "r", "error": None, "disposition": "forwarded"}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "wrap",
+    [
+        lambda legacy: legacy,
+        lambda legacy: RetryingRecorder(legacy, retryable=transient),
+        lambda legacy: ReportingRecorder(legacy),
+    ],
+    ids=["direct", "retrying", "reporting"],
+)
+@pytest.mark.parametrize("planned", [False, True], ids=["no-plan", "other-tool"])
+async def test_a_text_only_fallback_with_nothing_matched_still_warns(wrap, planned, caplog):
+    legacy = LegacyRecorder()
+    upstream = CallToolResult(content=[TextContent(type="text", text="plain")])
+    other_tool = InjectionTarget(
+        tool="other_tool", surface=SelectorSurface.STRUCTURED_CONTENT, structured_content_path=("summary",)
+    )
+    instructions = (placement(target=other_tool),) if planned else ()
+
+    with caplog.at_level(logging.WARNING, logger="midojo_sdk.mcp"):
+        result, mcp = await forward(wrap(legacy), upstream, *instructions)
+
+    assert (agent_text(result), result.structuredContent) == ("plain", None)
+    assert mcp.injection_outcomes == ()
+    assert legacy.finishes == [
+        {"call_id": legacy.finishes[0]["call_id"], "result": "plain", "error": None, "disposition": "forwarded"}
+    ]
+    assert "recorded with its text only" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_sealed_text_only_fallback_reports_no_details(control, caplog):
+    upstream = CallToolResult(content=[TextContent(type="text", text="plain")])
+
+    with caplog.at_level(logging.WARNING, logger="midojo_sdk.mcp"):
+        result, _, record = await sealed(control, upstream, legacy=True)
+
+    assert record.result == agent_text(result) == "plain"
+    # Not an empty list: the record doesn't claim that nothing was placed.
+    assert (record.structured_content, record.injection_outcomes) == (None, None)
+    assert "recorded with its text only" in caplog.text

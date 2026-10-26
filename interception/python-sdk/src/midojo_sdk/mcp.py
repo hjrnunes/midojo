@@ -634,7 +634,9 @@ async def _finish_forwarded(
 
     A recorder without the capability (see ``DetailedRecorder``) never fails
     the call over it: the agent still gets its result, and the record, with
-    no ``injection_outcomes``, says the details weren't reported.
+    no ``injection_outcomes``, says the details weren't reported. Every such
+    fallback logs a warning, even for a text-only result no instruction
+    matched: its record still loses the empty outcomes that say so.
     """
     detailed = await finish_detailed(
         recorder,
@@ -647,13 +649,14 @@ async def _finish_forwarded(
         structured_content=structured_content,
         injection_outcomes=_records(outcomes),
     )
-    if not detailed and (structured_content is not None or outcomes):
+    if not detailed:
         logger.warning(
             "%s can't record a finish's details: %s (%s) is recorded with its text only, without its structured "
-            "content or %d injection outcome(s)",
+            "content (%s) or its %d injection outcome(s)",
             type(recorder).__name__,
             name,
             call_id,
+            "none" if structured_content is None else "present",
             len(outcomes),
         )
 
