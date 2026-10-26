@@ -1155,3 +1155,74 @@ async def test_a_mirror_rewritten_while_another_block_holds_its_text_is_not_emit
     assert _facts(mirrored) == ("applied", True, "identity", ["structured_content"])
     assert _facts(copied) == ("applied", True, "identity", ["content_block"])
     assert _facts(rewritten) == ("applied", True, "identity", ["content_block"])
+
+
+# A structured placement counts only in the field it wrote, while no later instruction replaced that field.
+
+
+def _replace_body(path: tuple = NOTE_BODY, payload: str = " INJECTED") -> InjectionInstruction:
+    target = InjectionTarget(surface=SelectorSurface.STRUCTURED_CONTENT, structured_content_path=path)
+    return _instruction(target=target, payload=payload, mode=InjectionMode.REPLACE)
+
+
+@pytest.mark.asyncio
+async def test_a_field_replaced_with_the_same_payload_is_emitted_only_by_the_later_instruction():
+    result, _, recorder = await _forward(
+        _text_result("Notes: first", structured=NOTES), _replace_body(), _replace_body()
+    )
+
+    assert _structured(result)["notes"][0]["body"] == " INJECTED"
+    overwritten, kept = recorder.finishes[0]["injection_outcomes"]
+    assert _facts(overwritten) == ("partial", True, "identity", [])
+    assert _facts(kept) == ("partial", True, "identity", ["structured_content"])
+
+
+@pytest.mark.asyncio
+async def test_a_mirrored_field_replaced_with_the_same_payload_is_emitted_only_by_the_later_instruction():
+    result, _, recorder = await _forward(
+        _text_result(json.dumps(NOTES), structured=NOTES), _replace_body(), _replace_body()
+    )
+
+    [text] = _texts(result)
+    assert json.loads(text) == _structured(result) == _noted(" INJECTED")
+    overwritten, kept = recorder.finishes[0]["injection_outcomes"]
+    # The mirror text follows the field: the earlier instruction's write was replaced in both parts.
+    assert _facts(overwritten) == ("applied", True, "identity", [])
+    assert _facts(kept) == ("applied", True, "identity", ["structured_content", "content_block"])
+
+
+@pytest.mark.asyncio
+async def test_the_same_field_selected_by_record_and_by_index_is_one_field():
+    by_index = _replace_body(path=("notes", 0, "body"))
+
+    _, _, recorder = await _forward(_text_result(json.dumps(NOTES), structured=NOTES), _replace_body(), by_index)
+
+    by_record, later = recorder.finishes[0]["injection_outcomes"]
+    assert _facts(by_record) == ("applied", True, "identity", [])
+    assert _facts(later) == ("applied", True, "identity", ["structured_content", "content_block"])
+
+
+@pytest.mark.asyncio
+async def test_two_appends_to_one_field_are_both_emitted_while_both_survive():
+    result, _, recorder = await _forward(
+        _text_result(json.dumps(NOTES), structured=NOTES), _structured_instruction(), _structured_instruction()
+    )
+
+    assert _structured(result)["notes"][0]["body"] == "first INJECTED INJECTED"
+    first, second = recorder.finishes[0]["injection_outcomes"]
+    assert _facts(first) == _facts(second) == ("applied", True, "identity", ["structured_content", "content_block"])
+
+
+@pytest.mark.asyncio
+async def test_appends_a_later_replace_overwrote_are_not_emitted_though_it_wrote_the_same_text():
+    # The replace writes exactly what the two appends had made of the field.
+    replace = _replace_body(payload="first INJECTED INJECTED")
+
+    result, _, recorder = await _forward(
+        _text_result(json.dumps(NOTES), structured=NOTES), _structured_instruction(), _structured_instruction(), replace
+    )
+
+    assert _structured(result)["notes"][0]["body"] == "first INJECTED INJECTED"
+    first, second, last = recorder.finishes[0]["injection_outcomes"]
+    assert _facts(first) == _facts(second) == ("applied", True, "identity", [])
+    assert _facts(last) == ("applied", True, "identity", ["structured_content", "content_block"])
