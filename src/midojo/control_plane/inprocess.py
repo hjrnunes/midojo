@@ -18,6 +18,7 @@ extras); nothing else in ``midojo`` imports it.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any, TypeVar
 
 from midojo_sdk.recorder import (
@@ -27,6 +28,7 @@ from midojo_sdk.recorder import (
     ControlPlaneRejectedError,
     Disposition,
     EnvironmentRevision,
+    InjectionRecord,
     InvalidRequestError,
     RejectionKind,
 )
@@ -90,6 +92,34 @@ class InProcessAgentClient:
         disposition: Disposition,
         error: str | None = None,
     ) -> None:
+        await self._finish(call_id, function, args, result, disposition, error)
+
+    async def finish_call_detailed(
+        self,
+        *,
+        call_id: str,
+        function: str,
+        args: dict[str, Any],
+        result: str,
+        disposition: Disposition,
+        error: str | None = None,
+        structured_content: dict[str, Any] | None,
+        injection_outcomes: Sequence[InjectionRecord],
+    ) -> None:
+        """Finish a call as ``finish_call`` does, with its structured content and injection outcomes (always a list)."""
+        details = {"structured_content": structured_content, "injection_outcomes": list(injection_outcomes)}
+        await self._finish(call_id, function, args, result, disposition, error, **details)
+
+    async def _finish(
+        self,
+        call_id: str,
+        function: str,
+        args: dict[str, Any],
+        result: str,
+        disposition: Disposition,
+        error: str | None,
+        **details: Any,
+    ) -> None:
         req = _request(
             CreateFunctionCallRecord,
             call_id=call_id,
@@ -99,6 +129,7 @@ class InProcessAgentClient:
             error=error,
             blocked=disposition in REFUSED,
             disposition=disposition,
+            **details,
         )
         try:
             self._control.finish_call(self._target, req)

@@ -1,12 +1,14 @@
 """Tests for how the Python SDK identifies, resends and reports function-call records."""
 
 import json
+import typing
 
 import httpx
 import pytest
 from midojo_sdk import client as sdk_client
 from midojo_sdk import recorder as sdk_recorder
 from midojo_sdk.client import RECORD_ATTEMPTS, AgentControlPlaneClient, CallIds, transient
+from midojo_sdk.injection import OutcomeStatus
 from midojo_sdk.recorder import (
     ControlPlaneRecorder,
     ControlPlaneRejectedError,
@@ -17,6 +19,7 @@ from midojo_sdk.recorder import (
 )
 
 from midojo.control_plane.lifecycle import Rejection
+from midojo.types import InjectionStatus
 
 
 @pytest.fixture(autouse=True)
@@ -369,8 +372,16 @@ async def test_both_implementations_record_the_same_call(client, backend):
     agent = backend.agent(token)
 
     await agent.start_call(call_id="c1", function="get_weather", args={"city": "Boston"}, disposition="forwarded")
-    await agent.finish_call(
-        call_id="c1", function="get_weather", args={"city": "Boston"}, result="r", error="e", disposition="forwarded"
+    outcome = {"instruction_index": 0, "probe_key": "p:main", "occurrence": 1, "status": "partial", "detail": "d"}
+    await agent.finish_call_detailed(
+        call_id="c1",
+        function="get_weather",
+        args={"city": "Boston"},
+        result="r",
+        error="e",
+        disposition="forwarded",
+        structured_content={"forecast": "rain"},
+        injection_outcomes=[outcome],
     )
 
     [call] = client.get(f"/runs/{run_id}/evaluations/{eval_id}/function-calls").json()
@@ -383,11 +394,79 @@ async def test_both_implementations_record_the_same_call(client, backend):
         "error": "e",
         "blocked": False,
         "disposition": "forwarded",
+        "structured_content": {"forecast": "rain"},
+        "injection_outcomes": [outcome],
         "complete": True,
         # Set by the control plane from the session it arrived with, on either transport.
         "provenance": "agent",
         "turn": None,
     }
+
+
+@pytest.mark.asyncio
+async def test_a_plain_finish_says_its_details_were_not_reported(client, backend):
+    run_id, eval_id, token = new_evaluation(client)
+    agent = backend.agent(token)
+    await agent.finish_call(call_id="c1", function="f", args={}, result="r", disposition="forwarded")
+    await agent.finish_call_detailed(
+        call_id="c2",
+        function="f",
+        args={},
+        result="r",
+        disposition="forwarded",
+        structured_content=None,
+        injection_outcomes=[],
+    )
+
+    plain, detailed = client.get(f"/runs/{run_id}/evaluations/{eval_id}/function-calls").json()
+    # None: the text only was reported. An empty list: the details were, and no instruction matched.
+    assert (plain["structured_content"], plain["injection_outcomes"]) == (None, None)
+    assert (detailed["structured_content"], detailed["injection_outcomes"]) == (None, [])
+
+
+def test_a_recorded_injection_status_is_an_sdk_outcome_status():
+    assert set(typing.get_args(InjectionStatus)) == {status.value for status in OutcomeStatus}
+
+
+@pytest.mark.asyncio
+async def test_a_finish_replays_only_with_the_same_structured_content_and_outcomes(client, backend):
+    run_id, eval_id, token = new_evaluation(client)
+    agent = backend.agent(token)
+    outcome = {"instruction_index": 0, "probe_key": None, "occurrence": 1, "status": "applied", "detail": "d"}
+    finish = {
+        "call_id": "c1",
+        "function": "f",
+        "args": {},
+        "result": "r",
+        "disposition": "forwarded",
+        "structured_content": {"n": 1},
+        "injection_outcomes": [outcome],
+    }
+    await agent.finish_call_detailed(**finish)
+    await agent.finish_call_detailed(**finish)
+
+    for changed in ({"structured_content": {"n": True}}, {"injection_outcomes": [outcome | {"status": "partial"}]}):
+        with pytest.raises(ControlPlaneRejectedError) as refused:
+            await agent.finish_call_detailed(**(finish | changed))
+        assert refused.value.kind is RejectionKind.CALL_CONFLICT
+    [call] = client.get(f"/runs/{run_id}/evaluations/{eval_id}/function-calls").json()
+    assert (call["structured_content"], call["injection_outcomes"]) == ({"n": 1}, [outcome])
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_injection_status_is_an_invalid_request(client, backend):
+    _, _, token = new_evaluation(client)
+    outcome = {"instruction_index": 0, "probe_key": None, "occurrence": 1, "status": "half", "detail": "d"}
+    with pytest.raises(InvalidRequestError):
+        await backend.agent(token).finish_call_detailed(
+            call_id="c1",
+            function="f",
+            args={},
+            result="r",
+            disposition="forwarded",
+            structured_content=None,
+            injection_outcomes=[outcome],
+        )
 
 
 class Refusing:

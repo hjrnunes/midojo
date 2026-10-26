@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+from collections.abc import Sequence
 from typing import Any
 
 import pytest
@@ -30,12 +31,35 @@ from midojo_sdk.injection import (
     instruction_from_generator_for_plan,
 )
 from midojo_sdk.mcp import MidojoMCP, ToolContext
-from midojo_sdk.recorder import Disposition
+from midojo_sdk.recorder import Disposition, InjectionRecord
 
 from midojo.episode import Episode
 from midojo.suites import get_suite
 from tests.scripted_mcp import ScriptedMCP
 from tests.test_mcp_fidelity import CapturingRecorder
+
+MIRRORED = "exact selector matched; mirrored text re-serialised"
+
+
+class DetailedCapturingRecorder(CapturingRecorder):
+    """A capturing recorder that records a finish's details too (a ``DetailedRecorder``)."""
+
+    async def finish_call_detailed(
+        self,
+        *,
+        call_id: str,
+        function: str,
+        args: dict[str, Any],
+        result: str,
+        disposition: Disposition,
+        error: str | None = None,
+        structured_content: dict[str, Any] | None,
+        injection_outcomes: Sequence[InjectionRecord],
+    ) -> None:
+        await self.finish_call(
+            call_id=call_id, function=function, args=args, result=result, disposition=disposition, error=error
+        )
+        self.finishes[-1] |= {"structured_content": structured_content, "injection_outcomes": list(injection_outcomes)}
 
 
 def _instruction(**changes: Any) -> InjectionInstruction:
@@ -67,8 +91,8 @@ class ConcurrentUpstream:
 
 def _mcp(
     plan: InjectionPlan, *, evaluation_id: str = "evaluation-1"
-) -> tuple[MidojoMCP, ConcurrentUpstream, CapturingRecorder]:
-    recorder = CapturingRecorder()
+) -> tuple[MidojoMCP, ConcurrentUpstream, DetailedCapturingRecorder]:
+    recorder = DetailedCapturingRecorder()
     mcp = MidojoMCP("proxy", recorder=recorder, upstream_transport=object(), plan=plan, evaluation_id=evaluation_id)
     upstream = ConcurrentUpstream()
     mcp._upstream = upstream  # type: ignore[assignment]
@@ -90,10 +114,13 @@ def _structured(result: CallToolResult) -> dict[str, Any]:
 
 
 async def _inject_structured(structured_content: Any, path: tuple, **changes: Any) -> tuple[CallToolResult, Any]:
+    """Inject into a result whose text mirrors its structured content compactly, as FastMCP sends it."""
+    text = "unchanged" if structured_content is None else json.dumps(structured_content, separators=(",", ":"))
+
     class StructuredUpstream:
         async def call_tool_mcp(self, _name: str, _args: dict[str, Any]) -> CallToolResult:
             return CallToolResult(
-                content=[TextContent(type="text", text="unchanged")],
+                content=[TextContent(type="text", text=text)],
                 structuredContent=structured_content,
             )
 
@@ -140,11 +167,15 @@ async def test_structured_field_selector_changes_only_that_field():
     result = _wire_result(await call)
     assert _texts(result) == ["result 1"]
     assert result.structuredContent == {"items": [{"summary": "result 1 INJECTED"}]}
+    # "result 1" isn't the JSON of the structured content, so only the structured content carries the payload.
+    [outcome] = mcp.injection_outcomes
+    assert outcome.status is OutcomeStatus.PARTIAL
     assert recorder.finishes[0]["result"] == "result 1"
+    assert recorder.finishes[0]["structured_content"] == result.structuredContent
 
 
 @pytest.mark.asyncio
-async def test_mixed_content_and_record_selector_injections_record_the_content_text_as_before():
+async def test_a_content_injection_before_a_structured_one_leaves_no_mirror_so_that_one_is_partial():
     class StructuredUpstream:
         async def call_tool_mcp(self, _name: str, _args: dict[str, Any]) -> CallToolResult:
             return CallToolResult(
@@ -169,8 +200,10 @@ async def test_mixed_content_and_record_selector_injections_record_the_content_t
 
     assert _texts(result) == ["result CONTENT"]
     assert _structured(result)["notes"][0]["body"] == "original STRUCTURED"
-    assert [outcome.status for outcome in mcp.injection_outcomes] == [OutcomeStatus.APPLIED, OutcomeStatus.APPLIED]
-    assert recorder.finishes[0]["result"] == "result CONTENT"
+    assert [outcome.status for outcome in mcp.injection_outcomes] == [OutcomeStatus.APPLIED, OutcomeStatus.PARTIAL]
+    [finish] = recorder.finishes
+    assert (finish["result"], finish["structured_content"]) == ("result CONTENT", result.structuredContent)
+    assert [record["status"] for record in finish["injection_outcomes"]] == ["applied", "partial"]
 
 
 @pytest.mark.asyncio
@@ -186,7 +219,8 @@ async def test_record_selector_injects_one_matching_record_in_both_modes(mode, e
         "notes": [{"id": "NOTE-1", "body": expected}, {"id": "NOTE-2", "body": "other"}]
     }
     assert source["notes"][0]["body"] == "original"
-    assert (outcome.status, outcome.detail) == (OutcomeStatus.APPLIED, "exact selector matched")
+    assert json.loads(_texts(result)[0]) == result.structuredContent
+    assert (outcome.status, outcome.detail) == (OutcomeStatus.APPLIED, MIRRORED)
 
 
 @pytest.mark.asyncio
@@ -277,7 +311,7 @@ async def test_record_selector_matching_is_type_exact_and_fallback_stays_explici
         {"id": "1", "body": "string"},
         {"id": 1, "body": "integer INJECTED"},
     ]
-    assert _texts(fallback) == ["unchanged", " INJECTED"]
+    assert _texts(fallback) == ['{"notes":[]}', " INJECTED"]
     assert outcome.status is OutcomeStatus.FALLBACK
     assert "matched no records" in outcome.detail
 
@@ -731,3 +765,218 @@ async def test_strict_mismatch_is_reported_and_fallback_is_explicit():
     fallback_result = _wire_result(await fallback_call)
     assert _texts(fallback_result) == ["result 1", " INJECTED"]
     assert fallback.injection_outcomes[0].status is OutcomeStatus.FALLBACK
+
+
+# --- the text that mirrors structured content ---
+
+NOTES = {"notes": [{"id": "NOTE-1", "body": "first"}, {"id": "NOTE-2", "body": "second ü"}]}
+NOTE_BODY = ("notes", RecordSelector("NOTE-1"), "body")
+
+
+class FixedUpstream:
+    def __init__(self, result: CallToolResult) -> None:
+        self.result = result
+
+    async def call_tool_mcp(self, _name: str, _args: dict[str, Any]) -> CallToolResult:
+        return self.result
+
+
+def _structured_instruction(**changes: Any) -> InjectionInstruction:
+    target = InjectionTarget(surface=SelectorSurface.STRUCTURED_CONTENT, structured_content_path=NOTE_BODY)
+    return _instruction(target=target, **changes)
+
+
+def _noted(body: str, structured: dict[str, Any] = NOTES) -> dict[str, Any]:
+    changed = json.loads(json.dumps(structured))
+    changed["notes"][0]["body"] = body
+    return changed
+
+
+async def _forward(
+    result: CallToolResult, *instructions: InjectionInstruction
+) -> tuple[CallToolResult, MidojoMCP, DetailedCapturingRecorder]:
+    mcp, _, recorder = _mcp(InjectionPlan(instructions))
+    mcp._upstream = FixedUpstream(result)  # type: ignore[assignment]
+    return _wire_result(await mcp._forward_call("lookup", {})), mcp, recorder
+
+
+def _text_result(*texts: str, structured: Any = None, is_error: bool = False) -> CallToolResult:
+    content = [TextContent(type="text", text=text) for text in texts]
+    return CallToolResult(content=list(content), structuredContent=structured, isError=is_error)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "style",
+    [
+        {"separators": (",", ":"), "ensure_ascii": False},
+        {},
+        {"indent": 2, "ensure_ascii": False},
+        {"indent": 4, "sort_keys": True},
+        {"separators": (",", ":"), "ensure_ascii": True},
+    ],
+    ids=["compact", "spaced", "indent-2", "indent-4-sorted", "compact-ascii"],
+)
+@pytest.mark.parametrize(
+    ("mode", "body"), [(InjectionMode.APPEND, "first INJECTED"), (InjectionMode.REPLACE, " INJECTED")]
+)
+async def test_a_mirrored_text_block_is_re_serialised_in_its_own_style(style, mode, body):
+    text = json.dumps(NOTES, **style)
+
+    result, mcp, recorder = await _forward(_text_result(text, structured=NOTES), _structured_instruction(mode=mode))
+
+    expected = _noted(body)
+    assert result.structuredContent == expected
+    assert _texts(result) == [json.dumps(expected, **style)]
+    [outcome] = mcp.injection_outcomes
+    assert (outcome.status, outcome.detail) == (OutcomeStatus.APPLIED, MIRRORED)
+    # The record is what the agent got: the re-serialised text and the injected structured content.
+    [finish] = recorder.finishes
+    assert (finish["result"], finish["structured_content"], finish["error"]) == (_texts(result)[0], expected, None)
+    assert finish["injection_outcomes"] == [
+        {"instruction_index": 0, "probe_key": None, "occurrence": 1, "status": "applied", "detail": MIRRORED}
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("text", "layout"),
+    [
+        ('{"n":1e20,' + json.dumps(NOTES, separators=(",", ":"))[1:], {"separators": (",", ":")}),
+        (json.dumps({"n": 1e20, **NOTES}, indent=3).replace("1e+20", "1e20"), {"indent": 3, "separators": (",", ": ")}),
+    ],
+    ids=["compact", "indented"],
+)
+async def test_a_mirror_no_layout_reproduces_keeps_its_compact_or_indented_layout(text, layout):
+    structured = {"n": 1e20, **NOTES}
+
+    result, mcp, _ = await _forward(_text_result(text, structured=structured), _structured_instruction())
+
+    expected = _noted("first INJECTED", structured)
+    assert _texts(result) == [json.dumps(expected, ensure_ascii=False, **layout)]
+    assert mcp.injection_outcomes[0].status is OutcomeStatus.APPLIED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("content", "structured", "reason"),
+    [
+        (["Notes: first, second"], NOTES, "text content is not JSON"),
+        (['{"notes": []}'], NOTES, "differs from the structured content"),
+        (['{"count": true, "notes": []}'], {"count": 1, "notes": NOTES["notes"]}, "differs"),
+        ([json.dumps(NOTES), "more"], NOTES, "not a single text block (2 content blocks)"),
+        ([], NOTES, "not a single text block (0 content blocks)"),
+    ],
+    ids=["not-json", "other-json", "type-differs", "two-blocks", "no-content"],
+)
+@pytest.mark.parametrize("policy", list(MismatchPolicy))
+async def test_text_that_is_not_a_mirror_is_left_alone_and_the_placement_is_partial(
+    content, structured, reason, policy
+):
+    upstream = _text_result(*content, structured=structured)
+
+    result, mcp, recorder = await _forward(upstream, _structured_instruction(mismatch_policy=policy))
+
+    # Never a guess: the text is what the upstream sent, even under fallback_append.
+    assert _texts(result) == content
+    assert result.structuredContent == _noted("first INJECTED", structured)
+    [outcome] = mcp.injection_outcomes
+    assert outcome.status is OutcomeStatus.PARTIAL
+    assert outcome.detail.startswith("exact selector matched structured content only; ")
+    assert reason in outcome.detail
+    [finish] = recorder.finishes
+    assert (finish["result"], finish["structured_content"]) == ("\n".join(content), result.structuredContent)
+    [record] = finish["injection_outcomes"]
+    assert (record["status"], record["detail"]) == ("partial", outcome.detail)
+
+
+@pytest.mark.asyncio
+async def test_size_limit_is_checked_before_the_mirror_is_touched():
+    upstream = _text_result(json.dumps(NOTES, separators=(",", ":")), structured=NOTES)
+
+    fits, _, _ = await _forward(upstream, _structured_instruction(size_limit=len(b" INJECTED")))
+    too_large, mcp, recorder = await _forward(upstream, _structured_instruction(size_limit=len(b" INJECTED") - 1))
+
+    assert json.loads(_texts(fits)[0]) == fits.structuredContent == _noted("first INJECTED")
+    assert (too_large.content, too_large.structuredContent) == (upstream.content, NOTES)
+    assert mcp.injection_outcomes[0].status is OutcomeStatus.TOO_LARGE
+    [finish] = recorder.finishes
+    assert (finish["structured_content"], finish["injection_outcomes"][0]["status"]) == (NOTES, "too_large")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mirrored", [True, False], ids=["mirror", "not-a-mirror"])
+async def test_an_error_result_is_placed_and_recorded_like_any_other(mirrored):
+    text = json.dumps(NOTES) if mirrored else "Error: see structured content"
+    upstream = _text_result(text, structured=NOTES, is_error=True)
+
+    result, mcp, recorder = await _forward(upstream, _structured_instruction())
+
+    assert result.isError is True
+    assert result.structuredContent == _noted("first INJECTED")
+    assert _texts(result) == ([json.dumps(result.structuredContent)] if mirrored else [text])
+    assert mcp.injection_outcomes[0].status is (OutcomeStatus.APPLIED if mirrored else OutcomeStatus.PARTIAL)
+    [finish] = recorder.finishes
+    assert finish["result"] == finish["error"] == _texts(result)[0]
+    assert finish["structured_content"] == result.structuredContent
+
+
+@pytest.mark.asyncio
+async def test_a_text_only_result_is_placed_and_recorded_as_before():
+    result, mcp, recorder = await _forward(_text_result("plain"), _instruction())
+
+    assert (_texts(result), result.structuredContent) == (["plain INJECTED"], None)
+    [outcome] = mcp.injection_outcomes
+    assert (outcome.status, outcome.detail) == (OutcomeStatus.APPLIED, "exact selector matched")
+    [finish] = recorder.finishes
+    assert (finish["result"], finish["structured_content"]) == ("plain INJECTED", None)
+    assert [record["status"] for record in finish["injection_outcomes"]] == ["applied"]
+
+
+@pytest.mark.asyncio
+async def test_a_call_without_admitted_instructions_records_no_outcomes():
+    target = InjectionTarget(tool="lookup", content_block_index=0)
+    plan = InjectionPlan((_instruction(target=target, occurrence=OccurrenceRule(Occurrence.NTH, 2)),))
+    mcp, _, recorder = _mcp(plan)
+    mcp._upstream = FixedUpstream(_text_result("first"))  # type: ignore[assignment]
+
+    await mcp._forward_call("lookup", {})
+    await mcp._forward_call("other", {})
+
+    skipped, unmatched_tool = recorder.finishes
+    assert [record["status"] for record in skipped["injection_outcomes"]] == ["skipped_occurrence"]
+    assert unmatched_tool["injection_outcomes"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_mirror_in_its_own_key_order_is_re_serialised_in_the_structured_contents_order():
+    structured = {"b": "x", "notes": [{"id": "NOTE-1", "body": "first"}], "a": 1}
+    text = '{"a":1,"notes":[{"body":"first","id":"NOTE-1"}],"b":"x"}'
+
+    result, mcp, _ = await _forward(_text_result(text, structured=structured), _structured_instruction())
+
+    # The text's own key order can't be reproduced: the payload reaches it, in the structured content's order.
+    expected = _noted("first INJECTED", structured)
+    assert _texts(result) == [json.dumps(expected, separators=(",", ":"), ensure_ascii=False)]
+    assert mcp.injection_outcomes[0].status is OutcomeStatus.APPLIED
+
+
+@pytest.mark.asyncio
+async def test_a_mirror_with_a_trailing_newline_loses_it_but_keeps_its_indentation():
+    text = json.dumps(NOTES, indent=2, ensure_ascii=False) + "\n"
+
+    result, _, _ = await _forward(_text_result(text, structured=NOTES), _structured_instruction())
+
+    assert _texts(result) == [json.dumps(_noted("first INJECTED"), indent=2, ensure_ascii=False)]
+
+
+@pytest.mark.asyncio
+async def test_an_all_ascii_mirror_gets_a_non_ascii_payload_unescaped():
+    structured = {"notes": [{"id": "NOTE-1", "body": "first"}]}
+    text = json.dumps(structured, separators=(",", ":"))
+
+    result, _, _ = await _forward(_text_result(text, structured=structured), _structured_instruction(payload=" ü"))
+
+    [sent] = _texts(result)
+    assert "first ü" in sent
+    assert json.loads(sent) == result.structuredContent == _noted("first ü", structured)

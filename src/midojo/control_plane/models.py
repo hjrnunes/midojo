@@ -5,7 +5,15 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, field_validator
 
 from midojo.observations import EvidenceStatus, require_evidence_keys
-from midojo.types import CallDisposition, CallProvenance, Environment, GradeValidity, InterceptionMode, SuiteName
+from midojo.types import (
+    CallDisposition,
+    CallInjectionOutcome,
+    CallProvenance,
+    Environment,
+    GradeValidity,
+    InterceptionMode,
+    SuiteName,
+)
 
 # --- Run / Evaluation request/response models ---
 
@@ -53,6 +61,23 @@ class FunctionCallBody(FunctionCallStart):
         description="The tool never ran: the agent's call was blocked, and `result` is what the agent was told instead.",
     )
     disposition: CallDisposition | None = Field(default=None, description=_DISPOSITION_DESCRIPTION)
+    structured_content: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "The structured content the agent got with `result` (its text), exactly as it got it. Optional: None "
+            "when the result had none or the layer reports the text only."
+        ),
+    )
+    injection_outcomes: list[CallInjectionOutcome] | None = Field(
+        default=None,
+        description=(
+            "How each injection instruction that matched the call fared: those the interception layer admitted for "
+            "it (applied, partial: the payload is in `structured_content` only, as the text isn't a JSON mirror of "
+            "it; fallback, unmatched, too_large or no_result) and those whose occurrence rule skipped it "
+            "(skipped_occurrence). Empty when none matched. Optional: left out (None), the record carries the "
+            "result's text only and says nothing about its structured content or injections."
+        ),
+    )
 
 
 class CreateFunctionCallRecord(FunctionCallBody):

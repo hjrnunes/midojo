@@ -49,7 +49,15 @@ from midojo_sdk.injection import (
     Transformation,
     capability_gaps,
 )
-from midojo_sdk.recorder import Disposition, Recorder, RetryingRecorder, WorldState, reporting
+from midojo_sdk.recorder import (
+    Disposition,
+    InjectionRecord,
+    Recorder,
+    RetryingRecorder,
+    WorldState,
+    finish_detailed,
+    reporting,
+)
 from midojo_sdk.session import SESSION_HEADER, session_token
 
 __all__ = ["BLOCKED_REASON", "MIDOJO_MCP_CAPABILITY", "MidojoMCP", "ToolContext", "UpstreamClient"]
@@ -469,9 +477,16 @@ class MidojoMCP:
         incoming = get_http_headers().get(SESSION_HEADER.lower())
         return session_token(incoming)
 
-    async def _admit_injections(self, scope: str, call_id: str, name: str) -> list[_AdmittedInstruction]:
-        """Number matches under a lock before forwarding; that is admission order."""
+    async def _admit_injections(
+        self, scope: str, call_id: str, name: str
+    ) -> tuple[list[_AdmittedInstruction], list[InjectionOutcome]]:
+        """Number matches under a lock before forwarding; that is admission order.
+
+        Returns the instructions admitted for the call, and the outcomes of
+        those whose occurrence rule skipped it.
+        """
         admitted: list[_AdmittedInstruction] = []
+        skipped: list[InjectionOutcome] = []
         async with self._plan_lock:
             counts = self._occurrences.setdefault(scope, [0] * len(self._plan))
             order = self._admissions.get(scope, 0) + 1
@@ -484,7 +499,7 @@ class MidojoMCP:
                 if instruction.occurrence.selects(occurrence):
                     admitted.append((scope, index, instruction, occurrence, order))
                 else:
-                    self._outcomes.append(
+                    skipped.append(
                         _outcome(
                             scope,
                             index,
@@ -497,23 +512,28 @@ class MidojoMCP:
                             "occurrence rule did not select this call",
                         )
                     )
-        return admitted
+            self._outcomes.extend(skipped)
+        return admitted, skipped
 
-    def _report_no_result(self, call_id: str, name: str, admitted: Sequence[_AdmittedInstruction]) -> None:
-        for scope, index, instruction, occurrence, order in admitted:
-            self._outcomes.append(
-                _outcome(
-                    scope,
-                    index,
-                    instruction,
-                    call_id,
-                    name,
-                    occurrence,
-                    order,
-                    OutcomeStatus.NO_RESULT,
-                    "upstream produced no tool result",
-                )
+    def _report_no_result(
+        self, call_id: str, name: str, admitted: Sequence[_AdmittedInstruction]
+    ) -> list[InjectionOutcome]:
+        outcomes = [
+            _outcome(
+                scope,
+                index,
+                instruction,
+                call_id,
+                name,
+                occurrence,
+                order,
+                OutcomeStatus.NO_RESULT,
+                "upstream produced no tool result",
             )
+            for scope, index, instruction, occurrence, order in admitted
+        ]
+        self._outcomes.extend(outcomes)
+        return outcomes
 
     async def mirror_upstream(self) -> list[str]:
         """Expose every upstream tool not already defined here, forwarded and recorded; return their names.
@@ -555,42 +575,38 @@ class MidojoMCP:
         await self._refuse(recorder, name, arguments)
         call_id = str(uuid.uuid4())
         await recorder.start_call(call_id=call_id, function=name, args=arguments, disposition="forwarded")
-        admitted = await self._admit_injections(self._evaluation_scope(), call_id, name) if self._plan else []
+        admitted, skipped = (
+            await self._admit_injections(self._evaluation_scope(), call_id, name) if self._plan else ([], [])
+        )
         try:
             result = await self._upstream.call_tool_mcp(name, arguments)
         except McpError as e:
-            self._report_no_result(call_id, name, admitted)
+            outcomes = [*skipped, *self._report_no_result(call_id, name, admitted)]
             message = e.error.message
-            await recorder.finish_call(
-                call_id=call_id, function=name, args=arguments, result=message, error=message, disposition="forwarded"
-            )
+            await _finish_forwarded(recorder, call_id, name, arguments, message, message, None, outcomes)
             errors = _protocol_errors.get()
             if errors is not None:
                 errors.append(e)
             raise
         except Exception as e:
-            self._report_no_result(call_id, name, admitted)
-            await recorder.finish_call(
-                call_id=call_id, function=name, args=arguments, result=str(e), error=str(e), disposition="forwarded"
-            )
+            outcomes = [*skipped, *self._report_no_result(call_id, name, admitted)]
+            await _finish_forwarded(recorder, call_id, name, arguments, str(e), str(e), None, outcomes)
             raise
         except BaseException:
             # Cancellation leaves the started disposition record unfinished,
             # but this admitted call still consumed its occurrence.
             self._report_no_result(call_id, name, admitted)
             raise
+        outcomes = list(skipped)
         for scope, index, instruction, occurrence, order in admitted:
             result, status, detail = _inject_result(result, instruction)
-            self._outcomes.append(_outcome(scope, index, instruction, call_id, name, occurrence, order, status, detail))
+            outcome = _outcome(scope, index, instruction, call_id, name, occurrence, order, status, detail)
+            self._outcomes.append(outcome)
+            outcomes.append(outcome)
+        # The record is what the agent gets: its text blocks as one string, and its structured content.
         seen = _text(result.content)
-        await recorder.finish_call(
-            call_id=call_id,
-            function=name,
-            args=arguments,
-            result=seen,
-            error=seen if result.isError else None,
-            disposition="forwarded",
-        )
+        error = seen if result.isError else None
+        await _finish_forwarded(recorder, call_id, name, arguments, seen, error, result.structuredContent, outcomes)
         forwarded = _UpstreamResult(
             content=result.content, structured_content=result.structuredContent, meta=result.meta
         )
@@ -602,6 +618,47 @@ class MidojoMCP:
 
     def run(self, **kwargs) -> None:
         self._fastmcp.run(**kwargs)
+
+
+async def _finish_forwarded(
+    recorder: Recorder,
+    call_id: str,
+    name: str,
+    arguments: dict[str, Any],
+    result: str,
+    error: str | None,
+    structured_content: dict[str, Any] | None,
+    outcomes: Sequence[InjectionOutcome],
+) -> None:
+    """Finish a forwarded call with its details, or with its text only when ``recorder`` can't record them.
+
+    A recorder without the capability (see ``DetailedRecorder``) never fails
+    the call over it: the agent still gets its result, and the record, with
+    no ``injection_outcomes``, says the details weren't reported. Every such
+    fallback logs a warning, even for a text-only result no instruction
+    matched: its record still loses the empty outcomes that say so.
+    """
+    detailed = await finish_detailed(
+        recorder,
+        call_id=call_id,
+        function=name,
+        args=arguments,
+        result=result,
+        disposition="forwarded",
+        error=error,
+        structured_content=structured_content,
+        injection_outcomes=_records(outcomes),
+    )
+    if not detailed:
+        logger.warning(
+            "%s can't record a finish's details: %s (%s) is recorded with its text only, without its structured "
+            "content (%s) or its %d injection outcome(s)",
+            type(recorder).__name__,
+            name,
+            call_id,
+            "none" if structured_content is None else "present",
+            len(outcomes),
+        )
 
 
 def _text(content: Sequence[ContentBlock]) -> str:
@@ -687,18 +744,98 @@ def _inject_leaf(current: Any, part: str | int | RecordSelector, payload: str, m
     return mismatch or f"record selector [{part.field}={part.value!r}] selects a record, not a string field"
 
 
-def _inject_exact(
+def _inject_structured(
     result: CallToolResult, instruction: InjectionInstruction, payload: str
 ) -> tuple[CallToolResult | None, str | None]:
-    target = instruction.target
-    if target.surface is SelectorSurface.STRUCTURED_CONTENT:
-        structured = copy.deepcopy(result.structuredContent)
-        mismatch = _inject_path(structured, target.structured_content_path, payload, instruction.mode)
-        if mismatch is not None:
-            return None, mismatch
-        return result.model_copy(update={"structuredContent": structured}), None
-    updated = _inject_content(result, instruction, payload)
-    return updated, None if updated is not None else "content-block selector did not match"
+    """Place ``payload`` in the structured content, and in the text that mirrors it.
+
+    Returns the updated result, or None with the mismatch. A result whose
+    text content is a JSON mirror of its structured content gets that text
+    re-serialised from the updated structured content; any other keeps its
+    text, and the second value then says why the placement is only partial.
+    """
+    structured = copy.deepcopy(result.structuredContent)
+    mismatch = _inject_path(structured, instruction.target.structured_content_path, payload, instruction.mode)
+    if mismatch is not None:
+        return None, mismatch
+    mirror = _json_mirror(result)
+    if isinstance(mirror, str):
+        return result.model_copy(update={"structuredContent": structured}), mirror
+    block, options = mirror
+    content = [block.model_copy(update={"text": json.dumps(structured, **options)})]
+    return result.model_copy(update={"structuredContent": structured, "content": content}), None
+
+
+def _json_mirror(result: CallToolResult) -> tuple[TextContent, dict[str, Any]] | str:
+    """The text block that is the JSON serialisation of the structured content, and how to serialise it again.
+
+    The mirror is the common MCP shape: exactly one content block, a text
+    block whose text parses as JSON equal, type for type, to the structured
+    content. A result without one gets the reason instead.
+    """
+    content = result.content
+    if len(content) != 1 or not isinstance(content[0], TextContent):
+        return f"text content is not a single text block ({len(content)} content blocks)"
+    block = content[0]
+    try:
+        parsed = json.loads(block.text)
+    except ValueError:
+        return "text content is not JSON"
+    if not _same_json(parsed, result.structuredContent):
+        return "text content is JSON that differs from the structured content"
+    return block, _json_style(block.text, result.structuredContent)
+
+
+def _same_json(a: Any, b: Any) -> bool:
+    """Whether two JSON values are equal type for type: ``1`` isn't ``1.0`` or ``true``."""
+    if type(a) is not type(b):
+        return False
+    if isinstance(a, dict):
+        return a.keys() == b.keys() and all(_same_json(a[key], b[key]) for key in a)
+    if isinstance(a, list):
+        return len(a) == len(b) and all(_same_json(x, y) for x, y in zip(a, b, strict=True))
+    return a == b
+
+
+_JSON_LAYOUTS: tuple[tuple[int | None, tuple[str, str]], ...] = (
+    (None, (",", ":")),
+    (None, (", ", ": ")),
+    (2, (",", ": ")),
+    (4, (",", ": ")),
+)
+
+
+def _json_style(text: str, value: Any) -> dict[str, Any]:
+    """``json.dumps`` options for the injected value: the predefined style that reproduces ``text`` exactly, if any.
+
+    The styles are compact, spaced, and two- and four-space indented layouts,
+    each with and without ASCII escapes and with keys in the structured
+    content's order or sorted; the first that gives exactly ``text`` from
+    ``value`` is used. Nothing else is reproduced: not a key order of the
+    text's own (other than sorted), trailing whitespace or a final newline,
+    or another serialiser's number format. For such text it falls back to
+    compact for one line, or indented by the width of the second line's
+    leading spaces (two when it has none) otherwise, with keys in the
+    structured content's order. Unescaped non-ASCII is tried first, so an
+    all-ASCII original, which can't show which it used, and any fallback get
+    a non-ASCII payload unescaped.
+    """
+    for indent, separators in _JSON_LAYOUTS:
+        for ensure_ascii in (False, True):
+            for sort_keys in (False, True):
+                options = {
+                    "indent": indent,
+                    "separators": separators,
+                    "ensure_ascii": ensure_ascii,
+                    "sort_keys": sort_keys,
+                }
+                if json.dumps(value, **options) == text:
+                    return options
+    lines = text.splitlines()
+    if len(lines) > 1:
+        indent = len(lines[1]) - len(lines[1].lstrip(" ")) or 2
+        return {"indent": indent, "separators": (",", ": "), "ensure_ascii": False}
+    return {"separators": (",", ":"), "ensure_ascii": False}
 
 
 def _inject_content(result: CallToolResult, instruction: InjectionInstruction, payload: str) -> CallToolResult | None:
@@ -736,14 +873,37 @@ def _inject_result(
     payload = _transform(instruction)
     if instruction.size_limit is not None and len(payload.encode()) > instruction.size_limit:
         return result, OutcomeStatus.TOO_LARGE, "transformed payload exceeds size_limit"
-    updated, mismatch = _inject_exact(result, instruction, payload)
-    if updated is not None:
-        return updated, OutcomeStatus.APPLIED, "exact selector matched"
+    if instruction.target.surface is SelectorSurface.STRUCTURED_CONTENT:
+        updated, problem = _inject_structured(result, instruction, payload)
+        if updated is not None and problem is not None:
+            return updated, OutcomeStatus.PARTIAL, f"exact selector matched structured content only; {problem}"
+        if updated is not None:
+            return updated, OutcomeStatus.APPLIED, "exact selector matched; mirrored text re-serialised"
+        mismatch = problem
+    else:
+        updated = _inject_content(result, instruction, payload)
+        if updated is not None:
+            return updated, OutcomeStatus.APPLIED, "exact selector matched"
+        mismatch = "content-block selector did not match"
     if instruction.mismatch_policy is MismatchPolicy.FALLBACK_APPEND:
         content = [*result.content, TextContent(type="text", text=payload)]
         updated = result.model_copy(update={"content": content})
         return updated, OutcomeStatus.FALLBACK, f"{mismatch}; appended a text block"
     return result, OutcomeStatus.UNMATCHED, f"{mismatch}; result unchanged"
+
+
+def _records(outcomes: Sequence[InjectionOutcome]) -> list[InjectionRecord]:
+    """A call's outcomes as its finish carries them: no scope, call ID or admission order."""
+    return [
+        {
+            "instruction_index": outcome.instruction_index,
+            "probe_key": outcome.probe_key,
+            "occurrence": outcome.occurrence,
+            "status": outcome.status.value,
+            "detail": outcome.detail,
+        }
+        for outcome in outcomes
+    ]
 
 
 def _outcome(
