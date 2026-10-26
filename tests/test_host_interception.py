@@ -28,6 +28,8 @@ from midojo_sdk.injection import (
     InjectionMode,
     InjectionPlan,
     InjectionTarget,
+    Occurrence,
+    OccurrenceRule,
     OutcomeStatus,
     RecordSelector,
     SelectorSurface,
@@ -276,6 +278,105 @@ async def test_host_interceptor_seals_a_too_large_payload_with_the_result_unchan
     assert outcomes[0].status is OutcomeStatus.TOO_LARGE
     assert (record.result, record.structured_content) == (agent_text(result), NOTES)
     assert [o.status for o in sealed_outcomes(record)] == ["too_large"]
+
+
+def orders_upstream() -> FastMCP:
+    """A single-record lookup: the order the call names, as FastMCP mirrors it in its text."""
+    upstream = FastMCP("orders")
+
+    @upstream.tool()
+    def lookup_order(order_id: str) -> dict:
+        return {"order_id": order_id, "item": f"item of {order_id}"}
+
+    return upstream
+
+
+def order_plan(mode: InjectionMode, **changes) -> InjectionPlan:
+    return InjectionPlan(
+        (
+            InjectionInstruction(
+                channel=Channel.TOOL_OUTPUT,
+                payload=" INJECTED",
+                target=InjectionTarget(
+                    tool="lookup_order",
+                    surface=SelectorSurface.STRUCTURED_CONTENT,
+                    structured_content_path=("item",),
+                    call_arguments=(("order_id", "ORD-102"),),
+                ),
+                mode=mode,
+                probe_key="orders:item",
+                **changes,
+            ),
+        )
+    )
+
+
+async def lookup_orders(endpoint: ToolEndpoint, *orders: str) -> list[CallToolResult]:
+    async with Client(endpoint.url, auth=endpoint.token) as target:
+        return [await target.call_tool_mcp("lookup_order", {"order_id": order}) for order in orders]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("mode", "item"), [(InjectionMode.REPLACE, " INJECTED"), (InjectionMode.APPEND, None)])
+async def test_host_interceptor_places_a_payload_only_on_the_call_whose_arguments_match(control, serve, mode, item):
+    run, evaluation = open_evaluation(control)
+    recorder = InProcessControlClient(control).recorder(evaluation.session_token)
+    plan = order_plan(mode, occurrence=OccurrenceRule(Occurrence.NTH, 2))
+    interceptor = HostInterceptor(recorder, upstream=orders_upstream(), evaluation_id=evaluation.id, plan=plan)
+
+    results = await lookup_orders(await serve(interceptor), "ORD-102", "ORD-101", "ORD-102", "ORD-103")
+    calls = (await control.complete(run.id, evaluation.id, "done")).function_calls
+
+    injected = {"order_id": "ORD-102", "item": item or "item of ORD-102 INJECTED"}
+    expected = [
+        {"order_id": "ORD-102", "item": "item of ORD-102"},
+        {"order_id": "ORD-101", "item": "item of ORD-101"},
+        injected,
+        {"order_id": "ORD-103", "item": "item of ORD-103"},
+    ]
+    # nth=2 is the second call that looked up ORD-102, not the second call; the text mirrors what was placed.
+    assert [result.structuredContent for result in results] == expected
+    assert [agent_text(result) for result in results] == [
+        json.dumps(order, separators=(",", ":")) for order in expected
+    ]
+    mismatch = "call argument 'order_id' is {!r}, not 'ORD-102'; result unchanged"
+    assert [(o.status, o.occurrence, o.detail) for o in interceptor.injection_outcomes] == [
+        (OutcomeStatus.SKIPPED_OCCURRENCE, 1, "occurrence rule did not select this call"),
+        (OutcomeStatus.UNMATCHED, 0, mismatch.format("ORD-101")),
+        (OutcomeStatus.APPLIED, 2, "exact selector matched; mirrored text re-serialised"),
+        (OutcomeStatus.UNMATCHED, 0, mismatch.format("ORD-103")),
+    ]
+    # The sealed records are what the agent got, each with its own outcome.
+    assert [(c.args, c.result, c.structured_content) for c in calls] == [
+        ({"order_id": order["order_id"]}, json.dumps(order, separators=(",", ":")), order) for order in expected
+    ]
+    assert [[(o.probe_key, o.occurrence, o.status, o.detail) for o in sealed_outcomes(c)] for c in calls] == [
+        [("orders:item", o.occurrence, o.status.value, o.detail)] for o in interceptor.injection_outcomes
+    ]
+
+
+@pytest.mark.asyncio
+async def test_an_argument_mismatch_recorded_over_http_reads_back_sealed_over_http(suite, monkeypatch, serve):
+    app = create_app({"weather": suite}, config=AppConfig(closure_wait_seconds=0))
+    backend = Backend("http", app, monkeypatch)
+    control = app.state.control
+    run, evaluation = open_evaluation(control)
+    recorder = backend.control().recorder(evaluation.session_token)
+    plan = order_plan(InjectionMode.APPEND, size_limit=len(b" INJECTED"))
+    interceptor = HostInterceptor(recorder, upstream=orders_upstream(), evaluation_id=evaluation.id, plan=plan)
+
+    unmatched, matched = await lookup_orders(await serve(interceptor), "ORD-101", "ORD-102")
+    await control.complete(run.id, evaluation.id, "done")
+    environment_type = type(control.evaluation(ById(run.id, evaluation.id)).environment)
+    snapshot = await backend.control().snapshot(run.id, evaluation.id, environment_type=environment_type)
+
+    assert unmatched.structuredContent == {"order_id": "ORD-101", "item": "item of ORD-101"}
+    assert matched.structuredContent == {"order_id": "ORD-102", "item": "item of ORD-102 INJECTED"}
+    assert [[(o.occurrence, o.status) for o in sealed_outcomes(c)] for c in snapshot.function_calls] == [
+        [(0, "unmatched")],
+        [(1, "applied")],
+    ]
+    await backend.aclose()
 
 
 @pytest.mark.asyncio

@@ -73,7 +73,8 @@ class FunctionCallBody(FunctionCallStart):
         description=(
             "How each injection instruction that matched the call fared: those the interception layer admitted for "
             "it (applied, partial: the payload is in `structured_content` only, as the text isn't a JSON mirror of "
-            "it; fallback, unmatched, too_large or no_result) and those whose occurrence rule skipped it "
+            "it; fallback, unmatched, too_large or no_result), those whose call_arguments the call's arguments "
+            "didn't match (unmatched, occurrence 0) and those whose occurrence rule skipped it "
             "(skipped_occurrence). Empty when none matched. Optional: left out (None), the record carries the "
             "result's text only and says nothing about its structured content or injections."
         ),

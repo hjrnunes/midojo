@@ -72,7 +72,9 @@ class InjectionRecord(TypedDict):
     plain ``str``: ``applied``, ``partial`` (structured content only),
     ``fallback``, ``unmatched``, ``too_large``, ``skipped_occurrence`` (the
     instruction matched the call but its occurrence rule skipped it) or
-    ``no_result``. ``detail`` says why. A record names neither the counter
+    ``no_result``. ``detail`` says why. ``occurrence`` is one-based, or 0
+    for a call to the instruction's tool whose arguments didn't match its
+    ``call_arguments`` (``unmatched``): such a call isn't counted. A record names neither the counter
     scope (an evaluation ID or a session token) nor the payload.
     """
 

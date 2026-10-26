@@ -83,6 +83,7 @@ MIDOJO_MCP_CAPABILITY = InterceptorCapability(
     modes=frozenset(InjectionMode),
     transformations=frozenset(Transformation),
     mismatch_policies=frozenset(MismatchPolicy),
+    call_arguments=True,
 )
 """Placements the MCP forwarding interceptor implements for mirrored tool results without degradation."""
 
@@ -478,12 +479,13 @@ class MidojoMCP:
         return session_token(incoming)
 
     async def _admit_injections(
-        self, scope: str, call_id: str, name: str
+        self, scope: str, call_id: str, name: str, arguments: dict[str, Any]
     ) -> tuple[list[_AdmittedInstruction], list[InjectionOutcome]]:
         """Number matches under a lock before forwarding; that is admission order.
 
         Returns the instructions admitted for the call, and the outcomes of
-        those whose occurrence rule skipped it.
+        those whose call arguments didn't match it (``unmatched``, occurrence
+        0: the call isn't counted) or whose occurrence rule skipped it.
         """
         admitted: list[_AdmittedInstruction] = []
         skipped: list[InjectionOutcome] = []
@@ -493,6 +495,21 @@ class MidojoMCP:
             self._admissions[scope] = order
             for index, instruction in enumerate(self._plan):
                 if instruction.target.tool not in (None, name):
+                    continue
+                if (mismatch := instruction.target.call_argument_mismatch(arguments)) is not None:
+                    skipped.append(
+                        _outcome(
+                            scope,
+                            index,
+                            instruction,
+                            call_id,
+                            name,
+                            0,
+                            order,
+                            OutcomeStatus.UNMATCHED,
+                            f"{mismatch}; result unchanged",
+                        )
+                    )
                     continue
                 counts[index] += 1
                 occurrence = counts[index]
@@ -576,7 +593,7 @@ class MidojoMCP:
         call_id = str(uuid.uuid4())
         await recorder.start_call(call_id=call_id, function=name, args=arguments, disposition="forwarded")
         admitted, skipped = (
-            await self._admit_injections(self._evaluation_scope(), call_id, name) if self._plan else ([], [])
+            await self._admit_injections(self._evaluation_scope(), call_id, name, arguments) if self._plan else ([], [])
         )
         try:
             result = await self._upstream.call_tool_mcp(name, arguments)

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import enum
 import json
+import math
 from collections.abc import Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -37,6 +38,8 @@ class RecordSelector:
 
 type PathPart = str | int | RecordSelector
 type FieldPath = tuple[PathPart, ...]
+type ArgumentValue = str | int | float | bool | None
+type CallArguments = tuple[tuple[str, ArgumentValue], ...]
 
 
 class Channel(enum.StrEnum):
@@ -80,7 +83,9 @@ class OutcomeStatus(enum.StrEnum):
 
     ``partial`` is a structured-content placement the agent's text content
     doesn't carry: the result's text isn't a JSON mirror of its structured
-    content, so only ``structuredContent`` has the payload.
+    content, so only ``structuredContent`` has the payload. ``unmatched`` is
+    also a call to the target's tool whose arguments don't match its
+    ``call_arguments``, whatever the mismatch policy; its occurrence is 0.
     """
 
     APPLIED = "applied"
@@ -94,7 +99,17 @@ class OutcomeStatus(enum.StrEnum):
 
 @dataclass(frozen=True)
 class InjectionTarget:
-    """An exact record selector within a channel."""
+    """An exact record selector within a channel.
+
+    ``call_arguments`` restricts a tool-output target to the calls of
+    ``tool`` whose arguments match: each named top-level argument must be
+    present and equal, type for type (``"1"`` isn't ``1``, ``True`` isn't
+    ``1``, ``1.0`` isn't ``1``), to its JSON scalar value. It is given as
+    ``(name, value)`` pairs, or a mapping, and kept as pairs sorted by name.
+    A call to ``tool`` whose arguments don't match isn't an occurrence of the
+    instruction: it isn't counted, and its result is left unchanged with an
+    ``unmatched`` outcome that names the argument.
+    """
 
     tool: str | None = None
     surface: SelectorSurface = SelectorSurface.CONTENT_BLOCK
@@ -103,11 +118,18 @@ class InjectionTarget:
     structured_content_path: FieldPath = ()
     template_path: FieldPath = ()
     template_key: str | None = None
+    call_arguments: CallArguments = ()
 
     def __post_init__(self) -> None:
         if type(self.surface) is not SelectorSurface:
             raise TypeError("surface must be a SelectorSurface")
         _optional_str(self.tool, "target tool")
+        object.__setattr__(self, "call_arguments", _call_arguments(self.call_arguments))
+        if self.call_arguments:
+            if self.surface not in {SelectorSurface.CONTENT_BLOCK, SelectorSurface.STRUCTURED_CONTENT}:
+                raise ValueError("call_arguments only select tool-output calls")
+            if self.tool is None:
+                raise ValueError("call_arguments need a target tool")
         _optional_str(self.content_block_type, "content block type")
         _optional_str(self.template_key, "template key")
         if self.content_block_index is not None and (
@@ -130,6 +152,16 @@ class InjectionTarget:
             )
         if self.surface is SelectorSurface.TEMPLATE and (content_selector or self.structured_content_path):
             raise ValueError("template selectors cannot include content-block or structured-content fields")
+
+    def call_argument_mismatch(self, arguments: Mapping[str, Any]) -> str | None:
+        """Why a call with ``arguments`` doesn't match ``call_arguments``, or None when it does."""
+        problems = []
+        for name, expected in self.call_arguments:
+            if name not in arguments:
+                problems.append(f"call argument {name!r} is missing")
+            elif not _same_scalar(arguments[name], expected):
+                problems.append(f"call argument {name!r} is {arguments[name]!r}, not {expected!r}")
+        return "; ".join(problems) or None
 
 
 @dataclass(frozen=True)
@@ -287,7 +319,9 @@ class InjectionPlan:
 
         Key and index path steps remain JSON strings and integers. A record
         selector is ``{"field": "id", "equals": "NOTE-1"}``; ``from_json``
-        also accepts an omitted ``field``, which defaults to ``id``.
+        also accepts an omitted ``field``, which defaults to ``id``. A
+        target's ``call_arguments`` is a JSON object of argument names to
+        scalar values, ``{"order_id": "ORD-102"}``, left out when empty.
         """
         return json.dumps(self.to_data(), sort_keys=True, separators=(",", ":"))
 
@@ -315,12 +349,15 @@ class InjectionPlan:
 
 @dataclass(frozen=True)
 class InterceptorCapability:
+    """What an interceptor places exactly; ``call_arguments`` says it matches a target's call arguments."""
+
     channels: frozenset[Channel]
     selector_surfaces: frozenset[SelectorSurface]
     content_block_types: frozenset[str]
     modes: frozenset[InjectionMode]
     transformations: frozenset[Transformation]
     mismatch_policies: frozenset[MismatchPolicy]
+    call_arguments: bool = False
 
 
 @dataclass(frozen=True)
@@ -373,6 +410,9 @@ def capability_gaps(
             gaps.append(CapabilityGap(index, "content_block_type", block_type))
         if tools is not None and instruction.target.tool is not None and instruction.target.tool not in tools:
             gaps.append(CapabilityGap(index, "tool", instruction.target.tool))
+        if instruction.target.call_arguments and not capability.call_arguments:
+            names = ",".join(name for name, _ in instruction.target.call_arguments)
+            gaps.append(CapabilityGap(index, "call_arguments", names))
     return tuple(gaps)
 
 
@@ -452,6 +492,36 @@ def _optional_str(value: Any, what: str) -> None:
         _str(value, what)
 
 
+_ARGUMENT_TYPES = (str, int, float, bool, type(None))
+
+
+def _call_arguments(value: Any) -> CallArguments:
+    if isinstance(value, Mapping):
+        items = list(value.items())
+    elif isinstance(value, str) or not isinstance(value, Sequence):
+        raise TypeError("call_arguments must be a mapping or a sequence of (name, value) pairs")
+    else:
+        items = []
+        for item in value:
+            if not isinstance(item, Sequence) or isinstance(item, str) or len(item) != 2:
+                raise TypeError("each call argument must be a (name, value) pair")
+            items.append((item[0], item[1]))
+    for name, argument in items:
+        if type(name) is not str or not name:
+            raise TypeError("call argument names must be non-empty str values")
+        if type(argument) not in _ARGUMENT_TYPES:
+            raise TypeError(f"call argument {name!r} must be an exact str, int, float, bool or None")
+        if type(argument) is float and not math.isfinite(argument):
+            raise ValueError(f"call argument {name!r} must be a finite float")
+    if len({name for name, _ in items}) != len(items):
+        raise ValueError("call_arguments names an argument twice")
+    return tuple(sorted(items, key=lambda item: item[0]))
+
+
+def _same_scalar(actual: Any, expected: ArgumentValue) -> bool:
+    return type(actual) is type(expected) and actual == expected
+
+
 def _path_to_data(path: FieldPath) -> list[str | int | dict[str, str | int]]:
     encoded: list[str | int | dict[str, str | int]] = []
     for part in path:
@@ -491,7 +561,9 @@ def _plan_to_data(plan: InjectionPlan) -> dict[str, Any]:
                     "structured_content_path": _path_to_data(target.structured_content_path),
                     "template_path": _path_to_data(target.template_path),
                     "template_key": target.template_key,
-                },
+                }
+                # Left out when empty, so a plan without it encodes as before.
+                | ({"call_arguments": dict(target.call_arguments)} if target.call_arguments else {}),
                 "occurrence": {"kind": item.occurrence.kind.value, "nth": item.occurrence.nth},
                 "transformation": item.transformation.value,
                 "size_limit": item.size_limit,
@@ -578,6 +650,7 @@ def _instruction_from_data(value: Any) -> InjectionInstruction:
             "structured_content_path",
             "template_path",
             "template_key",
+            "call_arguments",
         },
         "target",
     )
@@ -591,6 +664,7 @@ def _instruction_from_data(value: Any) -> InjectionInstruction:
         ),
         template_path=_path_from_data(target_data.get("template_path", []), "template path", record_selectors=False),
         template_key=target_data.get("template_key"),
+        call_arguments=tuple(_object(target_data.get("call_arguments", {}), "call_arguments").items()),
     )
     occurrence_data = _object(data.get("occurrence", {}), "occurrence")
     _only_fields(occurrence_data, {"kind", "nth"}, "occurrence")

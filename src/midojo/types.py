@@ -52,7 +52,13 @@ class CallInjectionOutcome(BaseModel):
 
     instruction_index: int = Field(ge=0, description="The instruction's index in the interceptor's plan.")
     probe_key: str | None = Field(default=None, description="The instruction's probe, when it names one.")
-    occurrence: int = Field(ge=1, description="Which matching call of the instruction's this was, one-based.")
+    occurrence: int = Field(
+        ge=0,
+        description=(
+            "Which matching call of the instruction's this was, one-based; 0 for a call whose arguments didn't "
+            "match the instruction's `call_arguments` (`unmatched`), which isn't counted."
+        ),
+    )
     status: InjectionStatus
     detail: str = Field(description="Why: the selector that matched or didn't, or what was left unchanged.")
 
@@ -106,7 +112,8 @@ class FunctionCallRecord(BaseModel):
         default=None,
         description=(
             "How each injection instruction that matched the call fared, as the interception layer reported it: "
-            "the instructions it admitted for the call, and those whose occurrence rule skipped it "
+            "the instructions it admitted for the call, those whose `call_arguments` the call's arguments didn't "
+            "match (`unmatched`, occurrence 0), and those whose occurrence rule skipped it "
             "(`skipped_occurrence`); `partial` when only `structured_content` carries the payload. Empty when no "
             "instruction matched. None when the layer recorded the call's text only (a plain finish, a layer or "
             "recorder without details, or a record made before the field): the record then doesn't say whether "

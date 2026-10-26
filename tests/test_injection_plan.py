@@ -27,10 +27,11 @@ from midojo_sdk.injection import (
     RecordSelector,
     SelectorSurface,
     Transformation,
+    capability_gaps,
     instruction_from_generator,
     instruction_from_generator_for_plan,
 )
-from midojo_sdk.mcp import MidojoMCP, ToolContext
+from midojo_sdk.mcp import MIDOJO_MCP_CAPABILITY, MidojoMCP, ToolContext
 from midojo_sdk.recorder import Disposition, InjectionRecord
 
 from midojo.episode import Episode
@@ -980,3 +981,279 @@ async def test_an_all_ascii_mirror_gets_a_non_ascii_payload_unescaped():
     [sent] = _texts(result)
     assert "first ü" in sent
     assert json.loads(sent) == result.structuredContent == _noted("first ü", structured)
+
+
+# --- the call-argument predicate ---
+
+ITEM = ("item",)
+ORD_102 = (("order_id", "ORD-102"),)
+
+
+class OrdersUpstream:
+    """A single-record lookup: the order the call names, with its text mirroring the structured content compactly."""
+
+    async def call_tool_mcp(self, _name: str, args: dict[str, Any]) -> CallToolResult:
+        order = {"order_id": args.get("order_id"), "item": f"item of {args.get('order_id')}"}
+        text = json.dumps(order, separators=(",", ":"))
+        return CallToolResult(content=[TextContent(type="text", text=text)], structuredContent=order)
+
+
+def _order_instruction(call_arguments: Any = ORD_102, **changes: Any) -> InjectionInstruction:
+    target = InjectionTarget(
+        tool="lookup_order",
+        surface=SelectorSurface.STRUCTURED_CONTENT,
+        structured_content_path=ITEM,
+        call_arguments=call_arguments,
+    )
+    return _instruction(target=target, **changes)
+
+
+async def _lookups(
+    *calls: dict[str, Any], instruction: InjectionInstruction
+) -> tuple[list[CallToolResult], MidojoMCP, DetailedCapturingRecorder]:
+    mcp, _, recorder = _mcp(InjectionPlan((instruction,)))
+    mcp._upstream = OrdersUpstream()  # type: ignore[assignment]
+    results = [_wire_result(await mcp._forward_call("lookup_order", args)) for args in calls]
+    return results, mcp, recorder
+
+
+def _item(result: CallToolResult) -> str:
+    return _structured(result)["item"]
+
+
+def test_call_arguments_are_sorted_hashable_pairs_of_exact_json_scalars():
+    target = InjectionTarget(tool="lookup", call_arguments=(("b", 1), ("a", True), ("c", None), ("d", 1.5)))
+    assert target.call_arguments == (("a", True), ("b", 1), ("c", None), ("d", 1.5))
+    assert InjectionTarget(tool="lookup", call_arguments={"b": 1, "a": True, "c": None, "d": 1.5}) == target  # type: ignore[arg-type]
+    assert hash(target) == hash(dataclasses.replace(target))
+    assert InjectionTarget().call_arguments == ()
+    invalid = [
+        ({"tool": "lookup", "call_arguments": (("order", ["ORD-1"]),)}, TypeError, "exact str, int, float"),
+        ({"tool": "lookup", "call_arguments": (("order", {"id": 1}),)}, TypeError, "exact str, int, float"),
+        ({"tool": "lookup", "call_arguments": (("", "x"),)}, TypeError, "non-empty str"),
+        ({"tool": "lookup", "call_arguments": ((1, "x"),)}, TypeError, "non-empty str"),
+        ({"tool": "lookup", "call_arguments": (("n", float("inf")),)}, ValueError, "finite"),
+        ({"tool": "lookup", "call_arguments": (("n", 1), ("n", 2))}, ValueError, "twice"),
+        ({"tool": "lookup", "call_arguments": "order_id"}, TypeError, "mapping or a sequence"),
+        ({"tool": "lookup", "call_arguments": (("order_id",),)}, TypeError, "pair"),
+        ({"call_arguments": ORD_102}, ValueError, "need a target tool"),
+        (
+            {"surface": SelectorSurface.DESCRIPTION, "tool": "lookup", "call_arguments": ORD_102},
+            ValueError,
+            "only select tool-output calls",
+        ),
+    ]
+    for fields, error, message in invalid:
+        with pytest.raises(error, match=message):
+            InjectionTarget(**fields)
+
+
+@pytest.mark.parametrize(
+    ("arguments", "mismatch"),
+    [
+        ({"order_id": "ORD-102", "verbose": True}, None),
+        ({"order_id": "ORD-101"}, "call argument 'order_id' is 'ORD-101', not 'ORD-102'"),
+        ({}, "call argument 'order_id' is missing"),
+        ({"order": "ORD-102"}, "call argument 'order_id' is missing"),
+        ({"order_id": None}, "call argument 'order_id' is None, not 'ORD-102'"),
+    ],
+    ids=["match", "different", "missing", "other-name", "null"],
+)
+def test_call_argument_mismatch_names_the_argument_and_why(arguments, mismatch):
+    target = InjectionTarget(tool="lookup_order", call_arguments=ORD_102)
+    assert target.call_argument_mismatch(arguments) == mismatch
+
+
+@pytest.mark.parametrize(
+    ("expected", "actual"),
+    [("1", 1), (1, "1"), (1, True), (True, 1), (1, 1.0), (1.0, 1), (0, False), (None, "")],
+)
+def test_call_argument_matching_is_type_exact(expected, actual):
+    target = InjectionTarget(tool="lookup", call_arguments=(("n", expected),))
+    assert target.call_argument_mismatch({"n": expected}) is None
+    assert target.call_argument_mismatch({"n": actual}) == f"call argument 'n' is {actual!r}, not {expected!r}"
+
+
+def test_every_named_argument_must_match_and_each_failure_is_named():
+    target = InjectionTarget(tool="lookup", call_arguments={"a": 1, "b": "x", "c": False})  # type: ignore[arg-type]
+    assert target.call_argument_mismatch({"a": 1, "b": "x", "c": False}) is None
+    assert target.call_argument_mismatch({"a": 2, "c": False}) == (
+        "call argument 'a' is 2, not 1; call argument 'b' is missing"
+    )
+
+
+def test_plan_json_round_trip_carries_call_arguments_through_an_episode():
+    instruction = _order_instruction({"order_id": "ORD-102", "count": 2, "gift": False, "note": None})
+    plan = InjectionPlan((instruction,))
+    encoded = plan.to_json()
+    data = plan.to_data()
+
+    assert data["instructions"][0]["target"]["call_arguments"] == {
+        "count": 2,
+        "gift": False,
+        "note": None,
+        "order_id": "ORD-102",
+    }
+    assert InjectionPlan.from_json(encoded) == InjectionPlan.from_data(data) == plan == Episode(plan=plan).plan
+    assert InjectionPlan.from_json(encoded).to_json() == encoded
+
+
+def test_plan_data_without_call_arguments_decodes_and_encodes_as_before():
+    plan = InjectionPlan((_instruction(), _order_instruction(())))
+    data = plan.to_data()
+
+    # An empty predicate leaves the key out: plans that never named one encode exactly as before.
+    assert all("call_arguments" not in item["target"] for item in data["instructions"])
+    assert list(data["instructions"][0]["target"]) == [
+        "tool",
+        "surface",
+        "content_block_index",
+        "content_block_type",
+        "structured_content_path",
+        "template_path",
+        "template_key",
+    ]
+    decoded = InjectionPlan.from_data(data)
+    assert decoded == plan
+    assert [item.target.call_arguments for item in decoded] == [(), ()]
+    assert decoded.to_json() == plan.to_json()
+
+
+@pytest.mark.parametrize(
+    "call_arguments",
+    [["order_id", "ORD-102"], {"order_id": ["ORD-102"]}, {"order_id": {"id": "ORD-102"}}, "ORD-102"],
+    ids=["array", "array-value", "object-value", "string"],
+)
+def test_plan_data_refuses_call_arguments_that_are_not_an_object_of_scalars(call_arguments):
+    data = InjectionPlan((_order_instruction(),)).to_data()
+    data["instructions"][0]["target"]["call_arguments"] = call_arguments
+    with pytest.raises(ValueError, match="invalid injection plan data"):
+        InjectionPlan.from_data(data)
+
+
+def test_an_interceptor_without_call_argument_matching_reports_a_capability_gap():
+    plan = InjectionPlan((_order_instruction({"order_id": "ORD-102", "count": 2}),))
+    unaware = dataclasses.replace(MIDOJO_MCP_CAPABILITY, call_arguments=False)
+
+    assert [(gap.aspect, gap.value) for gap in capability_gaps(plan, unaware)] == [("call_arguments", "count,order_id")]
+    assert capability_gaps(plan, MIDOJO_MCP_CAPABILITY) == ()
+    assert capability_gaps(InjectionPlan((_instruction(),)), unaware) == ()
+
+
+@pytest.mark.asyncio
+async def test_only_the_call_with_matching_arguments_is_changed_and_the_others_say_why():
+    instruction = _order_instruction(occurrence=OccurrenceRule(Occurrence.EVERY), mode=InjectionMode.REPLACE)
+
+    results, mcp, recorder = await _lookups(
+        {"order_id": "ORD-101"}, {}, {"order_id": "ORD-102"}, {"order_id": "ORD-103"}, instruction=instruction
+    )
+
+    assert [_item(result) for result in results] == ["item of ORD-101", "item of None", " INJECTED", "item of ORD-103"]
+    assert [(o.status, o.occurrence, o.admission_order, o.detail) for o in mcp.injection_outcomes] == [
+        (OutcomeStatus.UNMATCHED, 0, 1, "call argument 'order_id' is 'ORD-101', not 'ORD-102'; result unchanged"),
+        (OutcomeStatus.UNMATCHED, 0, 2, "call argument 'order_id' is missing; result unchanged"),
+        (OutcomeStatus.APPLIED, 1, 3, MIRRORED),
+        (OutcomeStatus.UNMATCHED, 0, 4, "call argument 'order_id' is 'ORD-103', not 'ORD-102'; result unchanged"),
+    ]
+    # Each call's record carries its own outcome, with what the agent got.
+    assert [finish["injection_outcomes"] for finish in recorder.finishes] == [
+        [
+            {
+                "instruction_index": 0,
+                "probe_key": None,
+                "occurrence": o.occurrence,
+                "status": o.status,
+                "detail": o.detail,
+            }
+        ]
+        for o in mcp.injection_outcomes
+    ]
+    assert [finish["structured_content"] for finish in recorder.finishes] == [r.structuredContent for r in results]
+
+
+@pytest.mark.asyncio
+async def test_a_call_to_another_tool_records_no_argument_outcome():
+    mcp, _, recorder = _mcp(InjectionPlan((_order_instruction(),)))
+    mcp._upstream = OrdersUpstream()  # type: ignore[assignment]
+
+    await mcp._forward_call("lookup_customer", {"customer_id": "C-1"})
+
+    assert mcp.injection_outcomes == ()
+    assert recorder.finishes[0]["injection_outcomes"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("rule", "injected"),
+    [
+        (OccurrenceRule(Occurrence.FIRST), [False, False, True, False, False]),
+        (OccurrenceRule(Occurrence.NTH, 2), [False, False, False, False, True]),
+        (OccurrenceRule(Occurrence.EVERY), [False, False, True, False, True]),
+    ],
+    ids=["first", "nth-2", "every"],
+)
+async def test_occurrences_count_only_calls_whose_arguments_match(rule, injected):
+    calls = ("ORD-101", "ORD-103", "ORD-102", "ORD-101", "ORD-102")
+
+    results, mcp, _ = await _lookups(
+        *({"order_id": order} for order in calls), instruction=_order_instruction(occurrence=rule)
+    )
+
+    assert [_item(result).endswith(" INJECTED") for result in results] == injected
+    # The non-matching calls are occurrence 0; the matching ones are numbered 1 and 2 whatever came between.
+    assert [outcome.occurrence for outcome in mcp.injection_outcomes] == [0, 0, 1, 0, 2]
+    statuses = [outcome.status for outcome in mcp.injection_outcomes]
+    assert [status is OutcomeStatus.UNMATCHED for status in statuses] == [True, True, False, True, False]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "item"), [(InjectionMode.APPEND, "item of ORD-102 INJECTED"), (InjectionMode.REPLACE, " INJECTED")]
+)
+async def test_a_matched_calls_mirrored_text_is_rewritten_and_an_unmatched_ones_is_untouched(mode, item):
+    instruction = _order_instruction(occurrence=OccurrenceRule(Occurrence.EVERY), mode=mode)
+
+    matched, unmatched = (await _lookups({"order_id": "ORD-102"}, {"order_id": "ORD-101"}, instruction=instruction))[0]
+
+    assert _structured(matched) == {"order_id": "ORD-102", "item": item}
+    assert _texts(matched) == [json.dumps({"order_id": "ORD-102", "item": item}, separators=(",", ":"))]
+    assert _structured(unmatched) == {"order_id": "ORD-101", "item": "item of ORD-101"}
+    assert _texts(unmatched) == ['{"order_id":"ORD-101","item":"item of ORD-101"}']
+
+
+@pytest.mark.asyncio
+async def test_a_content_block_target_honours_call_arguments_too():
+    target = InjectionTarget(tool="lookup_order", content_block_index=0, call_arguments=ORD_102)
+    instruction = _instruction(target=target, occurrence=OccurrenceRule(Occurrence.EVERY))
+
+    matched, unmatched = (await _lookups({"order_id": "ORD-102"}, {"order_id": "ORD-101"}, instruction=instruction))[0]
+
+    assert _texts(matched) == ['{"order_id":"ORD-102","item":"item of ORD-102"} INJECTED']
+    assert _texts(unmatched) == ['{"order_id":"ORD-101","item":"item of ORD-101"}']
+
+
+@pytest.mark.asyncio
+async def test_size_limit_applies_to_the_matched_call_only():
+    instruction = _order_instruction(occurrence=OccurrenceRule(Occurrence.EVERY), size_limit=len(b" INJECTED") - 1)
+
+    results, mcp, _ = await _lookups({"order_id": "ORD-101"}, {"order_id": "ORD-102"}, instruction=instruction)
+
+    assert [_item(result) for result in results] == ["item of ORD-101", "item of ORD-102"]
+    assert [(o.status, o.occurrence) for o in mcp.injection_outcomes] == [
+        (OutcomeStatus.UNMATCHED, 0),
+        (OutcomeStatus.TOO_LARGE, 1),
+    ]
+
+    fits, _, _ = await _lookups({"order_id": "ORD-102"}, instruction=_order_instruction(size_limit=len(b" INJECTED")))
+    assert _item(fits[0]) == "item of ORD-102 INJECTED"
+
+
+@pytest.mark.asyncio
+async def test_fallback_append_never_places_a_payload_on_a_call_whose_arguments_dont_match():
+    instruction = _order_instruction(mismatch_policy=MismatchPolicy.FALLBACK_APPEND)
+
+    [result], mcp, _ = await _lookups({"order_id": "ORD-101"}, instruction=instruction)
+
+    assert _texts(result) == ['{"order_id":"ORD-101","item":"item of ORD-101"}']
+    [outcome] = mcp.injection_outcomes
+    assert (outcome.status, outcome.occurrence) == (OutcomeStatus.UNMATCHED, 0)
