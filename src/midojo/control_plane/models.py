@@ -391,9 +391,11 @@ class GradeResponse(BaseModel):
         default=None,
         description=(
             "Whether a payload of the episode's plan was emitted at its boundary, from the delivery facts: by the "
-            "interceptor in a tool result, or by the host in a turn's message. Not proof the agent saw it. None "
-            "when unknown, as for a payload placed in the environment. False only for an empty plan (no injection "
-            "task); with a plan it comes from the delivery facts even without a security check."
+            "interceptor in a tool result, or by the host in a turn's message. Not proof the agent saw it. True "
+            "when any payload was emitted. False for an empty plan (no injection task), or when the delivery facts "
+            "establish that no instruction emitted its payload. None when that can't be determined, as for a "
+            "payload placed in the environment or a call with no delivery fact. It comes from the delivery facts "
+            "even without a security check."
         ),
     )
 
