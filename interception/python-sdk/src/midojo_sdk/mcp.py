@@ -627,7 +627,8 @@ class MidojoMCP:
             )
             self._outcomes.append(outcome)
             outcomes.append(outcome)
-        # The record is what the agent gets: its text blocks as one string, and its structured content.
+        # The record is what the interceptor returns, recorded before it does: its text blocks as one string,
+        # and its structured content. It doesn't show the agent received it.
         seen = _text(result.content)
         error = seen if result.isError else None
         await _finish_forwarded(recorder, call_id, name, arguments, seen, error, result.structuredContent, outcomes)

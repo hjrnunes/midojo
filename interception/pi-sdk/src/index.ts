@@ -16,7 +16,7 @@ import type { TSchema } from "typebox";
 /**
  * What the extension did with a call:
  *
- * - `forwarded`: the real tool ran, and the agent got its answer (rewritten by a hook, or not)
+ * - `forwarded`: the real tool ran, and the extension returned its answer (rewritten by a hook, or not)
  * - `simulated`: answered by a tool the extension registers, instead of a real one
  * - `denied`: refused by a check on the call's arguments; the tool never ran
  * - `blocked`: refused because the tool is blocked for the evaluation; the tool never ran

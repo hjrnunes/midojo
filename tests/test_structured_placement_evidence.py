@@ -1,6 +1,6 @@
 """What a structured-content placement leaves in the evidence, recorded through MidojoMCP in process.
 
-The sealed call record must be what the agent received, text and structured
+The sealed call record must be what the interceptor returned, text and structured
 parts, with the call's injection outcomes. A recorder written before the
 detailed finish still gets every call recorded (its text only), and the agent
 still gets its result.

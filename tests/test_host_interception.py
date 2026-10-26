@@ -109,7 +109,7 @@ async def test_the_interceptor_records_in_its_evaluation_and_applies_the_plan(co
         ("get_weather", True, 0, "interceptor", "forwarded"),
         ("list_alerts", True, 0, "interceptor", "forwarded"),
     ]
-    # The sealed records are what the agent got: a text-only result has no structured part.
+    # The sealed records are what the interceptor returned: a text-only result has no structured part.
     assert [(c.result, c.structured_content) for c in calls] == [(f"41°F, rain\n{PAYLOAD}", None), ("no alerts", None)]
     assert [[(o.status, o.probe_key) for o in sealed_outcomes(c)] for c in calls] == [
         [("applied", "weather_alert:main")],
@@ -205,7 +205,7 @@ async def test_host_interceptor_places_a_selected_record_in_the_text_and_seals_w
         OutcomeStatus.APPLIED,
         "exact selector matched; mirrored text re-serialised",
     )
-    # The sealed record is exactly what the agent got, text and structured parts, with the outcome.
+    # The sealed record is exactly what the interceptor returned, text and structured parts, with the outcome.
     assert (record.result, record.structured_content, record.error) == (agent_text(result), injected, None)
     assert [(o.instruction_index, o.probe_key, o.occurrence, o.status, o.detail) for o in sealed_outcomes(record)] == [
         (0, "notes:body", 1, "applied", outcome.detail)

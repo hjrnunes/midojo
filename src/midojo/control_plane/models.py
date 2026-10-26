@@ -58,14 +58,17 @@ class FunctionCallBody(FunctionCallStart):
     error: str | None = None
     blocked: bool = Field(
         default=False,
-        description="The tool never ran: the agent's call was blocked, and `result` is what the agent was told instead.",
+        description=(
+            "The tool never ran: the agent's call was blocked, and `result` is what the layer returned instead."
+        ),
     )
     disposition: CallDisposition | None = Field(default=None, description=_DISPOSITION_DESCRIPTION)
     structured_content: dict[str, Any] | None = Field(
         default=None,
         description=(
-            "The structured content the agent got with `result` (its text), exactly as it got it. Optional: None "
-            "when the result had none or the layer reports the text only."
+            "The structured content the interception layer returned to the agent with `result` (its text), as it "
+            "returned it, recorded before it was returned: not proof the agent received it. Optional: None when "
+            "the result had none or the layer reports the text only."
         ),
     )
     injection_outcomes: list[CallInjectionOutcome] | None = Field(

@@ -830,7 +830,7 @@ async def test_a_mirrored_text_block_is_re_serialised_in_its_own_style(style, mo
     assert _texts(result) == [json.dumps(expected, **style)]
     [outcome] = mcp.injection_outcomes
     assert (outcome.status, outcome.detail) == (OutcomeStatus.APPLIED, MIRRORED)
-    # The record is what the agent got: the re-serialised text and the injected structured content.
+    # The record is what the interceptor returned: the re-serialised text and the injected structured content.
     [finish] = recorder.finishes
     assert (finish["result"], finish["structured_content"], finish["error"]) == (_texts(result)[0], expected, None)
     assert finish["injection_outcomes"] == [

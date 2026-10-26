@@ -53,7 +53,7 @@ if TYPE_CHECKING:
 Disposition = Literal["forwarded", "denied", "simulated", "blocked"]
 """What the interception layer did with a call.
 
-- ``forwarded``: sent to the real tool; the agent got the real tool's answer
+- ``forwarded``: sent to the real tool; the layer returned the real tool's answer
 - ``simulated``: answered by a tool the layer defines, instead of the real tool
 - ``denied``: refused by a check on this call's arguments; the tool never ran
 - ``blocked``: refused because the tool is blocked for the evaluation; the tool never ran
@@ -206,7 +206,8 @@ class DetailedRecorder(Recorder, Protocol):
     """A :class:`Recorder` that also records the parts of a result beyond its text: an optional capability.
 
     ``finish_call_detailed`` finishes a call as ``finish_call`` does, and also
-    records the structured content the agent got with ``result`` (its text)
+    records the structured content returned to the agent with ``result`` (its
+    text; recorded before it is returned, so not proof the agent received it)
     and how each injection instruction that matched the call fared. A
     recorder has the capability when :func:`records_details` says so: the
     HTTP and in-process clients do, and :class:`RetryingRecorder` and
@@ -234,7 +235,7 @@ class DetailedRecorder(Recorder, Protocol):
     ) -> None:
         """Finish the call started with ``call_id``, with the structured content and injection outcomes too.
 
-        ``structured_content`` is None when the agent got none.
+        ``structured_content`` is None when the result has none.
         """
         ...
 

@@ -263,7 +263,7 @@ def _tool_output_emitted(
         if tool is not None and call.function != tool:
             continue
         if call.blocked:
-            continue  # the tool never ran: the agent got the layer's refusal
+            continue  # the tool never ran: the layer returned its refusal
         if not call.complete:
             gaps.append(f"call {call.call_id} is unfinished")
             continue

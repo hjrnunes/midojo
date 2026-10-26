@@ -144,7 +144,7 @@ def test_a_payload_no_complete_call_emitted_reached_no_tool_result():
 def test_a_blocked_call_never_carries_a_payload():
     report = exposure(plan(tool_output()), [call(blocked=True)], turns=1, evidence_status=COMPLETE)
 
-    # The blocked call reported no facts, but its tool never ran: the agent got the layer's refusal.
+    # The blocked call reported no facts, but its tool never ran: the layer returned its refusal.
     assert boundaries(report) == ("not_exposed", "not_exposed", "unknown")
 
 
@@ -264,7 +264,7 @@ class FixedUpstream:
 
 @pytest.mark.asyncio
 async def test_a_payload_in_a_json_encoded_tool_result_is_emitted(suite):
-    """The payload reaches the agent's text JSON-escaped, which a search for its text misses; the facts don't."""
+    """The payload is in the returned text JSON-escaped, which a search for its text misses; the facts don't."""
     control = ControlPlane({"weather": suite}, config=AppConfig(closure_wait_seconds=0))
     run = control.create_run("weather")
     evaluation = control.create_evaluation(run.id, "weather_new_york")

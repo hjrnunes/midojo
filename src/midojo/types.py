@@ -89,7 +89,7 @@ class CallInjectionOutcome(BaseModel):
 
 
 class FunctionCallRecord(BaseModel):
-    """A recorded function call: what the agent asked for and what it saw.
+    """A recorded function call: what the agent asked for and what the interception layer returned to it.
 
     A record is an intercepted request: it isn't proof of what the call did,
     to the simulated environment or to a real system. An unfinished call
@@ -116,7 +116,9 @@ class FunctionCallRecord(BaseModel):
     error: str | None = None
     blocked: bool = Field(
         default=False,
-        description="The tool never ran: the agent's call was blocked, and `result` is what the agent was told instead.",
+        description=(
+            "The tool never ran: the agent's call was blocked, and `result` is what the layer returned instead."
+        ),
     )
     disposition: CallDisposition | None = Field(
         default=None,
@@ -128,8 +130,9 @@ class FunctionCallRecord(BaseModel):
     structured_content: dict | None = Field(
         default=None,
         description=(
-            "The structured content the agent got with `result` (its text), exactly as it got it, when the layer "
-            "reported the call's details (`injection_outcomes` is a list). None when the result had none, the call "
+            "The structured content the interception layer returned to the agent with `result` (its text), as it "
+            "returned it, when the layer reported the call's details (`injection_outcomes` is a list). Recorded "
+            "before it was returned: not proof the agent received it. None when the result had none, the call "
             "is unfinished, or the layer reported its text only."
         ),
     )
