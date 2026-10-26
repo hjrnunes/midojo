@@ -423,17 +423,20 @@ class EpisodeContext:
         self._seal_request = None
 
     async def _read_snapshot(self) -> None:
-        """Read the sealed snapshot back; on a failure, keep it as the reason, and raise it."""
+        """Read the sealed snapshot back; on a failure, keep it as the reason, and raise it.
+
+        The old error is cleared before the snapshot is stored, so the context
+        never holds both a snapshot and a snapshot error.
+        """
         environment_type = self.episode.environment_type
         assert environment_type is not None  # An episode infers one when it isn't given.
         try:
-            self._snapshot = await self.control.snapshot(
-                self.run_id, self.evaluation_id, environment_type=environment_type
-            )
+            snapshot = await self.control.snapshot(self.run_id, self.evaluation_id, environment_type=environment_type)
         except BaseException as error:
             self._snapshot_error = error
             raise
         self._snapshot_error = None
+        self._snapshot = snapshot
 
     async def __aexit__(
         self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None

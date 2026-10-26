@@ -813,6 +813,40 @@ async def test_a_host_retries_a_failed_snapshot_fetch_by_sealing_again_and_nothi
 
 
 @pytest.mark.asyncio
+async def test_a_retried_snapshot_read_never_leaves_both_a_snapshot_and_a_snapshot_error(monkeypatch):
+    plane = ControlPlane({}, config=AppConfig(closure_wait_seconds=0))
+    real = InProcessControlClient.snapshot
+    failures = [OSError("the read failed")]
+
+    async def snapshot_failing_once(self, run_id, eval_id, *, environment_type):
+        if failures:
+            raise failures.pop()
+        return await real(self, run_id, eval_id, environment_type=environment_type)
+
+    monkeypatch.setattr(InProcessControlClient, "snapshot", snapshot_failing_once)
+    # Every state the context passes through, as each write to either field leaves it.
+    states: list[tuple[bool, bool]] = []
+    set_attribute = EpisodeContext.__setattr__
+
+    def recording_setattr(self, name, value):
+        set_attribute(self, name, value)
+        if name in ("_snapshot", "_snapshot_error"):
+            states.append(
+                (self.__dict__.get("_snapshot") is not None, self.__dict__.get("_snapshot_error") is not None)
+            )
+
+    monkeypatch.setattr(EpisodeContext, "__setattr__", recording_setattr)
+    async with open_episode(weather_episode(), runtime=RecordingRuntime(), control=plane) as ep:
+        with pytest.raises(OSError, match="the read failed"):
+            await ep.seal("rain")
+        snapshot = await ep.seal()
+    assert ep.result.snapshot is snapshot and ep.result.snapshot_error is None
+    # The failed read set the error, the retry cleared it, and only then was the snapshot stored.
+    assert (False, True) in states and states[-1] == (True, False)
+    assert (True, True) not in states
+
+
+@pytest.mark.asyncio
 async def test_a_runtime_whose_run_fails_to_start_is_ended_and_no_evaluation_is_opened(monkeypatch):
     class FailingStart(RecordingRuntime):
         def start_run(self, run_id, *, suite_name):
