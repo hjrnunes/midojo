@@ -93,18 +93,21 @@ def test_delivery_facts_flatten_each_calls_outcomes_and_name_the_call():
         call("c3", outcomes=[]),
     ]
 
-    facts = delivery_facts(calls)
+    facts = delivery_facts(plan(tool_output()), calls)
 
-    assert [(f.call_id, f.instruction_index, f.status, f.emitted) for f in facts] == [
+    assert [(f.call_id, f.interceptor_instruction_index, f.status, f.emitted) for f in facts] == [
         ("c1", 0, "applied", ["content_block"]),
         ("c1", 1, "unmatched", []),
     ]
+    # The plan has no second tool-output instruction: the fact names none of its instructions.
+    assert [f.plan_instruction_index for f in facts] == [0, None]
     assert facts[0] == DeliveryFact(
         call_id="c1",
         function="lookup",
         disposition="forwarded",
         turn=None,
-        instruction_index=0,
+        interceptor_instruction_index=0,
+        plan_instruction_index=0,
         probe_key="t:main",
         occurrence=1,
         status="applied",
@@ -153,8 +156,20 @@ def test_a_blocked_call_never_carries_a_payload():
         ([call(outcomes=None)], COMPLETE, "call c1 reported no delivery facts"),
         ([call(outcomes=[outcome(emitted=None)])], COMPLETE, "call c1 didn't report what it emitted"),
         ([call(outcomes=[outcome(emitted=[], probe_key="t:other")])], COMPLETE, "with another probe"),
+        # A detailed finish that names no fact for the instruction doesn't show it wasn't placed: the layer may
+        # not have had this plan (a mirror given none finishes with an empty list).
+        ([call(outcomes=[])], COMPLETE, "call c1 reported no delivery fact for instruction 0"),
+        ([call(outcomes=[outcome(1, emitted=[])])], COMPLETE, "call c1 reported no delivery fact for instruction 0"),
     ],
-    ids=["capture-incomplete", "unfinished", "plain-finish", "no-emission-fact", "other-probe"],
+    ids=[
+        "capture-incomplete",
+        "unfinished",
+        "plain-finish",
+        "no-emission-fact",
+        "other-probe",
+        "empty-outcomes",
+        "unrelated-outcome",
+    ],
 )
 def test_a_payload_the_records_cant_rule_out_is_unknown(calls, evidence, why):
     report = exposure(plan(tool_output()), calls, turns=1, evidence_status=evidence)
@@ -170,9 +185,40 @@ def test_an_interceptor_index_is_the_place_in_the_plans_tool_output_part():
     report = exposure(episode_plan, calls, turns=1, evidence_status=COMPLETE)
 
     environment, placed = report.instructions
-    assert (environment.instruction_index, environment.exposure["emitted"]) == (0, "unknown")
-    assert (placed.instruction_index, placed.exposure["emitted"]) == (1, "exposed")
+    assert (environment.plan_instruction_index, environment.exposure["emitted"]) == (0, "unknown")
+    assert (placed.plan_instruction_index, placed.exposure["emitted"]) == (1, "exposed")
     assert report.emitted == "exposed"
+    # The fact keeps the interceptor's index and names the episode plan's, the one the exposure uses.
+    [fact] = delivery_facts(episode_plan, calls)
+    assert (fact.interceptor_instruction_index, fact.plan_instruction_index) == (0, 1)
+
+
+def test_a_fact_whose_probe_isnt_the_instructions_names_no_plan_instruction():
+    calls = [call(outcomes=[outcome(0, emitted=[], probe_key="t:other")])]
+
+    [fact] = delivery_facts(plan(tool_output()), calls)
+
+    assert (fact.interceptor_instruction_index, fact.plan_instruction_index) == (0, None)
+
+
+def test_a_call_that_only_has_other_tools_facts_doesnt_matter_to_the_instruction():
+    calls = [
+        call("c1", outcomes=[outcome(emitted=[], status="unmatched")]),
+        # A call to another tool, with an empty detailed finish: the instruction never applied to it.
+        call("c2", function="other", outcomes=[]),
+    ]
+
+    report = exposure(plan(tool_output()), calls, turns=1, evidence_status=COMPLETE)
+
+    assert boundaries(report) == ("not_exposed", "not_exposed", "unknown")
+
+
+def test_a_plain_finish_like_the_pi_sdks_leaves_exposure_unknown():
+    # The PI SDK finishes every call plainly: its records carry no injection outcomes at all.
+    report = exposure(plan(tool_output()), [call(outcomes=None)], turns=1, evidence_status=COMPLETE)
+
+    assert boundaries(report) == ("unknown", "unknown", "unknown")
+    assert report.instructions[0].reason == "call c1 reported no delivery facts"
 
 
 # --- host-placed instructions ---
@@ -244,7 +290,7 @@ async def test_a_payload_in_a_json_encoded_tool_result_is_emitted(suite):
     [record] = snapshot.function_calls
     assert record.result is not None and PAYLOAD not in record.result
     assert json.loads(record.result)["notes"][0]["body"] == "first" + PAYLOAD
-    [fact] = delivery_facts(snapshot.function_calls)
+    [fact] = delivery_facts(InjectionPlan((instruction,)), snapshot.function_calls)
     assert (fact.status, fact.selected, fact.emitted) == ("applied", True, ["structured_content", "content_block"])
     report = exposure(
         InjectionPlan((instruction,)),

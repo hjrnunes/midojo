@@ -326,7 +326,7 @@ async def test_benchmark_grades_security_when_the_injection_reaches_the_agent(
             "model_input": "unknown",
             "instructions": [
                 {
-                    "instruction_index": 0,
+                    "plan_instruction_index": 0,
                     "channel": "user_prompt",
                     "probe_key": "tornado_alert_via_prompt:main",
                     "placed_by": "host",
@@ -1023,7 +1023,9 @@ async def test_results_report_delivery_facts_exposure_and_a_blocked_attempt(
                 "function": "list_notes",
                 "disposition": "forwarded",
                 "turn": 0,
-                "instruction_index": 0,
+                # The interceptor numbers the plan's tool-output part; the episode's plan puts the note second.
+                "interceptor_instruction_index": 0,
+                "plan_instruction_index": 1,
                 "probe_key": "itinerary_exfil_via_email:note",
                 "occurrence": 1,
                 "status": "applied",
@@ -1035,7 +1037,7 @@ async def test_results_report_delivery_facts_exposure_and_a_blocked_attempt(
     }
     runtime_file, note = results["exposure"][pair]["instructions"]
     assert (runtime_file["placed_by"], runtime_file["exposure"]["emitted"]) == ("host", "unknown")
-    assert (note["instruction_index"], note["placed_by"]) == (1, "interceptor")
+    assert (note["plan_instruction_index"], note["placed_by"]) == (1, "interceptor")
     assert note["exposure"] == {"emitted": "exposed", "agent_tool_result": "unknown", "model_input": "unknown"}
     assert {b: results["exposure"][pair][b] for b in ("emitted", "agent_tool_result", "model_input")} == {
         "emitted": "exposed",

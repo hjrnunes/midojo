@@ -300,7 +300,7 @@ def _turn_label(label: str, idx: int, count: int) -> str:
 
 def _delivery(episode: Episode, snapshot: Snapshot) -> tuple[list[DeliveryFact], Exposure]:
     """The sealed snapshot's delivery facts, and the exposure of the episode's plan they derive."""
-    return delivery_facts(snapshot.function_calls), exposure(
+    return delivery_facts(episode.plan, snapshot.function_calls), exposure(
         episode.plan, snapshot.function_calls, turns=len(snapshot.turns), evidence_status=snapshot.evidence_status
     )
 

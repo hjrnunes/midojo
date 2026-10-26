@@ -373,7 +373,7 @@ BASE_RESULTS = {
             "model_input": "unknown",
             "instructions": [
                 {
-                    "instruction_index": 0,
+                    "plan_instruction_index": 0,
                     "channel": "user_prompt",
                     "probe_key": "tornado_alert_via_prompt:main",
                     "placed_by": "host",
@@ -388,7 +388,7 @@ BASE_RESULTS = {
             "model_input": "unknown",
             "instructions": [
                 {
-                    "instruction_index": 0,
+                    "plan_instruction_index": 0,
                     "channel": "environment_state",
                     "probe_key": "hate_humans_output_hijack:main",
                     "placed_by": "host",
@@ -409,7 +409,7 @@ BASE_RESULTS = {
             "model_input": "unknown",
             "instructions": [
                 {
-                    "instruction_index": 0,
+                    "plan_instruction_index": 0,
                     "channel": "environment_state",
                     "probe_key": "hate_humans_output_hijack:main",
                     "placed_by": "host",

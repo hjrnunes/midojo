@@ -5,7 +5,10 @@ own boundary, recorded as it happened: for a tool-output instruction, what the
 interceptor selected, transformed and emitted in one call's result (each
 sealed call's ``injection_outcomes``, :class:`midojo.types.CallInjectionOutcome`).
 A fact references its instruction by index and probe key; the plan holds
-none.
+none. The interceptor numbers instructions within the plan's tool-output
+part, the plan it was given; a report names both indexes apart:
+``interceptor_instruction_index`` as the call recorded it, and
+``plan_instruction_index``, the instruction's place in the episode's plan.
 
 *Exposure* is derived from the facts and names its boundary:
 
@@ -66,16 +69,21 @@ _BOUNDARIES: Mapping[Channel, tuple[ExposureBoundary, ...]] = {
 class DeliveryFact(BaseModel):
     """What the interceptor did with one instruction on one recorded call, at its own boundary.
 
-    ``instruction_index`` is the instruction's index in the plan the
-    interceptor was given; ``selected``, ``transformation`` and ``emitted``
-    are None when the interceptor didn't report them.
+    ``interceptor_instruction_index`` is the instruction's index in the plan
+    the interceptor was given (the episode plan's tool-output part), as the
+    call recorded it; ``plan_instruction_index`` is the same instruction's
+    index in the episode's plan, the index :class:`InstructionExposure` uses,
+    or None when no tool-output instruction of the plan has that place and
+    probe key. ``selected``, ``transformation`` and ``emitted`` are None when
+    the interceptor didn't report them.
     """
 
     call_id: str
     function: str
     disposition: CallDisposition | None
     turn: int | None
-    instruction_index: int
+    interceptor_instruction_index: int
+    plan_instruction_index: int | None
     probe_key: str | None
     occurrence: int
     status: InjectionStatus
@@ -84,15 +92,24 @@ class DeliveryFact(BaseModel):
     emitted: list[ResultPart] | None
 
 
-def delivery_facts(function_calls: Iterable[FunctionCallRecord]) -> list[DeliveryFact]:
-    """Every delivery fact the recorded calls carry, in call then instruction order."""
+def delivery_facts(plan: InjectionPlan, function_calls: Iterable[FunctionCallRecord]) -> list[DeliveryFact]:
+    """Every delivery fact the recorded calls carry, in call then instruction order, with ``plan``'s index of each."""
+    tool_output = _tool_output_indexes(plan)
+
+    def plan_index(interceptor_index: int, probe_key: str | None) -> int | None:
+        if not 0 <= interceptor_index < len(tool_output):
+            return None
+        index = tool_output[interceptor_index]
+        return index if plan.instructions[index].probe_key == probe_key else None
+
     return [
         DeliveryFact(
             call_id=call.call_id,
             function=call.function,
             disposition=call.disposition,
             turn=call.turn,
-            instruction_index=outcome.instruction_index,
+            interceptor_instruction_index=outcome.instruction_index,
+            plan_instruction_index=plan_index(outcome.instruction_index, outcome.probe_key),
             probe_key=outcome.probe_key,
             occurrence=outcome.occurrence,
             status=outcome.status,
@@ -105,15 +122,20 @@ def delivery_facts(function_calls: Iterable[FunctionCallRecord]) -> list[Deliver
     ]
 
 
+def _tool_output_indexes(plan: InjectionPlan) -> list[int]:
+    """The episode-plan index of each instruction in the plan's tool-output part, in that part's order."""
+    return [index for index, instruction in enumerate(plan) if instruction.channel is Channel.TOOL_OUTPUT]
+
+
 class InstructionExposure(BaseModel):
     """One instruction of an episode's plan: who placed it, and its exposure at each boundary its channel has.
 
-    ``instruction_index`` is its index in the episode's plan, and
-    ``reason`` says why the first boundary that isn't ``exposed`` is what it
-    is.
+    ``plan_instruction_index`` is its index in the episode's plan (a delivery
+    fact's ``plan_instruction_index``), and ``reason`` says why the first
+    boundary that isn't ``exposed`` is what it is.
     """
 
-    instruction_index: int
+    plan_instruction_index: int
     channel: str
     probe_key: str | None
     placed_by: PlacedBy
@@ -158,10 +180,11 @@ def exposure(
     and whose probe key is the instruction's. It is ``emitted`` when a fact
     names a part of the result that carries it. It is ``not_exposed`` only
     when the record says it can't have been: ``function_calls`` is complete,
-    and every call to the instruction's tool that ran finished with
-    reported facts (a blocked call never ran, and the interceptor never
-    places a payload in its refusal), none naming the instruction as
-    emitted. Anything else is unknown.
+    and every call to the instruction's tool that ran finished with a fact
+    for the instruction (a blocked call never ran, and the interceptor never
+    places a payload in its refusal), none naming it as emitted. A call with
+    no fact for it is unknown, even when the call reported others or none:
+    see :func:`_tool_output_emitted`. Anything else is unknown.
 
     A user-prompt instruction is placed by the host in a turn's message: it
     is ``emitted`` once that turn started, ``not_exposed`` when it didn't and
@@ -169,7 +192,7 @@ def exposure(
     placed by the host before the agent runs, and nothing records whether a
     tool or a file read carried it on: every boundary is unknown.
     """
-    tool_output = [index for index, instruction in enumerate(plan) if instruction.channel is Channel.TOOL_OUTPUT]
+    tool_output = _tool_output_indexes(plan)
     instructions: list[InstructionExposure] = []
     for index, instruction in enumerate(plan):
         emitted: ExposureStatus
@@ -184,7 +207,7 @@ def exposure(
         boundaries = _BOUNDARIES[instruction.channel]
         instructions.append(
             InstructionExposure(
-                instruction_index=index,
+                plan_instruction_index=index,
                 channel=instruction.channel.value,
                 probe_key=instruction.probe_key,
                 placed_by="interceptor" if instruction.channel is Channel.TOOL_OUTPUT else "host",
@@ -247,9 +270,14 @@ def _tool_output_emitted(
         if call.injection_outcomes is None:
             gaps.append(f"call {call.call_id} reported no delivery facts")
             continue
-        for outcome in call.injection_outcomes:
-            if outcome.instruction_index != interceptor_index:
-                continue
+        facts = [outcome for outcome in call.injection_outcomes if outcome.instruction_index == interceptor_index]
+        if not facts:
+            # MidojoMCP reports an outcome for every instruction of its plan whose tool matches the call
+            # (skipped_occurrence included), but nothing here shows that plan was this one: a mirror given no
+            # plan, or another layer, finishes with an empty list. A missing fact is a gap, not an absence.
+            gaps.append(f"call {call.call_id} reported no delivery fact for instruction {interceptor_index}")
+            continue
+        for outcome in facts:
             if outcome.probe_key != instruction.probe_key:
                 gaps.append(f"call {call.call_id} names instruction {interceptor_index} with another probe")
             elif outcome.emitted:
