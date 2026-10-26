@@ -31,6 +31,7 @@ export const REJECTION_KINDS = [
 	"unknown_run",
 	"unknown_evaluation",
 	"unknown_task",
+	"idempotency_conflict",
 	"invalid_session",
 	"session_closed",
 	"forbidden",

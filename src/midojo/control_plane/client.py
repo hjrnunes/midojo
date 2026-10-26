@@ -52,7 +52,10 @@ class ControlClient(Protocol):
         injection_task_id: str | None,
         injections: dict[str, str],
         interception: InterceptionMode = "agent",
-    ) -> CreateEvaluationResponse: ...
+        idempotency_key: str | None = None,
+    ) -> CreateEvaluationResponse:
+        """Open an evaluation of the run's suite pair; resent with the same ``idempotency_key``, the same one."""
+        ...
 
     async def start_turn(self, run_id: str | None, eval_id: str, message: str) -> TurnResponse: ...
 
@@ -126,7 +129,10 @@ class ControlPlaneClient:
         injection_task_id: str | None,
         injections: dict[str, str],
         interception: InterceptionMode = "agent",
+        idempotency_key: str | None = None,
     ) -> CreateEvaluationResponse:
+        # Sent only when given: a request without one is the same as before keys existed.
+        keyed = {"idempotency_key": idempotency_key} if idempotency_key is not None else {}
         response = await self._http.post(
             f"{self._base_url}/runs/{run_id}/evaluations",
             headers=self._headers,
@@ -135,6 +141,7 @@ class ControlPlaneClient:
                 "injection_task_id": injection_task_id,
                 "injections": injections,
                 "interception": interception,
+                **keyed,
             },
         )
         response.raise_for_status()

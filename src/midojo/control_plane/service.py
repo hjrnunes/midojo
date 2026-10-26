@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import secrets
+import threading
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -58,7 +59,7 @@ from .models import (
     CreateFunctionCallStart,
     GradeResponse,
 )
-from .state import CaptureFailure, Evaluation, Run, Snapshot, Stage, Turn, unsupported_value
+from .state import CaptureFailure, Creation, Evaluation, Run, Snapshot, Stage, Turn, unsupported_value
 from .store import InMemoryStore, Store, detached
 
 # How often the closure wait checks for unfinished calls, in seconds.
@@ -119,6 +120,8 @@ class ControlPlane:
         self.store: Store = store if store is not None else InMemoryStore()
         self.config = config if config is not None else AppConfig()
         self._writer = self.store.writer()
+        # Held while a create under an idempotency key looks up, opens and keeps its evaluation.
+        self._creating = threading.Lock()
 
     # --- the single writer ---
 
@@ -203,8 +206,48 @@ class ControlPlane:
         injection_task_id: str | None = None,
         injections: Mapping[str, str] | None = None,
         interception: InterceptionMode = "agent",
+        idempotency_key: str | None = None,
     ) -> CreateEvaluationResponse:
-        """Compile the run's suite pair into an episode and open it. The response is the only place the token appears."""
+        """Compile the run's suite pair into an episode and open it.
+
+        Without an ``idempotency_key``, the response is the only place the
+        session token appears. With one (the caller's choice, one per request),
+        the run also keeps the response under it, token included: sending
+        the same request with the same key again returns that response, the
+        same evaluation and session, and opens nothing, so a create whose
+        response was lost can be resent. The same key with another request is
+        refused as ``idempotency_conflict``. A create refused outright (an
+        unknown task, say) keeps nothing, so resending it tries it afresh.
+        """
+        if idempotency_key is None:
+            return self._create_evaluation(run_id, user_task_id, injection_task_id, injections, interception)
+        request = {
+            "user_task_id": user_task_id,
+            "injection_task_id": injection_task_id,
+            "injections": dict(injections or {}),
+            "interception": interception,
+        }
+        with self._creating:
+            kept = self.store.kept_creation(run_id, idempotency_key)
+            if kept is not None:
+                if kept.request != request:
+                    raise _reject(
+                        Rejection.IDEMPOTENCY_CONFLICT,
+                        f"Idempotency key {idempotency_key!r} already created an evaluation for another request",
+                    )
+                return kept.response
+            response = self._create_evaluation(run_id, user_task_id, injection_task_id, injections, interception)
+            self.store.keep_creation(run_id, idempotency_key, Creation(request, response))
+            return response
+
+    def _create_evaluation(
+        self,
+        run_id: str,
+        user_task_id: str,
+        injection_task_id: str | None,
+        injections: Mapping[str, str] | None,
+        interception: InterceptionMode,
+    ) -> CreateEvaluationResponse:
         try:
             episode = self.suite(run_id).episode(user_task_id, injection_task_id, detached(dict(injections or {})))
         except UnknownTaskError as exc:

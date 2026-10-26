@@ -5,8 +5,11 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from midojo.control_plane.config import AppConfig
+from midojo.control_plane.inprocess_control import InProcessControlClient
+from midojo.control_plane.lifecycle import RejectedError, Rejection
 from midojo.control_plane.main import create_app
 from midojo.control_plane.models import EvaluationResponse
+from midojo.control_plane.service import ControlPlane
 from midojo.control_plane.state import Evaluation
 from midojo.episode import freeze
 from midojo.runtimes.openshell import OpenShellObservations
@@ -74,6 +77,82 @@ def test_create_evaluation_unknown_task(client):
     run_id = _create_run(client)
     resp = client.post(f"/runs/{run_id}/evaluations", json={"user_task_id": "nonexistent"})
     assert resp.status_code == 400
+
+
+# --- creating an evaluation under an idempotency key ---
+
+
+def _post_evaluation(client: TestClient, run_id: str, **body):
+    return client.post(f"/runs/{run_id}/evaluations", json={"user_task_id": "weather_new_york", **body})
+
+
+def test_a_create_resent_with_its_idempotency_key_returns_the_same_evaluation_and_session(client):
+    run_id = _create_run(client)
+    first = _post_evaluation(client, run_id, idempotency_key="k1")
+    again = _post_evaluation(client, run_id, idempotency_key="k1")
+    assert (first.status_code, again.status_code) == (201, 201)
+    assert again.json() == first.json()
+    assert [summary["id"] for summary in client.get(f"/runs/{run_id}").json()["evaluations"]] == [first.json()["id"]]
+    # The session the resend returned is the evaluation's.
+    session = {"Authorization": f"Bearer {again.json()['session_token']}"}
+    assert client.get("/agent/environment", headers=session).status_code == 200
+
+
+def test_the_same_idempotency_key_with_another_request_is_refused(client):
+    run_id = _create_run(client)
+    first = _post_evaluation(client, run_id, idempotency_key="k1")
+    for changed in (
+        {"user_task_id": "trip_weather"},
+        {"injection_task_id": "book_shelter"},
+        {"injections": {"book_shelter:main": "x"}},
+        {"interception": "host"},
+    ):
+        refused = _post_evaluation(client, run_id, idempotency_key="k1", **changed)
+        assert refused.status_code == 409 and refused.json()["kind"] == "idempotency_conflict"
+    assert [summary["id"] for summary in client.get(f"/runs/{run_id}").json()["evaluations"]] == [first.json()["id"]]
+    # Leaving out a default is the same request.
+    assert _post_evaluation(client, run_id, idempotency_key="k1", injections={}).json() == first.json()
+
+
+def test_without_an_idempotency_key_each_create_opens_an_evaluation(client):
+    run_id = _create_run(client)
+    first, second = _post_evaluation(client, run_id), _post_evaluation(client, run_id)
+    assert first.json()["id"] != second.json()["id"]
+    assert first.json()["session_token"] != second.json()["session_token"]
+    assert len(client.get(f"/runs/{run_id}").json()["evaluations"]) == 2
+
+
+def test_an_idempotency_key_belongs_to_its_run_and_a_refused_create_keeps_nothing(client):
+    run_id, other_run_id = _create_run(client), _create_run(client)
+    first = _post_evaluation(client, run_id, idempotency_key="k1")
+    elsewhere = _post_evaluation(client, other_run_id, idempotency_key="k1")
+    assert elsewhere.status_code == 201 and elsewhere.json()["id"] != first.json()["id"]
+    refused = client.post(f"/runs/{run_id}/evaluations", json={"user_task_id": "nonexistent", "idempotency_key": "k2"})
+    assert refused.status_code == 400
+    # Nothing was kept under the refused create's key: another request under it is a new create.
+    created = _post_evaluation(client, run_id, idempotency_key="k2")
+    assert created.status_code == 201 and created.json()["id"] != first.json()["id"]
+
+
+def test_an_empty_idempotency_key_is_refused(client):
+    run_id = _create_run(client)
+    assert _post_evaluation(client, run_id, idempotency_key="").status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_the_in_process_client_creates_under_an_idempotency_key_as_the_route_does(suite):
+    plane = ControlPlane({"weather": suite})
+    control = InProcessControlClient(plane)
+    run = plane.create_run("weather")
+    first = await control.create_evaluation(run.id, "weather_new_york", None, {}, idempotency_key="k1")
+    again = await control.create_evaluation(run.id, "weather_new_york", None, {}, idempotency_key="k1")
+    assert again == first and again is not first
+    with pytest.raises(RejectedError) as refused:
+        await control.create_evaluation(run.id, "weather_new_york", "book_shelter", {}, idempotency_key="k1")
+    assert refused.value.kind is Rejection.IDEMPOTENCY_CONFLICT
+    unkeyed = await control.create_evaluation(run.id, "weather_new_york", None, {})
+    assert unkeyed.id != first.id
+    assert [evaluation.id for evaluation in plane.evaluations(run.id)] == [first.id, unkeyed.id]
 
 
 def test_get_evaluation(client):

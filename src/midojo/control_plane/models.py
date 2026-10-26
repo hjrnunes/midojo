@@ -191,6 +191,16 @@ class CreateEvaluationRequest(BaseModel):
     injection_task_id: str | None = None
     injections: dict[str, str] = {}
     interception: InterceptionMode = Field(default="agent", description=_INTERCEPTION_DESCRIPTION)
+    idempotency_key: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=256,
+        description=(
+            "Optional, the caller's choice, one per request. The run keeps the response under it: the same request "
+            "sent again with the same key returns the same evaluation and session (a create whose response was lost "
+            "can be resent), and the same key with another request is refused (409, idempotency_conflict)."
+        ),
+    )
 
 
 class CreateRunRequest(BaseModel):

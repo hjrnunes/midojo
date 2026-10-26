@@ -79,15 +79,22 @@ class InProcessControlClient:
         injection_task_id: str | None,
         injections: dict[str, str],
         interception: InterceptionMode = "agent",
+        idempotency_key: str | None = None,
     ) -> CreateEvaluationResponse:
         req = CreateEvaluationRequest(
             user_task_id=user_task_id,
             injection_task_id=injection_task_id,
             injections=injections,
             interception=interception,
+            idempotency_key=idempotency_key,
         )
         return self._control.create_evaluation(
-            run_id, req.user_task_id, req.injection_task_id, req.injections, interception=req.interception
+            run_id,
+            req.user_task_id,
+            req.injection_task_id,
+            req.injections,
+            interception=req.interception,
+            idempotency_key=req.idempotency_key,
         )
 
     async def open_episode(self, episode: Episode, *, interception: InterceptionMode = "agent") -> OpenedEvaluation:

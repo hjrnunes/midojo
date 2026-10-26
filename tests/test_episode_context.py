@@ -708,6 +708,67 @@ async def counted_seals(suite, over: str):
         yield plane, ep, outputs
 
 
+class LostCreateTransport(httpx.AsyncBaseTransport):
+    """The control plane's app, except that the first ``lost`` creates are applied and their responses lost."""
+
+    def __init__(self, app, lost: int) -> None:
+        self.app, self.lost, self.creates = httpx.ASGITransport(app), lost, []
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        response = await self.app.handle_async_request(request)
+        if request.method == "POST" and request.url.path.endswith("/evaluations"):
+            self.creates.append(json.loads(request.content))
+            if len(self.creates) <= self.lost:
+                raise httpx.ReadError("the response was lost", request=request)
+        return response
+
+
+@pytest.mark.asyncio
+async def test_a_create_whose_response_is_lost_is_resent_once_and_opens_one_evaluation(suite):
+    app = create_app({"weather": suite}, config=AppConfig(closure_wait_seconds=0))
+    plane: ControlPlane = app.state.control
+    run = plane.create_run("weather")
+    transport = LostCreateTransport(app, lost=1)
+    async with httpx.AsyncClient(transport=transport) as http:
+        control = ControlPlaneClient("http://control", http=http)
+        episode = suite.episode("weather_new_york")
+        async with open_episode(episode, runtime=RecordingRuntime(), control=control, run_id=run.id) as ep:
+            await ep.turn("weather?", _reply("rain"))
+    # The resend carried the same key, and was answered with the evaluation the lost create opened.
+    first, resent = transport.creates
+    assert first == resent and first["idempotency_key"]
+    [evaluation] = plane.evaluations(run.id)
+    assert ep.evaluation_id == evaluation.id and not ep.interrupted
+    assert ep.sealed.agent_output == "rain"
+
+
+@pytest.mark.asyncio
+async def test_a_create_lost_twice_is_raised_and_a_refused_one_is_never_resent(suite):
+    app = create_app({"weather": suite}, config=AppConfig(closure_wait_seconds=0))
+    plane: ControlPlane = app.state.control
+    run = plane.create_run("weather")
+    transport = LostCreateTransport(app, lost=2)
+    async with httpx.AsyncClient(transport=transport) as http:
+        control = ControlPlaneClient("http://control", http=http)
+        with pytest.raises(httpx.ReadError):
+            async with open_episode(
+                suite.episode("weather_new_york"), runtime=RecordingRuntime(), control=control, run_id=run.id
+            ):
+                raise AssertionError("never entered")
+    # Sent twice under one key: the control plane opened one evaluation, which no one learned of.
+    assert len(transport.creates) == 2 and transport.creates[0] == transport.creates[1]
+    assert len(plane.evaluations(run.id)) == 1
+    refusing = LostCreateTransport(app, lost=0)
+    async with httpx.AsyncClient(transport=refusing) as http:
+        control = ControlPlaneClient("http://control", http=http)
+        with pytest.raises(httpx.HTTPStatusError):
+            async with open_episode(
+                suite.episode("weather_new_york"), runtime=RecordingRuntime(), control=control, run_id="no-such-run"
+            ):
+                raise AssertionError("never entered")
+    assert len(refusing.creates) == 1
+
+
 # A seal the control plane refuses outright: over HTTP a 422, in process pydantic's ValidationError.
 REFUSED_SEAL = (httpx.HTTPStatusError, pydantic.ValidationError)
 

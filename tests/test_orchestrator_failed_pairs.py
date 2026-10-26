@@ -186,7 +186,8 @@ async def test_a_pair_that_fails_before_its_evaluation_opens_has_no_evaluation_i
 
         async def create_evaluation(self, *args, **kwargs):
             RefusingSecond.created += 1
-            if RefusingSecond.created == 2:
+            # The second pair's create and the one resend of it after an unknown outcome.
+            if RefusingSecond.created in (2, 3):
                 raise ConnectionError("control plane went away")
             return await super().create_evaluation(*args, **kwargs)
 

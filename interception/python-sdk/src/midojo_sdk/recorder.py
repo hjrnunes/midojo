@@ -104,6 +104,7 @@ class RejectionKind(enum.StrEnum):
     UNKNOWN_RUN = "unknown_run"
     UNKNOWN_EVALUATION = "unknown_evaluation"
     UNKNOWN_TASK = "unknown_task"
+    IDEMPOTENCY_CONFLICT = "idempotency_conflict"
     INVALID_SESSION = "invalid_session"
     SESSION_CLOSED = "session_closed"
     FORBIDDEN = "forbidden"

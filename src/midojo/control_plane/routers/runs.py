@@ -96,7 +96,12 @@ async def create_evaluation(
     control: Annotated[ControlPlane, Depends(get_control)],
 ):
     return control.create_evaluation(
-        run.id, req.user_task_id, req.injection_task_id, req.injections, interception=req.interception
+        run.id,
+        req.user_task_id,
+        req.injection_task_id,
+        req.injections,
+        interception=req.interception,
+        idempotency_key=req.idempotency_key,
     )
 
 

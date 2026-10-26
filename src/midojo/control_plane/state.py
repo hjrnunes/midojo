@@ -30,7 +30,7 @@ from midojo.episode import MAX_NESTING_DEPTH, Episode
 from midojo.observations import FUNCTION_CALLS, EvidenceStatus
 from midojo.types import Environment, FunctionCallRecord, InterceptionMode, SuiteName
 
-from .models import CapturePhase, GradeResponse
+from .models import CapturePhase, CreateEvaluationResponse, GradeResponse
 
 
 def _now() -> str:
@@ -469,6 +469,19 @@ def late_evidence(facts: tuple[LateFact, ...]) -> dict[str, EvidenceStatus]:
 def capture_evidence(failures: tuple[CaptureFailure, ...]) -> dict[str, EvidenceStatus]:
     """The evidence-status keys ``failures`` mark incomplete: ``function_calls``, once any was reported."""
     return {FUNCTION_CALLS: "incomplete"} if failures else {}
+
+
+@dataclass(frozen=True)
+class Creation:
+    """An evaluation created under an idempotency key: the request it answered, and the response it gave.
+
+    ``request`` is what the request asked for (``user_task_id``,
+    ``injection_task_id``, ``injections`` and ``interception``). ``response``
+    holds the session token, so that a resend gets the same session.
+    """
+
+    request: Mapping[str, Any]
+    response: CreateEvaluationResponse
 
 
 @dataclass(frozen=True)

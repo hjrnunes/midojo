@@ -28,7 +28,7 @@ from typing import Protocol, TypeVar
 
 from midojo.types import SuiteName
 
-from .state import Evaluation, Run
+from .state import Creation, Evaluation, Run
 
 T = TypeVar("T")
 
@@ -77,6 +77,15 @@ class Store(Protocol):
         """The writer capability. Given out once: a second call raises RuntimeError."""
         ...
 
+    # --- evaluations created under an idempotency key ---
+    def kept_creation(self, run_id: str, key: str) -> Creation | None:
+        """A copy of the creation kept under ``key`` in the run, or None."""
+        ...
+
+    def keep_creation(self, run_id: str, key: str, creation: Creation) -> None:
+        """Keep a copy of ``creation`` under ``key`` in the run."""
+        ...
+
     # --- the session token index ---
     def bind_session(self, token_hash: str, run_id: str | None, eval_id: str) -> None: ...
     def unbind_session(self, token_hash: str) -> None: ...
@@ -97,6 +106,7 @@ class InMemoryStore:
         self._evaluations: dict[str | None, dict[str, Evaluation]] = {None: {}}
         self._evaluation_ids: set[str] = set()
         self._sessions: dict[str, tuple[str | None, str]] = {}
+        self._creations: dict[tuple[str, str], Creation] = {}
         self._writer: _InMemoryWriter | None = None
 
     # --- runs ---
@@ -150,6 +160,16 @@ class InMemoryStore:
                 raise RuntimeError("This store's writer has already been given out")
             self._writer = _InMemoryWriter(self)
             return self._writer
+
+    # --- evaluations created under an idempotency key ---
+
+    def kept_creation(self, run_id: str, key: str) -> Creation | None:
+        with self._lock:
+            return detached(self._creations.get((run_id, key)))
+
+    def keep_creation(self, run_id: str, key: str, creation: Creation) -> None:
+        with self._lock:
+            self._creations[(run_id, key)] = detached(creation)
 
     # --- the session token index ---
 

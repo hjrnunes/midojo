@@ -49,6 +49,7 @@ from midojo.tool_endpoint import ToolEndpoint
 from midojo.types import InterceptionMode
 
 if TYPE_CHECKING:
+    from midojo.control_plane.models import CreateEvaluationResponse
     from midojo.control_plane.service import ControlPlane
     from midojo.interception_host import HostInterception, HostInterceptor
 
@@ -321,9 +322,21 @@ class EpisodeContext:
             raise ValueError("In a run, the control plane compiles the episode from its suite: it needs a user_task_id")
         # The run's control plane compiles the same suite pair, and its turns are the ones the host sends.
         host: dict[str, InterceptionMode] = {"interception": "host"} if self.interception is not None else {}
-        created = await self.control.create_evaluation(
-            self.run_id, episode.user_task_id, episode.injection_task_id, dict(episode.injections), **host
-        )
+        run_id, user_task_id, key = self.run_id, episode.user_task_id, uuid.uuid4().hex
+
+        async def create() -> CreateEvaluationResponse:
+            return await self.control.create_evaluation(
+                run_id, user_task_id, episode.injection_task_id, dict(episode.injections), idempotency_key=key, **host
+            )
+
+        try:
+            created = await create()
+        except Exception as error:
+            # An unknown outcome (its response lost, say): the control plane may have opened the evaluation. The
+            # same create, under the same key, is sent again once, and answers with that evaluation if it did.
+            if _refused(error):
+                raise
+            created = await create()
         self._evaluation_id, self._session_token, self.turns = created.id, created.session_token, tuple(created.turns)
 
     # --- turns ---

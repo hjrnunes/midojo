@@ -120,6 +120,8 @@ class Rejection(enum.StrEnum):
     UNKNOWN_RUN = "unknown_run"
     UNKNOWN_EVALUATION = "unknown_evaluation"
     UNKNOWN_TASK = "unknown_task"
+    # An idempotency key a run already answered another request under.
+    IDEMPOTENCY_CONFLICT = "idempotency_conflict"
     # Sessions.
     INVALID_SESSION = "invalid_session"
     SESSION_CLOSED = "session_closed"
