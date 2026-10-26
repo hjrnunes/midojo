@@ -378,6 +378,20 @@ class CapabilityError(ValueError):
 
 @dataclass(frozen=True)
 class InjectionOutcome:
+    """How one instruction fared on one call, with the delivery facts of the interceptor's own boundary.
+
+    ``selected`` is whether the instruction's exact selector matched a place
+    in the call's result. ``transformation`` is the transformation applied to
+    the payload, None when the payload was never transformed (the occurrence
+    rule skipped the call, the call's arguments didn't match the target's
+    ``call_arguments``, or there was no result). ``emitted`` names the
+    parts of the result the interceptor returned that carry the transformed
+    payload where it placed it (``content_block``, ``structured_content``),
+    checked on the result as returned, after every instruction for the call:
+    empty when none does. These are facts about what the interceptor sent,
+    not about what the agent or its model saw.
+    """
+
     instruction_index: int
     probe_key: str | None
     scope: str
@@ -387,6 +401,9 @@ class InjectionOutcome:
     admission_order: int
     status: OutcomeStatus
     detail: str
+    selected: bool = False
+    transformation: Transformation | None = None
+    emitted: tuple[SelectorSurface, ...] = ()
 
 
 def capability_gaps(

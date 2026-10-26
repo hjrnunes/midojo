@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import dataclasses
 import functools
 import inspect
 import json
@@ -17,7 +18,7 @@ import logging
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Sequence
 from contextvars import ContextVar
-from typing import Any
+from typing import Any, Literal
 
 import anyio
 import httpx
@@ -614,13 +615,37 @@ class MidojoMCP:
             # but this admitted call still consumed its occurrence.
             self._report_no_result(call_id, name, admitted)
             raise
+        placements = []
+        # One key per content block and per structured field written, tracking each through the instructions
+        # (see _track and _track_field).
+        keys: list[object] = [object() for _ in result.content]
+        fields: dict[_Location, object] = {}
+        for admission in admitted:
+            result, placement = _inject_result(result, admission[2])
+            keys, written = _track(keys, placement.edit, len(result.content))
+            fields, field_written = _track_field(fields, placement.field)
+            placements.append((admission, placement, written, field_written))
+        # Emission is checked on the result as returned, so a later instruction that replaced a placement shows.
         outcomes = list(skipped)
-        for scope, index, instruction, occurrence, order in admitted:
-            result, status, detail = _inject_result(result, instruction)
-            outcome = _outcome(scope, index, instruction, call_id, name, occurrence, order, status, detail)
+        for (scope, index, instruction, occurrence, order), placement, written, field_written in placements:
+            outcome = _outcome(
+                scope,
+                index,
+                instruction,
+                call_id,
+                name,
+                occurrence,
+                order,
+                placement.status,
+                placement.detail,
+                selected=placement.status in _SELECTED,
+                transformation=instruction.transformation,
+                emitted=_emitted(result, keys, fields, placement, written, field_written),
+            )
             self._outcomes.append(outcome)
             outcomes.append(outcome)
-        # The record is what the agent gets: its text blocks as one string, and its structured content.
+        # The record is what the interceptor returns, recorded before it does: its text blocks as one string,
+        # and its structured content. It doesn't show the agent received it.
         seen = _text(result.content)
         error = seen if result.isError else None
         await _finish_forwarded(recorder, call_id, name, arguments, seen, error, result.structuredContent, outcomes)
@@ -679,7 +704,7 @@ async def _finish_forwarded(
 
 
 def _text(content: Sequence[ContentBlock]) -> str:
-    """What the agent saw, as one string: text blocks as sent, other blocks as their wire JSON."""
+    """What the agent is sent, as one string: text blocks as sent, other blocks as their wire JSON."""
     return "\n".join(
         block.text if isinstance(block, TextContent) else block.model_dump_json(by_alias=True, exclude_none=True)
         for block in content
@@ -855,19 +880,23 @@ def _json_style(text: str, value: Any) -> dict[str, Any]:
     return {"separators": (",", ":"), "ensure_ascii": False}
 
 
-def _inject_content(result: CallToolResult, instruction: InjectionInstruction, payload: str) -> CallToolResult | None:
+def _inject_content(
+    result: CallToolResult, instruction: InjectionInstruction, payload: str
+) -> tuple[CallToolResult, _Edit] | None:
     target = instruction.target
     content = list(result.content)
     if target.content_block_index is None and target.content_block_type is None:
         block = TextContent(type="text", text=payload)
-        content = [block] if instruction.mode is InjectionMode.REPLACE else [*content, block]
-        return result.model_copy(update={"content": content})
+        if instruction.mode is InjectionMode.REPLACE:
+            return result.model_copy(update={"content": [block]}), _Edit("replace_all", 0, 0, payload)
+        edit = _Edit("append", len(content), 0, payload)
+        return result.model_copy(update={"content": [*content, block]}), edit
     return _inject_selected_block(result, instruction, payload, content)
 
 
 def _inject_selected_block(
     result: CallToolResult, instruction: InjectionInstruction, payload: str, content: list[ContentBlock]
-) -> CallToolResult | None:
+) -> tuple[CallToolResult, _Edit] | None:
     target = instruction.target
     indexes = range(len(content)) if target.content_block_index is None else (target.content_block_index,)
     for index in indexes:
@@ -878,35 +907,233 @@ def _inject_selected_block(
             continue
         if not isinstance(block, TextContent):
             continue
-        text = payload if instruction.mode is InjectionMode.REPLACE else block.text + payload
+        if instruction.mode is InjectionMode.REPLACE:
+            text, edit = payload, _Edit("rewrite", index, 0, payload)
+        else:
+            text, edit = block.text + payload, _Edit("extend", index, len(block.text), payload)
         content[index] = block.model_copy(update={"text": text})
-        return result.model_copy(update={"content": content})
+        return result.model_copy(update={"content": content}), edit
     return None
 
 
-def _inject_result(
-    result: CallToolResult, instruction: InjectionInstruction
-) -> tuple[CallToolResult, OutcomeStatus, str]:
+@dataclasses.dataclass(frozen=True)
+class _Edit:
+    """How one instruction changed a result's content blocks, and the text it wrote where.
+
+    ``kind`` is ``replace_all`` (new content, all of it), ``append`` (a block
+    added at the end), ``rewrite`` (one block's text replaced) or ``extend``
+    (text appended to one block's text, which stays its prefix). ``text`` was
+    written at ``start`` in the text of the block at index ``block`` of the
+    content after the edit.
+    """
+
+    kind: Literal["replace_all", "append", "rewrite", "extend"]
+    block: int
+    start: int
+    text: str
+
+
+# Where an instruction's text is: the key of the block it wrote into (see _track), the offset and the text.
+_Written = tuple[object, int, str]
+
+# A structured field as the path resolved it: object keys and list indexes, a record selector's included.
+_Location = tuple[str | int, ...]
+
+
+@dataclasses.dataclass(frozen=True)
+class _FieldEdit:
+    """How one instruction wrote a structured field: where, whether it replaced the field, and what at which offset."""
+
+    location: _Location
+    replaced: bool
+    start: int
+    text: str
+
+
+# Where an instruction's payload is in the structured content: the field's key (see _track_field), its location,
+# the offset and the text.
+_FieldWritten = tuple[object, _Location, int, str]
+
+
+@dataclasses.dataclass(frozen=True)
+class _Placement:
+    """What one instruction did to a call's result: its outcome, the transformed payload and where it put it.
+
+    ``placed`` names where: ``structured_content``, ``mirror`` (the text
+    re-serialised from the structured content) and ``content_block`` (a text
+    block the instruction wrote or appended). ``edit`` is how it changed the
+    content blocks, None when it left them as they were; ``field`` how it
+    wrote the structured content, None when it didn't.
+    """
+
+    status: OutcomeStatus
+    detail: str
+    payload: str
+    placed: tuple[str, ...] = ()
+    edit: _Edit | None = None
+    field: _FieldEdit | None = None
+
+
+# The outcomes whose exact selector matched a place in the result.
+_SELECTED = frozenset({OutcomeStatus.APPLIED, OutcomeStatus.PARTIAL})
+
+
+def _inject_result(result: CallToolResult, instruction: InjectionInstruction) -> tuple[CallToolResult, _Placement]:
     payload = _transform(instruction)
     if instruction.size_limit is not None and len(payload.encode()) > instruction.size_limit:
-        return result, OutcomeStatus.TOO_LARGE, "transformed payload exceeds size_limit"
+        return result, _Placement(OutcomeStatus.TOO_LARGE, "transformed payload exceeds size_limit", payload)
     if instruction.target.surface is SelectorSurface.STRUCTURED_CONTENT:
+        # Located before the write, on the structured content the write resolves its path in.
+        field = _field_edit(result.structuredContent, instruction, payload)
         updated, problem = _inject_structured(result, instruction, payload)
         if updated is not None and problem is not None:
-            return updated, OutcomeStatus.PARTIAL, f"exact selector matched structured content only; {problem}"
+            detail = f"exact selector matched structured content only; {problem}"
+            return updated, _Placement(OutcomeStatus.PARTIAL, detail, payload, ("structured_content",), field=field)
         if updated is not None:
-            return updated, OutcomeStatus.APPLIED, "exact selector matched; mirrored text re-serialised"
+            detail = "exact selector matched; mirrored text re-serialised"
+            [mirror] = updated.content
+            assert isinstance(mirror, TextContent)  # _inject_structured re-serialised it.
+            edit = _Edit("replace_all", 0, 0, mirror.text)
+            placed = ("structured_content", "mirror")
+            return updated, _Placement(OutcomeStatus.APPLIED, detail, payload, placed, edit, field)
         mismatch = problem
     else:
-        updated = _inject_content(result, instruction, payload)
-        if updated is not None:
-            return updated, OutcomeStatus.APPLIED, "exact selector matched"
+        injected = _inject_content(result, instruction, payload)
+        if injected is not None:
+            updated, edit = injected
+            placement = _Placement(OutcomeStatus.APPLIED, "exact selector matched", payload, ("content_block",), edit)
+            return updated, placement
         mismatch = "content-block selector did not match"
     if instruction.mismatch_policy is MismatchPolicy.FALLBACK_APPEND:
         content = [*result.content, TextContent(type="text", text=payload)]
         updated = result.model_copy(update={"content": content})
-        return updated, OutcomeStatus.FALLBACK, f"{mismatch}; appended a text block"
-    return result, OutcomeStatus.UNMATCHED, f"{mismatch}; result unchanged"
+        detail = f"{mismatch}; appended a text block"
+        edit = _Edit("append", len(content) - 1, 0, payload)
+        return updated, _Placement(OutcomeStatus.FALLBACK, detail, payload, ("content_block",), edit)
+    return result, _Placement(OutcomeStatus.UNMATCHED, f"{mismatch}; result unchanged", payload)
+
+
+def _track(keys: list[object], edit: _Edit | None, size: int) -> tuple[list[object], _Written | None]:
+    """The block keys after ``edit``, and where it wrote its text.
+
+    A block keeps its key while its text is unchanged or only extended, so
+    text written into it stays where it was written; a rewritten block, an
+    appended one and all new content get new keys, so text written into a
+    block that was since replaced is found nowhere.
+    """
+    if edit is None:
+        return keys, None
+    if edit.kind == "replace_all":
+        keys = [object() for _ in range(size)]
+    elif edit.kind == "append":
+        keys = [*keys, object()]
+    elif edit.kind == "rewrite":
+        keys = [object() if index == edit.block else key for index, key in enumerate(keys)]
+    assert len(keys) == size
+    return keys, (keys[edit.block], edit.start, edit.text)
+
+
+def _still_written(result: CallToolResult, keys: list[object], written: _Written | None) -> bool:
+    """Whether the block ``written`` names is still in ``result`` and holds its text where it was written."""
+    if written is None:
+        return False
+    key, start, text = written
+    index = next((index for index, block_key in enumerate(keys) if block_key is key), None)
+    if index is None:
+        return False
+    block = result.content[index]
+    return isinstance(block, TextContent) and block.text[start : start + len(text)] == text
+
+
+def _field_edit(structured: Any, instruction: InjectionInstruction, payload: str) -> _FieldEdit | None:
+    """How writing ``payload`` at the instruction's path will change ``structured``; None when the path selects no string."""
+    location: list[str | int] = []
+    current = structured
+    for part in instruction.target.structured_content_path:
+        parent = current
+        current, mismatch = _resolve_path_part(current, part)
+        if mismatch is not None:
+            return None
+        if type(part) is RecordSelector:
+            location.append(next(index for index, item in enumerate(parent) if item is current))
+        else:
+            assert type(part) is str or type(part) is int
+            location.append(part)
+    if not isinstance(current, str):
+        return None
+    if instruction.mode is InjectionMode.REPLACE:
+        return _FieldEdit(tuple(location), True, 0, payload)
+    return _FieldEdit(tuple(location), False, len(current), payload)
+
+
+def _track_field(
+    fields: dict[_Location, object], edit: _FieldEdit | None
+) -> tuple[dict[_Location, object], _FieldWritten | None]:
+    """The structured fields' keys after ``edit``, and where it wrote its payload.
+
+    A field keeps its key while its text is only appended to, so a payload
+    written into it stays where it was written; a replaced field gets a new
+    key, so a payload written into it before is found nowhere, even when the
+    replacement is the same text.
+    """
+    if edit is None:
+        return fields, None
+    if edit.replaced or edit.location not in fields:
+        fields = {**fields, edit.location: object()}
+    return fields, (fields[edit.location], edit.location, edit.start, edit.text)
+
+
+def _field_still_written(
+    result: CallToolResult, fields: dict[_Location, object], written: _FieldWritten | None
+) -> bool:
+    """Whether the field ``written`` names still has its key and holds its payload where it was written."""
+    if written is None:
+        return False
+    key, location, start, text = written
+    if fields.get(location) is not key:
+        return False
+    current: Any = result.structuredContent
+    for part in location:
+        if type(part) is str and isinstance(current, dict) and part in current:
+            current = current[part]
+        elif type(part) is int and isinstance(current, list) and part < len(current):
+            current = current[part]
+        else:
+            return False
+    return isinstance(current, str) and current[start : start + len(text)] == text
+
+
+def _emitted(
+    result: CallToolResult,
+    keys: list[object],
+    fields: dict[_Location, object],
+    placement: _Placement,
+    written: _Written | None,
+    field_written: _FieldWritten | None,
+) -> tuple[SelectorSurface, ...]:
+    """The parts of the returned ``result`` that still carry the placement's payload where it was placed.
+
+    Structured content carries it when the field the instruction wrote still
+    holds the payload where it wrote it, with no later replace of that field
+    in between. The text carries a mirrored placement when it is still a
+    JSON mirror of structured content that carries it, or the block the
+    instruction re-serialised still holds that text; and a text-block
+    placement when the block it wrote into or appended still holds the
+    payload where it wrote it. Only that place counts: the same text
+    elsewhere in the result, or in a block or field a later instruction
+    replaced, isn't this instruction's placement.
+    """
+    carried: list[SelectorSurface] = []
+    structured = "structured_content" in placement.placed and _field_still_written(result, fields, field_written)
+    if structured:
+        carried.append(SelectorSurface.STRUCTURED_CONTENT)
+    if "mirror" in placement.placed:
+        mirrored = structured and not isinstance(_json_mirror(result), str)
+        if mirrored or _still_written(result, keys, written):
+            carried.append(SelectorSurface.CONTENT_BLOCK)
+    elif "content_block" in placement.placed and _still_written(result, keys, written):
+        carried.append(SelectorSurface.CONTENT_BLOCK)
+    return tuple(carried)
 
 
 def _records(outcomes: Sequence[InjectionOutcome]) -> list[InjectionRecord]:
@@ -918,6 +1145,9 @@ def _records(outcomes: Sequence[InjectionOutcome]) -> list[InjectionRecord]:
             "occurrence": outcome.occurrence,
             "status": outcome.status.value,
             "detail": outcome.detail,
+            "selected": outcome.selected,
+            "transformation": outcome.transformation.value if outcome.transformation is not None else None,
+            "emitted": [surface.value for surface in outcome.emitted],
         }
         for outcome in outcomes
     ]
@@ -933,6 +1163,10 @@ def _outcome(
     admission_order: int,
     status: OutcomeStatus,
     detail: str,
+    *,
+    selected: bool = False,
+    transformation: Transformation | None = None,
+    emitted: tuple[SelectorSurface, ...] = (),
 ) -> InjectionOutcome:
     return InjectionOutcome(
         instruction_index=index,
@@ -944,4 +1178,7 @@ def _outcome(
         admission_order=admission_order,
         status=status,
         detail=detail,
+        selected=selected,
+        transformation=transformation,
+        emitted=emitted,
     )

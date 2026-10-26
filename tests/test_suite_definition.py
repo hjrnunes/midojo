@@ -145,6 +145,12 @@ def test_definition_preserves_verifier_extension_data(tmp_path, raw, monkeypatch
             "security": {"status": "valid", "reasons": []},
         },
         "evidence_status": {},
+        # A verifier other than the built-in one isn't read again: an attempt shows only when it holds.
+        "attempted": True,
+        "blocked": False,
+        "effect_observed": True,
+        # suite.grade compiles the pair with no active probe: an empty plan delivers nothing.
+        "injection_delivered": False,
     }
 
 

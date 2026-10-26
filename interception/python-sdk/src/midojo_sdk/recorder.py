@@ -1,7 +1,7 @@
 """The two seams an interception layer talks to: recording calls, and the simulated world.
 
 A :class:`Recorder` records the requests the layer intercepts: each call the
-agent made, what the agent saw, and what the layer did with it (its
+agent made, what the layer returned to it, and what the layer did with it (its
 :data:`Disposition`). A :class:`WorldState` reads and changes the simulated
 environment that tools defined by the layer act on. Both are bound to one
 evaluation by whoever builds them, so tools never carry or choose an
@@ -45,7 +45,7 @@ import enum
 import logging
 import warnings
 from collections.abc import Awaitable, Callable, Sequence
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple, Protocol, TypedDict, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, NotRequired, Protocol, TypedDict, TypeVar, cast
 
 if TYPE_CHECKING:
     from midojo_sdk.client import AgentControlPlaneClient
@@ -53,7 +53,7 @@ if TYPE_CHECKING:
 Disposition = Literal["forwarded", "denied", "simulated", "blocked"]
 """What the interception layer did with a call.
 
-- ``forwarded``: sent to the real tool; the agent got the real tool's answer
+- ``forwarded``: sent to the real tool; the layer returned the real tool's answer
 - ``simulated``: answered by a tool the layer defines, instead of the real tool
 - ``denied``: refused by a check on this call's arguments; the tool never ran
 - ``blocked``: refused because the tool is blocked for the evaluation; the tool never ran
@@ -76,6 +76,15 @@ class InjectionRecord(TypedDict):
     for a call to the instruction's tool whose arguments didn't match its
     ``call_arguments`` (``unmatched``): such a call isn't counted. A record names neither the counter
     scope (an evaluation ID or a session token) nor the payload.
+
+    The delivery facts say what the interceptor did at its own boundary:
+    ``selected``, whether the instruction's exact selector matched a place in
+    the result; ``transformation``, the transformation applied to the payload
+    (``identity`` or ``json_string``; None when it was never transformed); and
+    ``emitted``, the parts of the returned result that carry the transformed
+    payload (``content_block``, ``structured_content``; empty when none does).
+    A layer that doesn't report them leaves them out. They never say what the
+    agent saw: a result is recorded before it is returned.
     """
 
     instruction_index: int
@@ -83,6 +92,9 @@ class InjectionRecord(TypedDict):
     occurrence: int
     status: str
     detail: str
+    selected: NotRequired[bool]
+    transformation: NotRequired[str | None]
+    emitted: NotRequired[list[str]]
 
 
 RECORD_ATTEMPTS = 3
@@ -197,7 +209,8 @@ class DetailedRecorder(Recorder, Protocol):
     """A :class:`Recorder` that also records the parts of a result beyond its text: an optional capability.
 
     ``finish_call_detailed`` finishes a call as ``finish_call`` does, and also
-    records the structured content the agent got with ``result`` (its text)
+    records the structured content returned to the agent with ``result`` (its
+    text; recorded before it is returned, so not proof the agent received it)
     and how each injection instruction that matched the call fared. A
     recorder has the capability when :func:`records_details` says so: the
     HTTP and in-process clients do, and :class:`RetryingRecorder` and
@@ -225,7 +238,7 @@ class DetailedRecorder(Recorder, Protocol):
     ) -> None:
         """Finish the call started with ``call_id``, with the structured content and injection outcomes too.
 
-        ``structured_content`` is None when the agent got none.
+        ``structured_content`` is None when the result has none.
         """
         ...
 

@@ -1,6 +1,6 @@
 """What a structured-content placement leaves in the evidence, recorded through MidojoMCP in process.
 
-The sealed call record must be what the agent received, text and structured
+The sealed call record must be what the interceptor returned, text and structured
 parts, with the call's injection outcomes. A recorder written before the
 detailed finish still gets every call recorded (its text only), and the agent
 still gets its result.
@@ -142,6 +142,26 @@ async def sealed(control: ControlPlane, upstream: CallToolResult, *instructions:
 def outcome_rows(record) -> list[tuple[int, str | None, int, str, str]]:
     assert record.injection_outcomes is not None
     return [(o.instruction_index, o.probe_key, o.occurrence, o.status, o.detail) for o in record.injection_outcomes]
+
+
+@pytest.mark.asyncio
+async def test_the_sealed_record_carries_the_delivery_facts_and_the_snapshot_names_them(control):
+    run = control.create_run("weather")
+    evaluation = control.create_evaluation(run.id, "weather_new_york")
+    recorder = InProcessAgentClient(control, evaluation.session_token)
+    result, _ = await forward(recorder, notes_result(), placement(probe_key="p:main"), evaluation_id=evaluation.id)
+    snapshot = await control.complete(run.id, evaluation.id, "done")
+
+    assert json.loads(agent_text(result)) == result.structuredContent == noted("first INJECTED")
+    [record] = snapshot.function_calls
+    [outcome] = record.injection_outcomes or []
+    assert (outcome.selected, outcome.transformation, outcome.emitted) == (
+        True,
+        "identity",
+        ["structured_content", "content_block"],
+    )
+    # The facts are plain data, so the snapshot's digest covers them and the sealed copy verifies.
+    assert snapshot.verified().function_calls[0].injection_outcomes == [outcome]
 
 
 @pytest.mark.asyncio

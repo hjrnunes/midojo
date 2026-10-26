@@ -831,11 +831,20 @@ async def test_a_mirrored_text_block_is_re_serialised_in_its_own_style(style, mo
     assert _texts(result) == [json.dumps(expected, **style)]
     [outcome] = mcp.injection_outcomes
     assert (outcome.status, outcome.detail) == (OutcomeStatus.APPLIED, MIRRORED)
-    # The record is what the agent got: the re-serialised text and the injected structured content.
+    # The record is what the interceptor returned: the re-serialised text and the injected structured content.
     [finish] = recorder.finishes
     assert (finish["result"], finish["structured_content"], finish["error"]) == (_texts(result)[0], expected, None)
     assert finish["injection_outcomes"] == [
-        {"instruction_index": 0, "probe_key": None, "occurrence": 1, "status": "applied", "detail": MIRRORED}
+        {
+            "instruction_index": 0,
+            "probe_key": None,
+            "occurrence": 1,
+            "status": "applied",
+            "detail": MIRRORED,
+            "selected": True,
+            "transformation": "identity",
+            "emitted": ["structured_content", "content_block"],
+        }
     ]
 
 
@@ -1155,7 +1164,10 @@ async def test_only_the_call_with_matching_arguments_is_changed_and_the_others_s
         (OutcomeStatus.APPLIED, 1, 3, MIRRORED),
         (OutcomeStatus.UNMATCHED, 0, 4, "call argument 'order_id' is 'ORD-103', not 'ORD-102'; result unchanged"),
     ]
-    # Each call's record carries its own outcome, with what the agent got.
+    # Each call's record carries its own outcome, with what the agent got. A call whose arguments don't match
+    # placed nothing: nothing selected, transformed or emitted.
+    placed = (True, "identity", ["structured_content", "content_block"])
+    facts = [(False, None, []), (False, None, []), placed, (False, None, [])]
     assert [finish["injection_outcomes"] for finish in recorder.finishes] == [
         [
             {
@@ -1164,9 +1176,12 @@ async def test_only_the_call_with_matching_arguments_is_changed_and_the_others_s
                 "occurrence": o.occurrence,
                 "status": o.status,
                 "detail": o.detail,
+                "selected": selected,
+                "transformation": transformation,
+                "emitted": emitted,
             }
         ]
-        for o in mcp.injection_outcomes
+        for o, (selected, transformation, emitted) in zip(mcp.injection_outcomes, facts, strict=True)
     ]
     assert [finish["structured_content"] for finish in recorder.finishes] == [r.structuredContent for r in results]
 
@@ -1257,3 +1272,240 @@ async def test_fallback_append_never_places_a_payload_on_a_call_whose_arguments_
     assert _texts(result) == ['{"order_id":"ORD-101","item":"item of ORD-101"}']
     [outcome] = mcp.injection_outcomes
     assert (outcome.status, outcome.occurrence) == (OutcomeStatus.UNMATCHED, 0)
+
+
+# --- delivery facts: what the interceptor selected, transformed and emitted ---
+
+
+def _facts(record: InjectionRecord) -> tuple[str, bool | None, str | None, list[str] | None]:
+    return (record["status"], record.get("selected"), record.get("transformation"), record.get("emitted"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("result", "instruction", "facts"),
+    [
+        (_text_result("plain"), _instruction(), ("applied", True, "identity", ["content_block"])),
+        (
+            _text_result("plain"),
+            _instruction(transformation=Transformation.JSON_STRING),
+            ("applied", True, "json_string", ["content_block"]),
+        ),
+        (
+            _text_result(json.dumps(NOTES), structured=NOTES),
+            _structured_instruction(),
+            ("applied", True, "identity", ["structured_content", "content_block"]),
+        ),
+        (
+            _text_result("Notes: first", structured=NOTES),
+            _structured_instruction(),
+            ("partial", True, "identity", ["structured_content"]),
+        ),
+        (_text_result(), _instruction(), ("unmatched", False, "identity", [])),
+        (
+            _text_result(),
+            _instruction(mismatch_policy=MismatchPolicy.FALLBACK_APPEND),
+            ("fallback", False, "identity", ["content_block"]),
+        ),
+        (_text_result("plain"), _instruction(size_limit=1), ("too_large", False, "identity", [])),
+    ],
+    ids=["content", "json-string", "mirror", "partial", "unmatched", "fallback", "too-large"],
+)
+async def test_each_outcome_records_what_was_selected_transformed_and_emitted(result, instruction, facts):
+    _, mcp, recorder = await _forward(result, instruction)
+
+    [finish] = recorder.finishes
+    [record] = finish["injection_outcomes"]
+    assert _facts(record) == facts
+    [outcome] = mcp.injection_outcomes
+    assert (outcome.status.value, outcome.selected, outcome.transformation, [s.value for s in outcome.emitted]) == (
+        facts[0],
+        facts[1],
+        Transformation(facts[2]),
+        facts[3],
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_payload_in_a_json_mirror_is_emitted_in_both_parts_though_the_text_escapes_it():
+    payload = ' "quoted"\nnext line ü'
+
+    result, _, recorder = await _forward(
+        _text_result(json.dumps(NOTES, ensure_ascii=True), structured=NOTES), _structured_instruction(payload=payload)
+    )
+
+    [text] = _texts(result)
+    # The text carries the payload JSON-encoded, never as its raw characters: emission doesn't search for it.
+    assert payload not in text
+    assert json.loads(text)["notes"][0]["body"] == "first" + payload
+    [record] = recorder.finishes[0]["injection_outcomes"]
+    assert _facts(record) == ("applied", True, "identity", ["structured_content", "content_block"])
+
+
+@pytest.mark.asyncio
+async def test_a_skipped_occurrence_or_a_missing_result_was_never_transformed():
+    target = InjectionTarget(tool="lookup", content_block_index=0)
+    plan = InjectionPlan((_instruction(target=target, occurrence=OccurrenceRule(Occurrence.NTH, 2)),))
+    mcp, _, recorder = _mcp(plan)
+    mcp._upstream = FixedUpstream(_text_result("first"))  # type: ignore[assignment]
+    await mcp._forward_call("lookup", {})
+
+    class FailingUpstream:
+        async def call_tool_mcp(self, name: str, args: dict[str, Any]) -> CallToolResult:
+            raise RuntimeError("upstream failed")
+
+    mcp._upstream = FailingUpstream()  # type: ignore[assignment]
+    with pytest.raises(RuntimeError):
+        await mcp._forward_call("lookup", {})
+
+    skipped, failed = (finish["injection_outcomes"] for finish in recorder.finishes)
+    assert [_facts(record) for record in skipped] == [("skipped_occurrence", False, None, [])]
+    assert [_facts(record) for record in failed] == [("no_result", False, None, [])]
+
+
+@pytest.mark.asyncio
+async def test_a_later_instruction_that_replaces_the_text_leaves_the_earlier_one_unemitted():
+    replace_all = _instruction(target=InjectionTarget(), payload="REPLACED", mode=InjectionMode.REPLACE)
+
+    result, _, recorder = await _forward(_text_result("plain"), _instruction(), replace_all)
+
+    assert _texts(result) == ["REPLACED"]
+    first, second = recorder.finishes[0]["injection_outcomes"]
+    # The first placement was applied, but the result returned doesn't carry it.
+    assert _facts(first) == ("applied", True, "identity", [])
+    assert _facts(second) == ("applied", True, "identity", ["content_block"])
+
+
+@pytest.mark.asyncio
+async def test_text_appended_after_a_mirror_keeps_the_mirrored_placement_emitted():
+    appended = _instruction(target=InjectionTarget(content_block_index=0), payload=" TAIL")
+
+    result, _, recorder = await _forward(
+        _text_result(json.dumps(NOTES), structured=NOTES), _structured_instruction(), appended
+    )
+
+    [text] = _texts(result)
+    assert text.endswith(" TAIL")
+    mirrored, tail = recorder.finishes[0]["injection_outcomes"]
+    # The text is no longer a mirror, but it still holds the mirror text the first instruction wrote.
+    assert _facts(mirrored) == ("applied", True, "identity", ["structured_content", "content_block"])
+    assert _facts(tail) == ("applied", True, "identity", ["content_block"])
+
+
+@pytest.mark.asyncio
+async def test_the_same_text_in_another_block_doesnt_make_a_replaced_placement_emitted():
+    first = _instruction(target=InjectionTarget(content_block_index=0), payload="X", mode=InjectionMode.REPLACE)
+    second = _instruction(target=InjectionTarget(content_block_index=0), payload="Y", mode=InjectionMode.REPLACE)
+
+    # The upstream's second block already holds the first payload's text, where no instruction put it.
+    result, _, recorder = await _forward(_text_result("plain", "X"), first, second)
+
+    assert _texts(result) == ["Y", "X"]
+    replaced, kept = recorder.finishes[0]["injection_outcomes"]
+    assert _facts(replaced) == ("applied", True, "identity", [])
+    assert _facts(kept) == ("applied", True, "identity", ["content_block"])
+
+
+@pytest.mark.asyncio
+async def test_the_same_text_appended_by_a_later_instruction_doesnt_make_a_replaced_placement_emitted():
+    first = _instruction(target=InjectionTarget(content_block_index=0), payload="X", mode=InjectionMode.REPLACE)
+    second = _instruction(target=InjectionTarget(content_block_index=0), payload="Y", mode=InjectionMode.REPLACE)
+    third = _instruction(target=InjectionTarget(), payload="X")
+
+    result, _, recorder = await _forward(_text_result("plain"), first, second, third)
+
+    assert _texts(result) == ["Y", "X"]
+    replaced, rewritten, appended = recorder.finishes[0]["injection_outcomes"]
+    assert _facts(replaced) == ("applied", True, "identity", [])
+    assert _facts(rewritten) == ("applied", True, "identity", ["content_block"])
+    assert _facts(appended) == ("applied", True, "identity", ["content_block"])
+
+
+@pytest.mark.asyncio
+async def test_a_mirror_rewritten_while_another_block_holds_its_text_is_not_emitted_in_the_text():
+    mirror_text = json.dumps(_noted("first INJECTED"))
+    # A later instruction appends a block holding exactly the mirror's text, and another rewrites the mirror.
+    appended = _instruction(target=InjectionTarget(), payload=mirror_text)
+    rewrite = _instruction(target=InjectionTarget(content_block_index=0), payload="Y", mode=InjectionMode.REPLACE)
+
+    result, _, recorder = await _forward(
+        _text_result(json.dumps(NOTES), structured=NOTES), _structured_instruction(), appended, rewrite
+    )
+
+    assert _texts(result) == ["Y", mirror_text]
+    mirrored, copied, rewritten = recorder.finishes[0]["injection_outcomes"]
+    # The structured field still carries the first payload; the text it was mirrored into doesn't.
+    assert _facts(mirrored) == ("applied", True, "identity", ["structured_content"])
+    assert _facts(copied) == ("applied", True, "identity", ["content_block"])
+    assert _facts(rewritten) == ("applied", True, "identity", ["content_block"])
+
+
+# A structured placement counts only in the field it wrote, while no later instruction replaced that field.
+
+
+def _replace_body(path: tuple = NOTE_BODY, payload: str = " INJECTED") -> InjectionInstruction:
+    target = InjectionTarget(surface=SelectorSurface.STRUCTURED_CONTENT, structured_content_path=path)
+    return _instruction(target=target, payload=payload, mode=InjectionMode.REPLACE)
+
+
+@pytest.mark.asyncio
+async def test_a_field_replaced_with_the_same_payload_is_emitted_only_by_the_later_instruction():
+    result, _, recorder = await _forward(
+        _text_result("Notes: first", structured=NOTES), _replace_body(), _replace_body()
+    )
+
+    assert _structured(result)["notes"][0]["body"] == " INJECTED"
+    overwritten, kept = recorder.finishes[0]["injection_outcomes"]
+    assert _facts(overwritten) == ("partial", True, "identity", [])
+    assert _facts(kept) == ("partial", True, "identity", ["structured_content"])
+
+
+@pytest.mark.asyncio
+async def test_a_mirrored_field_replaced_with_the_same_payload_is_emitted_only_by_the_later_instruction():
+    result, _, recorder = await _forward(
+        _text_result(json.dumps(NOTES), structured=NOTES), _replace_body(), _replace_body()
+    )
+
+    [text] = _texts(result)
+    assert json.loads(text) == _structured(result) == _noted(" INJECTED")
+    overwritten, kept = recorder.finishes[0]["injection_outcomes"]
+    # The mirror text follows the field: the earlier instruction's write was replaced in both parts.
+    assert _facts(overwritten) == ("applied", True, "identity", [])
+    assert _facts(kept) == ("applied", True, "identity", ["structured_content", "content_block"])
+
+
+@pytest.mark.asyncio
+async def test_the_same_field_selected_by_record_and_by_index_is_one_field():
+    by_index = _replace_body(path=("notes", 0, "body"))
+
+    _, _, recorder = await _forward(_text_result(json.dumps(NOTES), structured=NOTES), _replace_body(), by_index)
+
+    by_record, later = recorder.finishes[0]["injection_outcomes"]
+    assert _facts(by_record) == ("applied", True, "identity", [])
+    assert _facts(later) == ("applied", True, "identity", ["structured_content", "content_block"])
+
+
+@pytest.mark.asyncio
+async def test_two_appends_to_one_field_are_both_emitted_while_both_survive():
+    result, _, recorder = await _forward(
+        _text_result(json.dumps(NOTES), structured=NOTES), _structured_instruction(), _structured_instruction()
+    )
+
+    assert _structured(result)["notes"][0]["body"] == "first INJECTED INJECTED"
+    first, second = recorder.finishes[0]["injection_outcomes"]
+    assert _facts(first) == _facts(second) == ("applied", True, "identity", ["structured_content", "content_block"])
+
+
+@pytest.mark.asyncio
+async def test_appends_a_later_replace_overwrote_are_not_emitted_though_it_wrote_the_same_text():
+    # The replace writes exactly what the two appends had made of the field.
+    replace = _replace_body(payload="first INJECTED INJECTED")
+
+    result, _, recorder = await _forward(
+        _text_result(json.dumps(NOTES), structured=NOTES), _structured_instruction(), _structured_instruction(), replace
+    )
+
+    assert _structured(result)["notes"][0]["body"] == "first INJECTED INJECTED"
+    first, second, last = recorder.finishes[0]["injection_outcomes"]
+    assert _facts(first) == _facts(second) == ("applied", True, "identity", [])
+    assert _facts(last) == ("applied", True, "identity", ["structured_content", "content_block"])

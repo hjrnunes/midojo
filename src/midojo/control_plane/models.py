@@ -58,14 +58,17 @@ class FunctionCallBody(FunctionCallStart):
     error: str | None = None
     blocked: bool = Field(
         default=False,
-        description="The tool never ran: the agent's call was blocked, and `result` is what the agent was told instead.",
+        description=(
+            "The tool never ran: the agent's call was blocked, and `result` is what the layer returned instead."
+        ),
     )
     disposition: CallDisposition | None = Field(default=None, description=_DISPOSITION_DESCRIPTION)
     structured_content: dict[str, Any] | None = Field(
         default=None,
         description=(
-            "The structured content the agent got with `result` (its text), exactly as it got it. Optional: None "
-            "when the result had none or the layer reports the text only."
+            "The structured content the interception layer returned to the agent with `result` (its text), as it "
+            "returned it, recorded before it was returned: not proof the agent received it. Optional: None when "
+            "the result had none or the layer reports the text only."
         ),
     )
     injection_outcomes: list[CallInjectionOutcome] | None = Field(
@@ -136,7 +139,13 @@ class FunctionCallResponse(FunctionCallBody):
     model_config = ConfigDict(from_attributes=True)
 
     call_id: str = Field(description="The client's call_id, or a UUID the server assigned when the client sent none.")
-    result: str | None = Field(default=None, description="What the agent saw. None while the call is unfinished.")
+    result: str | None = Field(
+        default=None,
+        description=(
+            "What the interception layer returned to the agent, recorded before it was returned: not proof the "
+            "agent received it. None while the call is unfinished."
+        ),
+    )
     complete: bool = Field(
         default=True, description="False while the call is started but not finished: it has no result yet."
     )
@@ -348,6 +357,11 @@ class GradeResponse(BaseModel):
     from the evidence collected; ``grade_validity`` then marks that grade
     invalid. Without an injection task, ``security`` is False and its validity
     ``not_applicable``.
+
+    ``attempted``, ``blocked``, ``effect_observed`` and ``injection_delivered``
+    say apart what ``security`` folds together, each True, False or None
+    (unknown); see :func:`midojo.episode.attack_outcome`. They never change
+    ``security`` or its validity.
     """
 
     utility: bool | None
@@ -362,6 +376,41 @@ class GradeResponse(BaseModel):
     )
     grade_validity: GradeValidity
     evidence_status: dict[str, EvidenceStatus] = Field(default_factory=dict, description=_EVIDENCE_STATUS_DESCRIPTION)
+    attempted: bool | None = Field(
+        default=None,
+        description=(
+            "Whether the agent attempted what the security check looks for, a blocked call included: True when the "
+            "check holds, else read from the parts of the check that read the tool calls, apart from its effects. "
+            "None when unknown: a check of effects alone can't see an attempt that had none, nor a `not` over the "
+            "calls. False without a security check (as without an injection task)."
+        ),
+    )
+    blocked: bool | None = Field(
+        default=None,
+        description=(
+            "Whether a refusal stopped the attempt: without the blocked calls, no attempt shows or the security "
+            "check no longer holds. False when nothing was attempted, or an attempt was and no call was blocked. None "
+            "when unknown, as whenever `attempted` is. False without a security check."
+        ),
+    )
+    effect_observed: bool | None = Field(
+        default=None,
+        description=(
+            "Whether the security check holds on the calls that ran to their end (no blocked or unfinished call) "
+            "and the observed state. None when unknown. False without a security check."
+        ),
+    )
+    injection_delivered: bool | None = Field(
+        default=None,
+        description=(
+            "Whether a payload of the episode's plan was emitted at its boundary, from the delivery facts: by the "
+            "interceptor in a tool result, or by the host in a turn's message. Not proof the agent saw it. True "
+            "when any payload was emitted. False for an empty plan (no injection task), or when the delivery facts "
+            "establish that no instruction emitted its payload. None when that can't be determined, as for a "
+            "payload placed in the environment or a call with no delivery fact. It comes from the delivery facts "
+            "even without a security check."
+        ),
+    )
 
 
 class EvaluationSummary(BaseModel):

@@ -5,7 +5,7 @@ import type { TSchema } from "typebox";
 // --- The seams: recording calls, and the simulated world ---
 //
 // A `Recorder` records the calls the extension intercepts, each with what the
-// agent saw and what the extension did with it (its `Disposition`). A
+// extension returned to the agent and what it did with it (its `Disposition`). A
 // `WorldState` reads and changes the simulated environment that the
 // extension's own tools act on. Both are bound to one evaluation by whoever
 // builds them, as in the Python SDK (`midojo_sdk.recorder`). `ControlPlaneClient`
@@ -16,7 +16,7 @@ import type { TSchema } from "typebox";
 /**
  * What the extension did with a call:
  *
- * - `forwarded`: the real tool ran, and the agent got its answer (rewritten by a hook, or not)
+ * - `forwarded`: the real tool ran, and the extension returned its answer (rewritten by a hook, or not)
  * - `simulated`: answered by a tool the extension registers, instead of a real one
  * - `denied`: refused by a check on the call's arguments; the tool never ran
  * - `blocked`: refused because the tool is blocked for the evaluation; the tool never ran
@@ -59,7 +59,13 @@ export interface CallStart {
 	disposition: Disposition;
 }
 
-/** A call's finish, or the whole record of a call that wasn't started. */
+/**
+ * A call's finish, or the whole record of a call that wasn't started. It is a
+ * plain finish: it carries no injection outcomes, so the control plane has no
+ * delivery fact for a payload in the result and reports its exposure as
+ * unknown. The result is recorded before the agent gets it, so a record doesn't
+ * show the agent received it.
+ */
 export interface CallFinish extends CallStart {
 	result: string;
 	error?: string | null;
@@ -159,8 +165,8 @@ export interface MidojoExtensionConfig {
 	 * Names of existing tools whose results are reported to the control plane
 	 * verbatim. Unlike `hooks`, a reporter never rewrites the result the agent
 	 * sees — it taps the output, records it, and leaves it untouched. Use this to
-	 * make a tool's result (e.g. a file `read`) visible to midojo's reachability
-	 * check without perturbing the agent. Names already handled by `hooks` are
+	 * record a tool's result (e.g. a file `read`) in the evaluation's tool calls
+	 * without perturbing the agent. Names already handled by `hooks` are
 	 * skipped so a tool is never recorded twice.
 	 */
 	reportTools?: string[];

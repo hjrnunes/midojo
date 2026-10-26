@@ -8,10 +8,11 @@ import pytest
 from midojo_sdk import client as sdk_client
 from midojo_sdk import recorder as sdk_recorder
 from midojo_sdk.client import RECORD_ATTEMPTS, AgentControlPlaneClient, CallIds, transient
-from midojo_sdk.injection import OutcomeStatus
+from midojo_sdk.injection import OutcomeStatus, Transformation
 from midojo_sdk.recorder import (
     ControlPlaneRecorder,
     ControlPlaneRejectedError,
+    InjectionRecord,
     InvalidRequestError,
     RejectionKind,
     RetryingRecorder,
@@ -19,7 +20,7 @@ from midojo_sdk.recorder import (
 )
 
 from midojo.control_plane.lifecycle import Rejection
-from midojo.types import InjectionStatus
+from midojo.types import InjectionStatus, InjectionTransformation
 
 
 @pytest.fixture(autouse=True)
@@ -372,7 +373,16 @@ async def test_both_implementations_record_the_same_call(client, backend):
     agent = backend.agent(token)
 
     await agent.start_call(call_id="c1", function="get_weather", args={"city": "Boston"}, disposition="forwarded")
-    outcome = {"instruction_index": 0, "probe_key": "p:main", "occurrence": 1, "status": "partial", "detail": "d"}
+    outcome: InjectionRecord = {
+        "instruction_index": 0,
+        "probe_key": "p:main",
+        "occurrence": 1,
+        "status": "partial",
+        "detail": "d",
+        "selected": True,
+        "transformation": "identity",
+        "emitted": ["structured_content"],
+    }
     await agent.finish_call_detailed(
         call_id="c1",
         function="get_weather",
@@ -424,6 +434,35 @@ async def test_a_plain_finish_says_its_details_were_not_reported(client, backend
     assert (detailed["structured_content"], detailed["injection_outcomes"]) == (None, [])
 
 
+@pytest.mark.asyncio
+async def test_an_outcome_without_delivery_facts_leaves_them_unreported(client, backend):
+    run_id, eval_id, token = new_evaluation(client)
+    outcome: InjectionRecord = {
+        "instruction_index": 0,
+        "probe_key": None,
+        "occurrence": 1,
+        "status": "applied",
+        "detail": "d",
+    }
+    await backend.agent(token).finish_call_detailed(
+        call_id="c1",
+        function="f",
+        args={},
+        result="r",
+        disposition="forwarded",
+        structured_content=None,
+        injection_outcomes=[outcome],
+    )
+
+    [call] = client.get(f"/runs/{run_id}/evaluations/{eval_id}/function-calls").json()
+    # A layer that reports an outcome but not what it selected, transformed or emitted: None, not False or empty.
+    assert call["injection_outcomes"] == [outcome | {"selected": None, "transformation": None, "emitted": None}]
+
+
+def test_a_recorded_transformation_is_an_sdk_transformation():
+    assert set(typing.get_args(InjectionTransformation)) == {item.value for item in Transformation}
+
+
 def test_a_recorded_injection_status_is_an_sdk_outcome_status():
     assert set(typing.get_args(InjectionStatus)) == {status.value for status in OutcomeStatus}
 
@@ -432,7 +471,16 @@ def test_a_recorded_injection_status_is_an_sdk_outcome_status():
 async def test_a_finish_replays_only_with_the_same_structured_content_and_outcomes(client, backend):
     run_id, eval_id, token = new_evaluation(client)
     agent = backend.agent(token)
-    outcome = {"instruction_index": 0, "probe_key": None, "occurrence": 1, "status": "applied", "detail": "d"}
+    outcome: InjectionRecord = {
+        "instruction_index": 0,
+        "probe_key": None,
+        "occurrence": 1,
+        "status": "applied",
+        "detail": "d",
+        "selected": True,
+        "transformation": "identity",
+        "emitted": ["content_block"],
+    }
     finish = {
         "call_id": "c1",
         "function": "f",
@@ -445,7 +493,11 @@ async def test_a_finish_replays_only_with_the_same_structured_content_and_outcom
     await agent.finish_call_detailed(**finish)
     await agent.finish_call_detailed(**finish)
 
-    for changed in ({"structured_content": {"n": True}}, {"injection_outcomes": [outcome | {"status": "partial"}]}):
+    for changed in (
+        {"structured_content": {"n": True}},
+        {"injection_outcomes": [outcome | {"status": "partial"}]},
+        {"injection_outcomes": [outcome | {"emitted": []}]},
+    ):
         with pytest.raises(ControlPlaneRejectedError) as refused:
             await agent.finish_call_detailed(**(finish | changed))
         assert refused.value.kind is RejectionKind.CALL_CONFLICT

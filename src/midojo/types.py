@@ -42,12 +42,25 @@ CallProvenance = Literal["host", "interceptor", "agent"]
 # carry (its text isn't a JSON mirror of the structured content), so an agent reading only the text never saw it.
 InjectionStatus = Literal["applied", "partial", "fallback", "unmatched", "no_result", "too_large", "skipped_occurrence"]
 
+# The transformation an interceptor applied to a payload: the values of ``midojo_sdk.injection.Transformation``.
+InjectionTransformation = Literal["identity", "json_string"]
+
+# A part of a tool result an interceptor returned: its text (content) blocks or its structured content.
+ResultPart = Literal["content_block", "structured_content"]
+
 
 class CallInjectionOutcome(BaseModel):
     """One injection instruction's outcome on a recorded call, as the interceptor reported it in the call's finish.
 
     It names the instruction by its index in the plan the interceptor was
     given, never the payload or the interceptor's counter scope.
+
+    It is also the instruction's delivery fact for the call: what the
+    interceptor ``selected``, how it ``transformation``-ed the payload, and
+    which parts of the result it returned it ``emitted`` the payload in, at
+    its own boundary. The interceptor records a result before it returns it,
+    so a fact never says what the agent, or its model, saw. Each is None when
+    the layer didn't report it (a record made before the fields).
     """
 
     instruction_index: int = Field(ge=0, description="The instruction's index in the interceptor's plan.")
@@ -61,10 +74,29 @@ class CallInjectionOutcome(BaseModel):
     )
     status: InjectionStatus
     detail: str = Field(description="Why: the selector that matched or didn't, or what was left unchanged.")
+    selected: bool | None = Field(
+        default=None,
+        description="Whether the instruction's exact selector matched a place in the call's result. None: not reported.",
+    )
+    transformation: InjectionTransformation | None = Field(
+        default=None,
+        description=(
+            "The transformation applied to the payload. None when it was never transformed (its occurrence rule "
+            "skipped the call, the call's arguments didn't match its `call_arguments`, or there was no result) or "
+            "the layer didn't report it."
+        ),
+    )
+    emitted: list[ResultPart] | None = Field(
+        default=None,
+        description=(
+            "The parts of the result the interceptor returned that carry the transformed payload where it placed "
+            "it, checked after every instruction for the call. Empty when none does. None: not reported."
+        ),
+    )
 
 
 class FunctionCallRecord(BaseModel):
-    """A recorded function call: what the agent asked for and what it saw.
+    """A recorded function call: what the agent asked for and what the interception layer returned to it.
 
     A record is an intercepted request: it isn't proof of what the call did,
     to the simulated environment or to a real system. An unfinished call
@@ -91,7 +123,9 @@ class FunctionCallRecord(BaseModel):
     error: str | None = None
     blocked: bool = Field(
         default=False,
-        description="The tool never ran: the agent's call was blocked, and `result` is what the agent was told instead.",
+        description=(
+            "The tool never ran: the agent's call was blocked, and `result` is what the layer returned instead."
+        ),
     )
     disposition: CallDisposition | None = Field(
         default=None,
@@ -103,8 +137,9 @@ class FunctionCallRecord(BaseModel):
     structured_content: dict | None = Field(
         default=None,
         description=(
-            "The structured content the agent got with `result` (its text), exactly as it got it, when the layer "
-            "reported the call's details (`injection_outcomes` is a list). None when the result had none, the call "
+            "The structured content the interception layer returned to the agent with `result` (its text), as it "
+            "returned it, when the layer reported the call's details (`injection_outcomes` is a list). Recorded "
+            "before it was returned: not proof the agent received it. None when the result had none, the call "
             "is unfinished, or the layer reported its text only."
         ),
     )
