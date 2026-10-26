@@ -44,6 +44,7 @@ from midojo_sdk.injection import (
     InterceptorCapability,
     MismatchPolicy,
     OutcomeStatus,
+    RecordSelector,
     SelectorSurface,
     Transformation,
     capability_gaps,
@@ -617,38 +618,87 @@ def _transform(instruction: InjectionInstruction) -> str:
     return instruction.payload
 
 
-def _inject_path(value: Any, path: tuple[str | int, ...], payload: str, mode: InjectionMode) -> bool:
+def _inject_path(
+    value: Any, path: tuple[str | int | RecordSelector, ...], payload: str, mode: InjectionMode
+) -> str | None:
     current = value
     for part in path[:-1]:
-        if isinstance(part, str) and isinstance(current, dict) and part in current:
-            current = current[part]
-        elif isinstance(part, int) and isinstance(current, list) and part < len(current):
-            current = current[part]
-        else:
-            return False
+        current, mismatch = _resolve_path_part(current, part)
+        if mismatch is not None:
+            return mismatch
     return _inject_leaf(current, path[-1], payload, mode)
 
 
-def _inject_leaf(current: Any, part: str | int, payload: str, mode: InjectionMode) -> bool:
-    if isinstance(part, str) and isinstance(current, dict) and isinstance(current.get(part), str):
-        old = current[part]
-        current[part] = payload if mode is InjectionMode.REPLACE else old + payload
-        return True
-    elif isinstance(part, int) and isinstance(current, list) and part < len(current) and isinstance(current[part], str):
-        old = current[part]
-        current[part] = payload if mode is InjectionMode.REPLACE else old + payload
-        return True
-    return False
+def _resolve_path_part(current: Any, part: str | int | RecordSelector) -> tuple[Any, str | None]:
+    if type(part) is str:
+        if not isinstance(current, dict):
+            return None, f"field {part!r} requires an object, got {type(current).__name__}"
+        if part not in current:
+            return None, f"field {part!r} is missing"
+        return current[part], None
+    if type(part) is int:
+        if not isinstance(current, list):
+            return None, f"index {part} requires a list, got {type(current).__name__}"
+        if part >= len(current):
+            return None, f"index {part} is out of range"
+        return current[part], None
+    assert type(part) is RecordSelector
+    label = f"[{part.field}={part.value!r}]"
+    if not isinstance(current, list):
+        return None, f"record selector {label} requires a list, got {type(current).__name__}"
+    matches = [
+        item
+        for item in current
+        if isinstance(item, dict)
+        and part.field in item
+        and type(item[part.field]) is type(part.value)
+        and item[part.field] == part.value
+    ]
+    if not matches:
+        return None, f"record selector {label} matched no records"
+    if len(matches) != 1:
+        return None, f"record selector {label} matched {len(matches)} records"
+    return matches[0], None
 
 
-def _inject_exact(result: CallToolResult, instruction: InjectionInstruction, payload: str) -> CallToolResult | None:
+def _inject_leaf(current: Any, part: str | int | RecordSelector, payload: str, mode: InjectionMode) -> str | None:
+    if type(part) is str:
+        if not isinstance(current, dict):
+            return f"field {part!r} requires an object, got {type(current).__name__}"
+        if part not in current:
+            return f"field {part!r} is missing"
+        if not isinstance(current[part], str):
+            return f"field {part!r} does not contain a string"
+        old = current[part]
+        current[part] = payload if mode is InjectionMode.REPLACE else old + payload
+        return None
+    if type(part) is int:
+        if not isinstance(current, list):
+            return f"index {part} requires a list, got {type(current).__name__}"
+        if part >= len(current):
+            return f"index {part} is out of range"
+        if not isinstance(current[part], str):
+            return f"index {part} does not contain a string"
+        old = current[part]
+        current[part] = payload if mode is InjectionMode.REPLACE else old + payload
+        return None
+    assert isinstance(part, RecordSelector)
+    _, mismatch = _resolve_path_part(current, part)
+    return mismatch or f"record selector [{part.field}={part.value!r}] selects a record, not a string field"
+
+
+def _inject_exact(
+    result: CallToolResult, instruction: InjectionInstruction, payload: str
+) -> tuple[CallToolResult | None, str | None]:
     target = instruction.target
     if target.surface is SelectorSurface.STRUCTURED_CONTENT:
         structured = copy.deepcopy(result.structuredContent)
-        if not _inject_path(structured, target.structured_content_path, payload, instruction.mode):
-            return None
-        return result.model_copy(update={"structuredContent": structured})
-    return _inject_content(result, instruction, payload)
+        mismatch = _inject_path(structured, target.structured_content_path, payload, instruction.mode)
+        if mismatch is not None:
+            return None, mismatch
+        return result.model_copy(update={"structuredContent": structured}), None
+    updated = _inject_content(result, instruction, payload)
+    return updated, None if updated is not None else "content-block selector did not match"
 
 
 def _inject_content(result: CallToolResult, instruction: InjectionInstruction, payload: str) -> CallToolResult | None:
@@ -686,14 +736,14 @@ def _inject_result(
     payload = _transform(instruction)
     if instruction.size_limit is not None and len(payload.encode()) > instruction.size_limit:
         return result, OutcomeStatus.TOO_LARGE, "transformed payload exceeds size_limit"
-    updated = _inject_exact(result, instruction, payload)
+    updated, mismatch = _inject_exact(result, instruction, payload)
     if updated is not None:
         return updated, OutcomeStatus.APPLIED, "exact selector matched"
     if instruction.mismatch_policy is MismatchPolicy.FALLBACK_APPEND:
         content = [*result.content, TextContent(type="text", text=payload)]
         updated = result.model_copy(update={"content": content})
-        return updated, OutcomeStatus.FALLBACK, "selector missed; appended a text block"
-    return result, OutcomeStatus.UNMATCHED, "selector missed; result unchanged"
+        return updated, OutcomeStatus.FALLBACK, f"{mismatch}; appended a text block"
+    return result, OutcomeStatus.UNMATCHED, f"{mismatch}; result unchanged"
 
 
 def _outcome(
