@@ -339,6 +339,15 @@ def parse_predicate(raw: dict) -> Predicate:
     raise ValueError(f"Unhandled predicate type: {key!r}")
 
 
+def reads_function_calls(check: object) -> bool:
+    """Whether a parsed check reads the recorded tool calls (``tool_called``, ``tool_call_condition``), in any branch."""
+    if isinstance(check, AllOf | AnyOf):
+        return any(reads_function_calls(p) for p in check.predicates)
+    if isinstance(check, Not):
+        return reads_function_calls(check.predicate)
+    return isinstance(check, ToolCalled | ToolCallCondition)
+
+
 # ---------------------------------------------------------------------------
 # The verifier
 # ---------------------------------------------------------------------------
