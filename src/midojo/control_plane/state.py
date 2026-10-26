@@ -30,7 +30,7 @@ from midojo.episode import MAX_NESTING_DEPTH, Episode
 from midojo.observations import FUNCTION_CALLS, EvidenceStatus
 from midojo.types import Environment, FunctionCallRecord, InterceptionMode, SuiteName
 
-from .models import CapturePhase, CreateEvaluationResponse, GradeResponse
+from .models import CapturePhase, GradeResponse
 
 
 def _now() -> str:
@@ -473,15 +473,18 @@ def capture_evidence(failures: tuple[CaptureFailure, ...]) -> dict[str, Evidence
 
 @dataclass(frozen=True)
 class Creation:
-    """An evaluation created under an idempotency key: the request it answered, and the response it gave.
+    """An evaluation created under an idempotency key: the request it answered, and the evaluation it opened.
 
     ``request`` is what the request asked for (``user_task_id``,
-    ``injection_task_id``, ``injections`` and ``interception``). ``response``
-    holds the session token, so that a resend gets the same session.
+    ``injection_task_id``, ``injections`` and ``interception``);
+    ``evaluation_id`` and ``turns`` are what the response gave. The session
+    token isn't kept: a resend gets a fresh one (the store keeps only token
+    hashes).
     """
 
     request: Mapping[str, Any]
-    response: CreateEvaluationResponse
+    evaluation_id: str
+    turns: tuple[str, ...]
 
 
 @dataclass(frozen=True)

@@ -11,7 +11,6 @@ import re
 
 import pytest
 
-from midojo.control_plane.models import CreateEvaluationResponse
 from midojo.control_plane.state import Creation, Evaluation, Stage
 from midojo.control_plane.store import InMemoryStore
 from midojo.types import Environment, FunctionCallRecord
@@ -164,16 +163,14 @@ def test_no_public_store_method_hands_out_or_keeps_a_resident_value(store):
 
 
 def test_a_kept_creation_is_copied_in_and_out_and_belongs_to_its_run(store):
-    response = CreateEvaluationResponse(id="e", prompt="p", turns=["p"], session_token="t", session_expires_at="x")
     request = {"user_task_id": "u", "injection_task_id": None, "injections": {"a": "b"}, "interception": "agent"}
-    store.keep_creation("r", "k", Creation(request, response))
+    store.keep_creation("r", "k", Creation(request, "e", ("p",)))
     request["injections"]["a"] = "changed"
-    response.turns.append("changed")
     kept = store.kept_creation("r", "k")
-    assert kept is not None and kept.request["injections"] == {"a": "b"} and kept.response.turns == ["p"]
-    kept.response.turns.append("changed")
+    assert kept == Creation({**request, "injections": {"a": "b"}}, "e", ("p",))
+    kept.request["injections"]["a"] = "changed"
     again = store.kept_creation("r", "k")
-    assert again is not None and again.response.turns == ["p"]
+    assert again is not None and again.request["injections"] == {"a": "b"}
     assert store.kept_creation("other", "k") is None and store.kept_creation("r", "other") is None
 
 

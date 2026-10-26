@@ -120,7 +120,8 @@ class ControlPlane:
         self.store: Store = store if store is not None else InMemoryStore()
         self.config = config if config is not None else AppConfig()
         self._writer = self.store.writer()
-        # Held while a create under an idempotency key looks up, opens and keeps its evaluation.
+        # Held while a create under an idempotency key looks up, opens and keeps its evaluation, or rotates its
+        # session's token.
         self._creating = threading.Lock()
 
     # --- the single writer ---
@@ -210,12 +211,16 @@ class ControlPlane:
     ) -> CreateEvaluationResponse:
         """Compile the run's suite pair into an episode and open it.
 
-        Without an ``idempotency_key``, the response is the only place the
-        session token appears. With one (the caller's choice, one per request),
-        the run also keeps the response under it, token included: sending
-        the same request with the same key again returns that response, the
-        same evaluation and session, and opens nothing, so a create whose
-        response was lost can be resent. The same key with another request is
+        The response is the only place the session token appears. With an
+        ``idempotency_key`` (the caller's choice, one per request), the run
+        also keeps the request and the evaluation it opened under the key, but
+        never the token: sending the same request with the same key again
+        opens nothing and returns the same evaluation with a freshly issued
+        token for its session (same expiry), and the token issued before
+        stops resolving, so a create whose response was lost can be resent
+        and only its last response's token works. The rotation is refused as
+        ``closing`` once the evaluation is closing, and as ``session_closed``
+        once its session was revoked. The same key with another request is
         refused as ``idempotency_conflict``. A create refused outright (an
         unknown task, say) keeps nothing, so resending it tries it afresh.
         """
@@ -238,10 +243,24 @@ class ControlPlane:
                         Rejection.IDEMPOTENCY_CONFLICT,
                         f"Idempotency key {idempotency_key!r} already created an evaluation for another request",
                     )
-                return kept.response
+                # Under the same lock as the look-up: two resends rotate one after the other, the last one's token
+                # the one that resolves.
+                return self._reissue(run_id, kept)
             response = self._create_evaluation(run_id, user_task_id, injection_task_id, injected, interception)
-            self.store.keep_creation(run_id, idempotency_key, Creation(request, response))
+            self.store.keep_creation(run_id, idempotency_key, Creation(request, response.id, tuple(response.turns)))
             return response
+
+    def _reissue(self, run_id: str, kept: Creation) -> CreateEvaluationResponse:
+        """The kept creation's response again, with a fresh session token: the one issued before stops resolving."""
+        token = secrets.token_urlsafe(32)
+        session = self.apply(ById(run_id, kept.evaluation_id), lifecycle.RotateSession(token_hash(token)))
+        return CreateEvaluationResponse(
+            id=kept.evaluation_id,
+            prompt=kept.turns[0],
+            turns=list(kept.turns),
+            session_token=token,
+            session_expires_at=datetime.fromtimestamp(session.expires_at, UTC).isoformat(),
+        )
 
     def _create_evaluation(
         self,

@@ -6,13 +6,15 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from midojo_sdk.recorder import ControlPlaneRejectedError
 
 from midojo.control_plane.config import AppConfig
+from midojo.control_plane.inprocess import InProcessAgentClient
 from midojo.control_plane.inprocess_control import InProcessControlClient
 from midojo.control_plane.lifecycle import RejectedError, Rejection
 from midojo.control_plane.main import create_app
 from midojo.control_plane.models import CreateEvaluationResponse, EvaluationResponse
-from midojo.control_plane.service import ControlPlane
+from midojo.control_plane.service import BySession, ControlPlane, token_hash
 from midojo.control_plane.state import Evaluation
 from midojo.episode import freeze
 from midojo.runtimes.openshell import OpenShellObservations
@@ -89,16 +91,59 @@ def _post_evaluation(client: TestClient, run_id: str, **body):
     return client.post(f"/runs/{run_id}/evaluations", json={"user_task_id": "weather_new_york", **body})
 
 
-def test_a_create_resent_with_its_idempotency_key_returns_the_same_evaluation_and_session(client):
+def _without_token(created: dict) -> dict:
+    return {key: value for key, value in created.items() if key != "session_token"}
+
+
+def _stored(store) -> str:
+    """Everything the store holds, as text: what a token string kept anywhere in it would show up in."""
+    return repr(vars(store))
+
+
+def test_a_create_resent_with_its_idempotency_key_returns_the_same_evaluation_with_a_new_token(client):
     run_id = _create_run(client)
     first = _post_evaluation(client, run_id, idempotency_key="k1")
     again = _post_evaluation(client, run_id, idempotency_key="k1")
     assert (first.status_code, again.status_code) == (201, 201)
-    assert again.json() == first.json()
+    assert _without_token(again.json()) == _without_token(first.json())
+    assert again.json()["session_token"] != first.json()["session_token"]
     assert [summary["id"] for summary in client.get(f"/runs/{run_id}").json()["evaluations"]] == [first.json()["id"]]
-    # The session the resend returned is the evaluation's.
+    # The resend's token is the evaluation's session now; the one issued before no longer resolves.
     session = {"Authorization": f"Bearer {again.json()['session_token']}"}
     assert client.get("/agent/environment", headers=session).status_code == 200
+    old = client.get("/agent/environment", headers={"Authorization": f"Bearer {first.json()['session_token']}"})
+    assert old.status_code == 401 and old.json()["kind"] == "invalid_session"
+
+
+def test_a_keyed_create_keeps_no_session_token_in_the_store(client):
+    run_id = _create_run(client)
+    first = _post_evaluation(client, run_id, idempotency_key="k1").json()
+    again = _post_evaluation(client, run_id, idempotency_key="k1").json()
+    assert isinstance(client.app, FastAPI)
+    store = client.app.state.store
+    stored = _stored(store)
+    # Only the live token's hash is kept: neither token is, nor the hash of the revoked one.
+    assert token_hash(again["session_token"]) in stored
+    for token in (first["session_token"], again["session_token"]):
+        assert token not in stored
+    assert token_hash(first["session_token"]) not in stored
+    kept = store.kept_creation(run_id, "k1")
+    assert kept is not None and first["session_token"] not in repr(kept) and again["session_token"] not in repr(kept)
+
+
+def test_a_resend_after_the_evaluation_began_closing_or_lost_its_session_is_refused(client):
+    run_id = _create_run(client)
+    created = _post_evaluation(client, run_id, idempotency_key="k1").json()
+    assert client.delete(f"/runs/{run_id}/evaluations/{created['id']}/session").status_code == 204
+    revoked = _post_evaluation(client, run_id, idempotency_key="k1")
+    # A revoked session stays revoked: the resend issues no token.
+    assert revoked.status_code == 401 and revoked.json()["kind"] == "session_closed"
+    closing = _post_evaluation(client, run_id, idempotency_key="k2").json()
+    assert client.post(f"/runs/{run_id}/evaluations/{closing['id']}/close").status_code == 200
+    refused = _post_evaluation(client, run_id, idempotency_key="k2")
+    assert refused.status_code == 409 and refused.json()["kind"] == "closing"
+    old = client.get("/agent/environment", headers={"Authorization": f"Bearer {closing['session_token']}"})
+    assert old.status_code == 200
 
 
 def test_the_same_idempotency_key_with_another_request_is_refused(client):
@@ -114,7 +159,8 @@ def test_the_same_idempotency_key_with_another_request_is_refused(client):
         assert refused.status_code == 409 and refused.json()["kind"] == "idempotency_conflict"
     assert [summary["id"] for summary in client.get(f"/runs/{run_id}").json()["evaluations"]] == [first.json()["id"]]
     # Leaving out a default is the same request.
-    assert _post_evaluation(client, run_id, idempotency_key="k1", injections={}).json() == first.json()
+    resent = _post_evaluation(client, run_id, idempotency_key="k1", injections={})
+    assert resent.status_code == 201 and _without_token(resent.json()) == _without_token(first.json())
 
 
 def test_without_an_idempotency_key_each_create_opens_an_evaluation(client):
@@ -149,13 +195,34 @@ async def test_the_in_process_client_creates_under_an_idempotency_key_as_the_rou
     run = plane.create_run("weather")
     first = await control.create_evaluation(run.id, "weather_new_york", None, {}, idempotency_key="k1")
     again = await control.create_evaluation(run.id, "weather_new_york", None, {}, idempotency_key="k1")
-    assert again == first and again is not first
+    assert again.model_copy(update={"session_token": first.session_token}) == first
+    assert again.session_token != first.session_token
+    # The resend's token resolves to the evaluation; the one issued before is refused.
+    assert plane.evaluation(BySession(again.session_token)).id == first.id
+    with pytest.raises(RejectedError) as old:
+        plane.evaluation(BySession(first.session_token))
+    assert old.value.kind is Rejection.INVALID_SESSION
+    stored = _stored(plane.store)
+    assert first.session_token not in stored and again.session_token not in stored
+    assert token_hash(again.session_token) in stored and token_hash(first.session_token) not in stored
     with pytest.raises(RejectedError) as refused:
         await control.create_evaluation(run.id, "weather_new_york", "book_shelter", {}, idempotency_key="k1")
     assert refused.value.kind is Rejection.IDEMPOTENCY_CONFLICT
     unkeyed = await control.create_evaluation(run.id, "weather_new_york", None, {})
     assert unkeyed.id != first.id
     assert [evaluation.id for evaluation in plane.evaluations(run.id)] == [first.id, unkeyed.id]
+
+
+@pytest.mark.asyncio
+async def test_the_in_process_agent_client_is_refused_with_a_token_a_resend_replaced(suite):
+    plane = ControlPlane({"weather": suite})
+    run = plane.create_run("weather")
+    first = plane.create_evaluation(run.id, "weather_new_york", idempotency_key="k1")
+    again = plane.create_evaluation(run.id, "weather_new_york", idempotency_key="k1")
+    assert (await InProcessAgentClient(plane, again.session_token).read()).revision == 0
+    with pytest.raises(ControlPlaneRejectedError) as old:
+        await InProcessAgentClient(plane, first.session_token).read()
+    assert old.value.kind == "invalid_session"
 
 
 class ChangingInjections(Mapping[str, str]):
@@ -194,7 +261,7 @@ def test_a_keyed_create_compiles_the_same_injections_it_keeps_for_the_key(suite)
     resent = plane.create_evaluation(
         run.id, "weather_new_york", "tornado_alert_via_prompt", dict(kept.request["injections"]), idempotency_key="k1"
     )
-    assert resent == created
+    assert resent.model_copy(update={"session_token": created.session_token}) == created
 
 
 def test_two_threads_creating_under_one_key_get_one_evaluation_and_the_same_response(suite):
@@ -208,8 +275,18 @@ def test_two_threads_creating_under_one_key_get_one_evaluation_and_the_same_resp
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         first, second = (future.result() for future in [pool.submit(create), pool.submit(create)])
-    assert first == second
+    assert first.model_copy(update={"session_token": second.session_token}) == second
     assert [evaluation.id for evaluation in plane.evaluations(run.id)] == [first.id]
+    # One created and the other rotated, one after the other: exactly one token resolves, the last one issued.
+    resolving = []
+    for token in (first.session_token, second.session_token):
+        try:
+            plane.evaluation(BySession(token))
+        except RejectedError as refused:
+            assert refused.kind is Rejection.INVALID_SESSION
+        else:
+            resolving.append(token)
+    assert len(resolving) == 1
 
 
 def test_get_evaluation(client):

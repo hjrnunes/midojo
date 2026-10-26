@@ -20,7 +20,8 @@ The rules kept here:
 
 * sessions: an agent's event is admitted only with the evaluation's session
   (matching token hash, not expired), and only for reads, calls and the
-  environment;
+  environment; rotating a session gives it a new token hash, keeping its
+  expiry, and only while the evaluation is open and its session isn't revoked;
 * call-ID idempotency and conflicts: one record per ``call_id``; a replay with
   the same body returns the stored record, at any stage, and another body is a
   conflict until the seal, and a late fact after it;
@@ -235,6 +236,13 @@ class OpenSession:
 
 
 @dataclass(frozen=True)
+class RotateSession:
+    """Replace the live session's token hash with ``token_hash``, keeping its expiry: the old token stops resolving."""
+
+    token_hash: str
+
+
+@dataclass(frozen=True)
 class CloseSession:
     pass
 
@@ -363,6 +371,7 @@ class RecordGrade:
 Event = (
     Read
     | OpenSession
+    | RotateSession
     | CloseSession
     | StartCall
     | FinishCall
@@ -417,6 +426,8 @@ def transition(evaluation: Evaluation, authority: Authority, event: Event) -> Ou
             return Accepted(evaluation, evaluation)
         case OpenSession():
             return _open_session(evaluation, event)
+        case RotateSession():
+            return _rotate_session(evaluation, event)
         case CloseSession():
             effects = (SessionUnbound(evaluation.session.token_hash),) if evaluation.session else ()
             return Accepted(_replace(evaluation, session=None), None, effects)
@@ -549,6 +560,17 @@ def _open_session(evaluation: Evaluation, event: OpenSession) -> Outcome:
     if evaluation.session is not None:
         effects = (SessionUnbound(evaluation.session.token_hash), *effects)
     next_value = _replace(evaluation, session=Session(event.token_hash, event.expires_at))
+    return Accepted(next_value, next_value.session, effects)
+
+
+def _rotate_session(evaluation: Evaluation, event: RotateSession) -> Outcome:
+    if evaluation.stage is not Stage.OPEN:
+        return Rejected(Rejection.CLOSING, "Cannot issue a session for this evaluation")
+    # A revoked session stays revoked: rotating never opens one.
+    if (session := evaluation.session) is None:
+        return Rejected(Rejection.SESSION_CLOSED, "The evaluation's session was revoked")
+    next_value = _replace(evaluation, session=Session(event.token_hash, session.expires_at))
+    effects = (SessionUnbound(session.token_hash), SessionBound(event.token_hash))
     return Accepted(next_value, next_value.session, effects)
 
 

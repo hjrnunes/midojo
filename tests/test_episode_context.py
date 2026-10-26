@@ -50,7 +50,7 @@ from midojo.control_plane.lifecycle import (
 )
 from midojo.control_plane.main import create_app
 from midojo.control_plane.models import CreateFunctionCallRecord, CreateFunctionCallStart
-from midojo.control_plane.service import ById, ControlPlane
+from midojo.control_plane.service import ById, BySession, ControlPlane
 from midojo.control_plane.state import Stage, snapshot_digest, unsupported_value
 from midojo.episode import MAX_NESTING_DEPTH, Episode
 from midojo.episode_context import AgentBinding, EpisodeContext, _refused, open_episode
@@ -712,12 +712,14 @@ class LostCreateTransport(httpx.AsyncBaseTransport):
     """The control plane's app, except that the first ``lost`` creates are applied and their responses lost."""
 
     def __init__(self, app, lost: int) -> None:
-        self.app, self.lost, self.creates = httpx.ASGITransport(app), lost, []
+        self.app, self.lost, self.creates, self.tokens = httpx.ASGITransport(app), lost, [], []
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         response = await self.app.handle_async_request(request)
         if request.method == "POST" and request.url.path.endswith("/evaluations"):
             self.creates.append(json.loads(request.content))
+            # The token each create's response carried, lost or not.
+            self.tokens.append(json.loads(await response.aread()).get("session_token"))
             if len(self.creates) <= self.lost:
                 raise httpx.ReadError("the response was lost", request=request)
         return response
@@ -740,6 +742,60 @@ async def test_a_create_whose_response_is_lost_is_resent_once_and_opens_one_eval
     [evaluation] = plane.evaluations(run.id)
     assert ep.evaluation_id == evaluation.id and not ep.interrupted
     assert ep.sealed.agent_output == "rain"
+
+
+@pytest.mark.asyncio
+async def test_after_a_lost_create_the_context_holds_the_token_the_resend_returned(suite):
+    app = create_app({"weather": suite}, config=AppConfig(closure_wait_seconds=0))
+    plane: ControlPlane = app.state.control
+    run = plane.create_run("weather")
+    transport = LostCreateTransport(app, lost=1)
+    runtime = RecordingRuntime()
+    async with httpx.AsyncClient(transport=transport) as http:
+        control = ControlPlaneClient("http://control", http=http)
+        async with open_episode(
+            suite.episode("weather_new_york"), runtime=runtime, control=control, run_id=run.id
+        ) as ep:
+            lost, received = transport.tokens
+            # The resend rotated the session: the context and the runtime got the token it received, which
+            # resolves, and the lost response's token doesn't.
+            assert lost != received and ep.binding.session_token == received
+            assert runtime.setups[0]["session_token"] == received
+            assert plane.evaluation(BySession(received)).id == ep.evaluation_id
+            with pytest.raises(RejectedError) as refused:
+                plane.evaluation(BySession(lost))
+            assert refused.value.kind is Rejection.INVALID_SESSION
+            await ep.turn("weather?", _reply("rain"))
+    assert not ep.interrupted and ep.sealed.agent_output == "rain"
+
+
+@pytest.mark.asyncio
+async def test_in_process_after_a_lost_create_the_context_holds_the_token_the_resend_returned(suite):
+    plane = ControlPlane({"weather": suite}, config=AppConfig(closure_wait_seconds=0))
+    run = plane.create_run("weather")
+    control = InProcessControlClient(plane)
+    real, received = control.create_evaluation, []
+
+    async def losing_the_first(*args, **kwargs):
+        created = await real(*args, **kwargs)
+        received.append(created.session_token)
+        if len(received) == 1:
+            raise ConnectionError("the response was lost")
+        return created
+
+    control.create_evaluation = losing_the_first  # type: ignore[method-assign]
+    async with open_episode(
+        suite.episode("weather_new_york"), runtime=RecordingRuntime(), control=control, run_id=run.id
+    ) as ep:
+        lost, resent = received
+        assert ep.binding.session_token == resent != lost
+        assert plane.evaluation(BySession(resent)).id == ep.evaluation_id
+        with pytest.raises(RejectedError) as refused:
+            plane.evaluation(BySession(lost))
+        assert refused.value.kind is Rejection.INVALID_SESSION
+        await ep.turn("weather?", _reply("rain"))
+    assert [evaluation.id for evaluation in plane.evaluations(run.id)] == [ep.evaluation_id]
+    assert not ep.interrupted and ep.sealed.agent_output == "rain"
 
 
 @pytest.mark.asyncio

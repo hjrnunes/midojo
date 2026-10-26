@@ -28,6 +28,7 @@ from midojo.control_plane.lifecycle import (
     Rejection,
     ReplaceEnvironment,
     ReplyTurn,
+    RotateSession,
     Seal,
     StartCall,
     StartTurn,
@@ -104,6 +105,7 @@ def _grade() -> GradeResponse:
 ALL_EVENTS = [
     Read(),
     OpenSession("other", 300.0),
+    RotateSession("other"),
     CloseSession(),
     _start(),
     _finish(),
@@ -226,7 +228,15 @@ def test_an_agent_event_needs_the_live_session(authority):
 
 
 @pytest.mark.parametrize(
-    "event", [CloseSession(), StartTurn("m", AT), Seal("o", AT), RecordGrade(_grade()), BeginClosure(AT, 1.0)]
+    "event",
+    [
+        CloseSession(),
+        RotateSession("new"),
+        StartTurn("m", AT),
+        Seal("o", AT),
+        RecordGrade(_grade()),
+        BeginClosure(AT, 1.0),
+    ],
 )
 def test_a_session_cannot_drive_the_host_lifecycle(event):
     outcome = transition(_evaluation(), AGENT, event)
@@ -246,6 +256,20 @@ def test_opening_a_session_replaces_the_previous_one_only_while_open():
     assert isinstance(transition(_closing(_evaluation()), HOST, OpenSession("new", 300.0)), Rejected)
     closed = _accept(_sealed(_evaluation()), CloseSession())
     assert (closed.evaluation.session, closed.effects) == (None, (lifecycle.SessionUnbound(TOKEN),))
+
+
+def test_rotating_a_session_replaces_its_token_hash_and_keeps_its_expiry_only_while_open():
+    outcome = _accept(_evaluation(), RotateSession("new"))
+    assert outcome.evaluation.session == Session("new", 200.0) and outcome.result == Session("new", 200.0)
+    assert outcome.effects == (lifecycle.SessionUnbound(TOKEN), lifecycle.SessionBound("new"))
+    for staged in (_closing(_evaluation()), _collecting(_evaluation()), _sealed(_evaluation())):
+        assert transition(staged, HOST, RotateSession("new")) == Rejected(
+            Rejection.CLOSING, "Cannot issue a session for this evaluation"
+        )
+    # A revoked session stays revoked: rotating never opens one.
+    revoked = _accept(_evaluation(), CloseSession()).evaluation
+    refused = transition(revoked, HOST, RotateSession("new"))
+    assert isinstance(refused, Rejected) and refused.kind is Rejection.SESSION_CLOSED
 
 
 # --- the environment: revisions and atomic changes ---
