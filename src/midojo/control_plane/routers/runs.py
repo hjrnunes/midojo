@@ -20,6 +20,7 @@ from ..dependencies import (
     validate_environment,
     validate_observations,
 )
+from ..lifecycle import json_data
 from ..models import (
     CaptureFailureResponse,
     CloseResponse,
@@ -206,7 +207,12 @@ async def get_snapshot(
 
 
 def snapshot_response(snapshot: Snapshot) -> SnapshotResponse:
-    """The snapshot as ``GET .../snapshot`` returns it."""
+    """The snapshot as ``GET .../snapshot`` returns it.
+
+    Bytes that aren't UTF-8 are escaped (``\\xff``), not refused: the response
+    is served, and a client rebuilding the snapshot from it finds its digest
+    differs (``client.snapshot_from_response``).
+    """
     return SnapshotResponse(
         evaluation_id=snapshot.evaluation_id,
         run_id=snapshot.run_id,
@@ -214,9 +220,9 @@ def snapshot_response(snapshot: Snapshot) -> SnapshotResponse:
         user_task_id=snapshot.user_task_id,
         injection_task_id=snapshot.injection_task_id,
         agent_output=snapshot.agent_output,
-        pre_environment=snapshot.pre_environment.model_dump(mode="json"),
-        environment=snapshot.environment.model_dump(mode="json"),
-        function_calls=[call.model_dump(mode="json") for call in snapshot.function_calls],
+        pre_environment=json_data(snapshot.pre_environment),
+        environment=json_data(snapshot.environment),
+        function_calls=[json_data(call) for call in snapshot.function_calls],
         turns=[TurnResponse.model_validate(turn) for turn in snapshot.turns],
         observations=_observations_json(snapshot.observations),
         evidence_status=dict(snapshot.evidence_status),
@@ -386,7 +392,7 @@ async def record_turn_reply(
 
 
 def _observations_json(observations: Mapping) -> dict:
-    return {source: observed.model_dump(mode="json") for source, observed in observations.items()}
+    return {source: json_data(observed) for source, observed in observations.items()}
 
 
 @router.get("/{run_id}/evaluations/{eval_id}/observations", status_code=status.HTTP_200_OK)

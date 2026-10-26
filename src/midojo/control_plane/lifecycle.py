@@ -593,6 +593,17 @@ def _call_payload(req: BaseModel) -> dict[str, Any]:
     return to_jsonable_python(_as_text(req.model_dump()))
 
 
+def json_data(model: BaseModel) -> Any:
+    """``model`` as JSON-compatible data, as ``model_dump(mode="json")`` gives it, whatever bytes it holds.
+
+    ``model_dump(mode="json")`` raises for bytes that aren't UTF-8; here their
+    undecodable bytes are escaped (``\\xff``) instead, and non-finite floats
+    become null, as there. Such a value doesn't come back as it was, so a
+    snapshot rebuilt from it fails its digest check.
+    """
+    return to_jsonable_python(_as_text(model.model_dump()), inf_nan_mode="null")
+
+
 def _as_text(value: Any) -> Any:
     """``value`` with every bytes or bytearray in it decoded as UTF-8, undecodable bytes escaped."""
     kind = type(value)

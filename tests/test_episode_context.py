@@ -258,6 +258,32 @@ def test_a_snapshot_is_refused_before_the_seal(suite):
     assert (response.status_code, response.json()["kind"]) == (400, "not_sealed")
 
 
+@pytest.mark.asyncio
+async def test_a_snapshot_holding_bytes_that_arent_utf8_is_served_escaped_and_refused_on_its_digest(suite):
+    app = create_app({"weather": suite}, config=AppConfig(closure_wait_seconds=0))
+    plane: ControlPlane = app.state.control
+    run = plane.create_run("weather")
+    evaluation = plane.create_evaluation(run.id, "weather_new_york")
+    args = {"raw": b"\xff\x00", "nested": [bytearray(b"\xfe")], "text": b"rain"}
+    plane.finish_call(
+        ById(run.id, evaluation.id), CreateFunctionCallRecord(call_id="c", function="f", args=args, result="ok")
+    )
+    sealed = await plane.complete(run.id, evaluation.id, "done")
+    assert sealed.function_calls[0].args == args
+    # The route serves it, undecodable bytes escaped as in a late fact's payload, rather than failing.
+    response = TestClient(app).get(f"/runs/{run.id}/evaluations/{evaluation.id}/snapshot")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["snapshot_id"] == sealed.snapshot_id
+    assert body["function_calls"][0]["args"] == {"raw": "\\xff\x00", "nested": ["\\xfe"], "text": "rain"}
+    # Escaped text isn't the bytes that were sealed: the rebuilt snapshot fails its digest check.
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app)) as http:
+        control = ControlPlaneClient("http://control", http=http)
+        with pytest.raises(ValueError, match="didn't survive the round trip"):
+            await control.snapshot(run.id, evaluation.id, environment_type=suite.environment_type)
+    assert plane.snapshot(run.id, evaluation.id) is sealed
+
+
 def test_a_binding_is_exactly_one_of_a_session_and_a_tool_endpoint():
     with pytest.raises(ValueError, match="exactly one"):
         AgentBinding()
