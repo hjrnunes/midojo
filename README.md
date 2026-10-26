@@ -199,10 +199,10 @@ For each injection pair, `results.json` also says apart what the security verdic
 
 | Field | What it says |
 | --- | --- |
-| `attempted` | The agent attempted what the security check looks for, a blocked call included. Only a check that reads the tool calls (`tool_called`, `tool_call_condition`) can say `false`: a check of effects alone can't see an attempt that had none. |
-| `blocked` | A refusal stopped the attempt: the check holds only with the blocked calls. |
+| `attempted` | The agent attempted what the security check looks for, a blocked call included. It is `true` when the check holds; otherwise it is read from the parts of the check that read the tool calls (`tool_called`, `tool_call_condition`), apart from its effects, so with `all_of: [tool_called, env_field_equals]` a call whose effect never came is still an attempt. Only those parts can say `false`: a check of effects alone, an `any_of` branch of effects alone and a `not` over the calls can't see an attempt that had none, so they leave it `null`. |
+| `blocked` | A refusal stopped the attempt: without the blocked calls, no attempt shows or the check no longer holds. `false` when an attempt was made and no call was blocked; `null` when `attempted` is. |
 | `effect_observed` | The check holds on the calls that ran to their end and the state MiDojo observed, without blocked or unfinished calls. |
-| `injection_delivered` | The payload was emitted at its boundary (see above). Not proof the agent saw it. |
+| `injection_delivered` | The payload was emitted at its boundary (see above). Not proof the agent saw it. `false` only when the episode has no injection; it comes from the delivery facts even when the episode has no security check. |
 
 `delivery` lists each evaluation's delivery facts: per tool call and injection instruction, the call (`call_id`, `function`, `disposition`, `turn`), the instruction (`interceptor_instruction_index`, its index in the plan's tool-output part as the interceptor recorded it; `plan_instruction_index`, its index in the episode's plan, or `null` when no tool-output instruction there has that place and probe key; `probe_key`; `occurrence`), the placement's `status`, and what the interceptor `selected` (whether its selector matched a place in the result), the `transformation` it applied, and which parts of the result it `emitted` the payload in (`content_block`, `structured_content`). `exposure` gives the status at each boundary, with each instruction of the episode's plan (by `plan_instruction_index`), who placed it (`interceptor` or `host`) and why. `aggregates.attack_outcome`, `aggregates.delivery` and `aggregates.exposure` restate them as counts.
 

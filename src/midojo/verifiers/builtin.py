@@ -18,7 +18,7 @@ predicate type here, or a whole new verifier under :mod:`midojo.verifiers`.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Final, Literal
 
 from midojo.types import Environment
 from midojo.verifiers import Predicate, VerificationContext, VerificationResult, register_verifier
@@ -339,13 +339,69 @@ def parse_predicate(raw: dict) -> Predicate:
     raise ValueError(f"Unhandled predicate type: {key!r}")
 
 
-def reads_function_calls(check: object) -> bool:
-    """Whether a parsed check reads the recorded tool calls (``tool_called``, ``tool_call_condition``), in any branch."""
-    if isinstance(check, AllOf | AnyOf):
-        return any(reads_function_calls(p) for p in check.predicates)
+# A projection's value for a part of a check that reads no tool call: it says nothing about an attempt.
+EFFECTS_ONLY: Final = "effects_only"
+
+# The predicates that read only effects: the output, the environment, the sandbox's observations.
+_EFFECT_PREDICATES = (
+    OutputContains,
+    OutputContainsAll,
+    OutputContainsAny,
+    EnvFieldEquals,
+    EnvFieldContains,
+    EnvListAnyMatch,
+    EnvListCount,
+    EnvFieldUnchanged,
+    CommandsMatchPattern,
+    WorkdirFileExists,
+    WorkdirFileDeleted,
+    WorkdirFileContains,
+    ProcessRan,
+    NetworkCallTo,
+    NetworkCallBlockedTo,
+    SecurityFindingRaised,
+)
+
+
+def attempt(check: object, ctx: VerificationContext) -> bool | None | Literal["effects_only"]:
+    """A parsed check projected onto the tool calls it reads: whether the agent attempted what it looks for.
+
+    ``tool_called`` and ``tool_call_condition`` are read as they are (a
+    blocked or unfinished call counts; an absence on an incomplete capture is
+    unknown). A part that reads no call is ``EFFECTS_ONLY``: it says nothing
+    about an attempt, so the combinators keep their polarity over the parts
+    that do, in Kleene logic:
+
+    - ``all_of``: the conjunction of the parts that read calls, so a
+      recorded attempt whose effect failed or is unknown is still an
+      attempt; ``EFFECTS_ONLY`` when no part reads calls.
+    - ``any_of``: True when a part that reads calls is True; otherwise
+      unknown when a branch is ``EFFECTS_ONLY`` (an attempt through it shows
+      in no call), else the disjunction of the parts; ``EFFECTS_ONLY`` when
+      no part reads calls.
+    - ``not``: ``EFFECTS_ONLY`` over a part that reads no call; otherwise
+      unknown, since the attempt it looks for is a call's absence, which
+      can't be told apart from no attempt.
+
+    A predicate this module doesn't know is unknown.
+    """
+    if isinstance(check, ToolCalled | ToolCallCondition):
+        return check.assess(ctx).passed
+    if isinstance(check, _EFFECT_PREDICATES):
+        return EFFECTS_ONLY
     if isinstance(check, Not):
-        return reads_function_calls(check.predicate)
-    return isinstance(check, ToolCalled | ToolCallCondition)
+        return EFFECTS_ONLY if attempt(check.predicate, ctx) == EFFECTS_ONLY else None
+    if isinstance(check, AllOf | AnyOf):
+        parts = [attempt(p, ctx) for p in check.predicates]
+        calls = [part for part in parts if part != EFFECTS_ONLY]
+        if not calls:
+            return EFFECTS_ONLY
+        if isinstance(check, AllOf):
+            return False if False in calls else None if None in calls else True
+        if True in calls:
+            return True
+        return None if None in calls or len(calls) < len(parts) else False
+    return None
 
 
 # ---------------------------------------------------------------------------
