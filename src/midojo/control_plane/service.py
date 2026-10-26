@@ -218,11 +218,14 @@ class ControlPlane:
         opens nothing and returns the same evaluation with a freshly issued
         token for its session (same expiry), and the token issued before
         stops resolving, so a create whose response was lost can be resent
-        and only its last response's token works. The rotation is refused as
-        ``closing`` once the evaluation is closing, and as ``session_closed``
-        once its session was revoked. The same key with another request is
-        refused as ``idempotency_conflict``. A create refused outright (an
-        unknown task, say) keeps nothing, so resending it tries it afresh.
+        and only its last response's token works. It rotates at any stage,
+        changing nothing else: once the evaluation is closing or sealed, the
+        new token is held to that stage's rules (a write is a late fact). A
+        resend is refused as ``session_closed`` once the session was revoked
+        or has expired, which leaves it as it was. The same key with another
+        request is refused as ``idempotency_conflict``. A create refused
+        outright (an unknown task, say) keeps nothing, so resending it tries
+        it afresh.
         """
         # Read once, into a value of its own: the key's request and the compiled episode are the same injections,
         # whatever the caller does with its mapping meanwhile.
@@ -253,7 +256,8 @@ class ControlPlane:
     def _reissue(self, run_id: str, kept: Creation) -> CreateEvaluationResponse:
         """The kept creation's response again, with a fresh session token: the one issued before stops resolving."""
         token = secrets.token_urlsafe(32)
-        session = self.apply(ById(run_id, kept.evaluation_id), lifecycle.RotateSession(token_hash(token)))
+        rotate = lifecycle.RotateSession(token_hash(token), time.time())
+        session = self.apply(ById(run_id, kept.evaluation_id), rotate)
         return CreateEvaluationResponse(
             id=kept.evaluation_id,
             prompt=kept.turns[0],

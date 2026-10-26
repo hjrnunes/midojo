@@ -199,7 +199,8 @@ class CreateEvaluationRequest(BaseModel):
             "Optional, the caller's choice, one per request. The run keeps the evaluation it opens under it, never "
             "the session token: the same request sent again with the same key returns the same evaluation with a "
             "freshly issued session token, and the token issued before stops resolving (a create whose response was "
-            "lost can be resent). The same key with another request is refused (409, idempotency_conflict)."
+            "lost can be resent), at any stage; once the session was revoked or has expired, the resend is refused "
+            "(401, session_closed). The same key with another request is refused (409, idempotency_conflict)."
         ),
     )
 

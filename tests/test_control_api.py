@@ -1,21 +1,26 @@
+import dataclasses
 import threading
+import time
 import uuid
 from collections.abc import Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from midojo_sdk.recorder import ControlPlaneRejectedError
 
+from midojo.control_plane import lifecycle, service
 from midojo.control_plane.config import AppConfig
 from midojo.control_plane.inprocess import InProcessAgentClient
 from midojo.control_plane.inprocess_control import InProcessControlClient
 from midojo.control_plane.lifecycle import RejectedError, Rejection
 from midojo.control_plane.main import create_app
 from midojo.control_plane.models import CreateEvaluationResponse, EvaluationResponse
-from midojo.control_plane.service import BySession, ControlPlane, token_hash
-from midojo.control_plane.state import Evaluation
+from midojo.control_plane.service import ById, BySession, ControlPlane, token_hash
+from midojo.control_plane.state import Evaluation, Session
 from midojo.episode import freeze
 from midojo.runtimes.openshell import OpenShellObservations
 from midojo.verifiers import ConversationTurn, VerificationResult, register_verifier
@@ -131,19 +136,117 @@ def test_a_keyed_create_keeps_no_session_token_in_the_store(client):
     assert kept is not None and first["session_token"] not in repr(kept) and again["session_token"] not in repr(kept)
 
 
-def test_a_resend_after_the_evaluation_began_closing_or_lost_its_session_is_refused(client):
+def _bearer(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _to_stage(client: TestClient, run_id: str, eval_id: str, stage: str) -> None:
+    """Take the evaluation to ``stage``: closing (with a long closure wait), collecting, or sealed."""
+    assert isinstance(client.app, FastAPI)
+    if stage == "closing":
+        closure = lifecycle.BeginClosure(datetime.now(UTC).isoformat(), time.time() + 600)
+        client.app.state.control.apply(ById(run_id, eval_id), closure)
+    elif stage == "collecting":
+        assert client.post(f"/runs/{run_id}/evaluations/{eval_id}/close").status_code == 200
+    else:
+        complete = client.post(f"/runs/{run_id}/evaluations/{eval_id}/complete", json={"agent_output": "done"})
+        assert complete.status_code == 200
+    assert _evaluation(client, run_id, eval_id).stage.value == stage
+
+
+@pytest.mark.parametrize("stage", ["closing", "collecting", "sealed"])
+def test_a_resend_once_closure_began_rotates_the_token_and_changes_nothing_else(client, stage):
+    run_id = _create_run(client)
+    first = _post_evaluation(client, run_id, idempotency_key="k1").json()
+    _to_stage(client, run_id, first["id"], stage)
+    before = _evaluation(client, run_id, first["id"])
+    again = _post_evaluation(client, run_id, idempotency_key="k1")
+    assert again.status_code == 201 and _without_token(again.json()) == _without_token(first)
+    new, old = again.json()["session_token"], first["session_token"]
+    assert new != old
+    # The same evaluation, at the same stage: only its session's token hash changed.
+    after = _evaluation(client, run_id, first["id"])
+    assert before.session is not None
+    assert after == dataclasses.replace(before, session=Session(token_hash(new), before.session.expires_at))
+    # The old token resolves nowhere, and what it sends is kept nowhere, not even as a late fact.
+    for refused in (
+        client.get("/agent/environment", headers=_bearer(old)),
+        client.post("/agent/function-calls/start", json=_START, headers=_bearer(old)),
+    ):
+        assert (refused.status_code, refused.json()["kind"], refused.json()["late_fact"]) == (
+            401,
+            "invalid_session",
+            False,
+        )
+    assert _evaluation(client, run_id, first["id"]).late_facts == ()
+    # The new one is held to the stage's rules: it reads until the seal, and a new call is a late fact.
+    read = client.get("/agent/environment", headers=_bearer(new))
+    assert read.status_code == 200 if stage != "sealed" else read.json()["kind"] == "session_closed"
+    late = client.post("/agent/function-calls/start", json=_START, headers=_bearer(new))
+    assert late.json()["late_fact"] is True
+    [fact] = _evaluation(client, run_id, first["id"]).late_facts
+    assert (fact.event, fact.stage.value) == ("start_call", stage)
+    assert old not in _stored(client.app.state.store) and new not in _stored(client.app.state.store)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["closing", "collecting", "sealed"])
+async def test_in_process_a_resend_once_closure_began_rotates_the_token(suite, stage):
+    plane = ControlPlane({"weather": suite}, config=AppConfig(closure_wait_seconds=0))
+    control = InProcessControlClient(plane)
+    run = plane.create_run("weather")
+    first = await control.create_evaluation(run.id, "weather_new_york", None, {}, idempotency_key="k1")
+    target = ById(run.id, first.id)
+    if stage == "closing":
+        plane.apply(target, lifecycle.BeginClosure(datetime.now(UTC).isoformat(), time.time() + 600))
+    elif stage == "collecting":
+        await control.close_evaluation(run.id, first.id)
+    else:
+        await control.complete_evaluation(run.id, first.id, "done")
+    again = await control.create_evaluation(run.id, "weather_new_york", None, {}, idempotency_key="k1")
+    assert again.model_copy(update={"session_token": first.session_token}) == first
+    assert plane.evaluation(target).stage.value == stage
+    start = {"call_id": "c1", "function": "get_weather", "args": {}, "disposition": None}
+    with pytest.raises(ControlPlaneRejectedError) as old:
+        await InProcessAgentClient(plane, first.session_token).start_call(**start)
+    assert (old.value.kind, old.value.late_fact) == ("invalid_session", False)
+    with pytest.raises(ControlPlaneRejectedError) as late:
+        await InProcessAgentClient(plane, again.session_token).start_call(**start)
+    assert late.value.late_fact is True
+    [fact] = plane.evaluation(target).late_facts
+    assert fact.stage.value == stage
+    stored = _stored(plane.store)
+    assert first.session_token not in stored and again.session_token not in stored
+
+
+def test_a_resend_for_a_revoked_session_is_refused_and_it_stays_revoked(client):
     run_id = _create_run(client)
     created = _post_evaluation(client, run_id, idempotency_key="k1").json()
     assert client.delete(f"/runs/{run_id}/evaluations/{created['id']}/session").status_code == 204
-    revoked = _post_evaluation(client, run_id, idempotency_key="k1")
-    # A revoked session stays revoked: the resend issues no token.
-    assert revoked.status_code == 401 and revoked.json()["kind"] == "session_closed"
-    closing = _post_evaluation(client, run_id, idempotency_key="k2").json()
-    assert client.post(f"/runs/{run_id}/evaluations/{closing['id']}/close").status_code == 200
-    refused = _post_evaluation(client, run_id, idempotency_key="k2")
-    assert refused.status_code == 409 and refused.json()["kind"] == "closing"
-    old = client.get("/agent/environment", headers={"Authorization": f"Bearer {closing['session_token']}"})
-    assert old.status_code == 200
+    for _ in range(2):
+        revoked = _post_evaluation(client, run_id, idempotency_key="k1")
+        assert (revoked.status_code, revoked.json()["kind"]) == (401, "session_closed")
+        assert "revoked" in revoked.json()["detail"]
+    assert _evaluation(client, run_id, created["id"]).session is None
+    old = client.get("/agent/environment", headers=_bearer(created["session_token"]))
+    assert (old.status_code, old.json()["kind"]) == (401, "invalid_session")
+
+
+def test_a_resend_for_an_expired_session_is_refused_and_keeps_its_expiry(client, monkeypatch):
+    run_id = _create_run(client)
+    created = _post_evaluation(client, run_id, idempotency_key="k1").json()
+    session = _evaluation(client, run_id, created["id"]).session
+    assert session is not None
+    expires_at = session.expires_at
+    # The control plane's clock, at the session's expiry.
+    monkeypatch.setattr(service, "time", SimpleNamespace(time=lambda: expires_at))
+    expired = _post_evaluation(client, run_id, idempotency_key="k1")
+    assert (expired.status_code, expired.json()["kind"]) == (401, "session_closed")
+    assert "expired" in expired.json()["detail"]
+    # Not rotated, and not extended: the same token hash and expiry.
+    assert _evaluation(client, run_id, created["id"]).session == Session(
+        token_hash(created["session_token"]), expires_at
+    )
 
 
 def test_the_same_idempotency_key_with_another_request_is_refused(client):

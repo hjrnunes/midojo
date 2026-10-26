@@ -11,6 +11,8 @@ import json
 import re
 import signal
 import socket
+import time
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -32,6 +34,7 @@ from midojo_sdk.injection import (
 )
 from sse_starlette.sse import AppStatus
 
+from midojo.control_plane import lifecycle
 from midojo.control_plane.config import AppConfig
 from midojo.control_plane.inprocess_control import InProcessControlClient
 from midojo.control_plane.main import create_app
@@ -354,6 +357,72 @@ async def test_closure_refuses_new_calls_as_late_facts_while_the_session_is_stil
     assert (fact.event, fact.by, fact.stage.value) == ("start_call", "interceptor", stage)
     assert fact.payload["args"] == {"city": "New York"}
     assert stored.evidence_status["function_calls"] == "incomplete"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["open", "closing", "sealed"])
+async def test_an_interceptor_holding_a_token_a_create_resend_replaced_is_refused(control, serve, stage):
+    run = control.create_run("weather")
+    first = control.create_evaluation(run.id, "weather_new_york", interception="host", idempotency_key="k1")
+    target = ById(run.id, first.id)
+    if stage == "closing":
+        control.apply(target, lifecycle.BeginClosure(datetime.now(UTC).isoformat(), time.time() + 600))
+    elif stage == "sealed":
+        await control.complete(run.id, first.id, "done")
+    again = control.create_evaluation(run.id, "weather_new_york", interception="host", idempotency_key="k1")
+    assert again.id == first.id and again.session_token != first.session_token
+    assert control.store.session_target(token_hash(first.session_token)) is None
+    upstream_calls: list = []
+    old = await serve(interceptor_for(control, first.session_token, first.id, calls=upstream_calls))
+    async with Client(old.url, auth=old.token) as stale:
+        with pytest.raises(ToolError):
+            await stale.call_tool("get_weather", {"city": "Boston"})
+    # Refused as invalid_session: it never reached the upstream, and is kept nowhere, not even as a late fact.
+    assert upstream_calls == []
+    stored = control.evaluation(target)
+    assert stored.function_calls == () and stored.late_facts == () and stored.capture_failures == ()
+    # The resend's token records as the interceptor, held to the stage's rules.
+    new = await serve(interceptor_for(control, again.session_token, again.id, calls=upstream_calls))
+    async with Client(new.url, auth=new.token) as current:
+        if stage == "open":
+            await current.call_tool("get_weather", {"city": "Boston"})
+        else:
+            with pytest.raises(ToolError):
+                await current.call_tool("get_weather", {"city": "Boston"})
+    stored = control.evaluation(target)
+    if stage == "open":
+        [call] = stored.function_calls
+        assert (call.function, call.provenance) == ("get_weather", "interceptor")
+    else:
+        [fact] = stored.late_facts
+        assert (fact.event, fact.by, fact.stage.value) == ("start_call", "interceptor", stage)
+
+
+@pytest.mark.asyncio
+async def test_over_http_an_interceptor_holding_a_token_a_create_resend_replaced_is_refused(suite, monkeypatch, serve):
+    app = create_app({"weather": suite})
+    backend = Backend("http", app, monkeypatch)
+    control = app.state.control
+    run = control.create_run("weather")
+    first = control.create_evaluation(run.id, "weather_new_york", interception="host", idempotency_key="k1")
+    again = control.create_evaluation(run.id, "weather_new_york", interception="host", idempotency_key="k1")
+    upstream_calls: list = []
+    for token in (first.session_token, again.session_token):
+        recorder = backend.control().recorder(token)
+        endpoint = await serve(
+            HostInterceptor(recorder, upstream=scripted_upstream(upstream_calls), evaluation_id=first.id)
+        )
+        async with Client(endpoint.url, auth=endpoint.token) as target:
+            if token == first.session_token:
+                with pytest.raises(ToolError):
+                    await target.call_tool("get_weather", {"city": "Boston"})
+            else:
+                await target.call_tool("get_weather", {"city": "New York"})
+    assert upstream_calls == [("get_weather", {"city": "New York"})]
+    stored = control.evaluation(ById(run.id, first.id))
+    assert [(c.args, c.provenance) for c in stored.function_calls] == [({"city": "New York"}, "interceptor")]
+    assert stored.late_facts == () and stored.capture_failures == ()
+    await backend.aclose()
 
 
 @pytest.mark.asyncio

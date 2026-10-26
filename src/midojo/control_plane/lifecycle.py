@@ -21,7 +21,7 @@ The rules kept here:
 * sessions: an agent's event is admitted only with the evaluation's session
   (matching token hash, not expired), and only for reads, calls and the
   environment; rotating a session gives it a new token hash, keeping its
-  expiry, and only while the evaluation is open and its session isn't revoked;
+  expiry, at any stage, unless it was revoked or has expired;
 * call-ID idempotency and conflicts: one record per ``call_id``; a replay with
   the same body returns the stored record, at any stage, and another body is a
   conflict until the seal, and a late fact after it;
@@ -237,9 +237,13 @@ class OpenSession:
 
 @dataclass(frozen=True)
 class RotateSession:
-    """Replace the live session's token hash with ``token_hash``, keeping its expiry: the old token stops resolving."""
+    """Replace the live session's token hash with ``token_hash``, keeping its expiry: the old token stops resolving.
+
+    ``now`` (epoch seconds) is when it's asked for: an expired session isn't rotated.
+    """
 
     token_hash: str
+    now: float
 
 
 @dataclass(frozen=True)
@@ -564,11 +568,14 @@ def _open_session(evaluation: Evaluation, event: OpenSession) -> Outcome:
 
 
 def _rotate_session(evaluation: Evaluation, event: RotateSession) -> Outcome:
-    if evaluation.stage is not Stage.OPEN:
-        return Rejected(Rejection.CLOSING, "Cannot issue a session for this evaluation")
+    # At any stage: the old token stops resolving, and the new one is held to the stage's rules (a write after
+    # closure is a late fact), so nothing else about the evaluation changes.
     # A revoked session stays revoked: rotating never opens one.
     if (session := evaluation.session) is None:
         return Rejected(Rejection.SESSION_CLOSED, "The evaluation's session was revoked")
+    # Nor does it revive an expired one, or extend its expiry.
+    if session.expires_at <= event.now:
+        return Rejected(Rejection.SESSION_CLOSED, "The evaluation's session has expired")
     next_value = _replace(evaluation, session=Session(event.token_hash, session.expires_at))
     effects = (SessionUnbound(session.token_hash), SessionBound(event.token_hash))
     return Accepted(next_value, next_value.session, effects)
