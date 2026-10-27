@@ -60,15 +60,79 @@ export interface CallStart {
 }
 
 /**
- * A call's finish, or the whole record of a call that wasn't started. It is a
- * plain finish: it carries no injection outcomes, so the control plane has no
- * delivery fact for a payload in the result and reports its exposure as
- * unknown. The result is recorded before the agent gets it, so a record doesn't
- * show the agent received it.
+ * A call's finish, or the whole record of a call that wasn't started: the
+ * result's text only. Sent with `finishCall`, a plain finish, it carries no
+ * injection outcomes, so the control plane keeps the record with
+ * `injection_outcomes` null (not reported), has no delivery fact for a payload
+ * in the result and reports its exposure as unknown. A `DetailedCallFinish`
+ * carries the rest. The result is recorded before the agent gets it, so a
+ * record doesn't show the agent received it.
  */
 export interface CallFinish extends CallStart {
 	result: string;
 	error?: string | null;
+}
+
+/**
+ * How one injection instruction fared on one call: the values of the Python
+ * SDK's `OutcomeStatus`. `partial` is a structured-content placement the
+ * result's text doesn't carry. `unmatched` is also a call to the instruction's
+ * tool whose arguments didn't match its `call_arguments`, or whose result
+ * didn't match its `result_record`: occurrence 0.
+ */
+export type OutcomeStatus =
+	| "applied"
+	| "partial"
+	| "fallback"
+	| "unmatched"
+	| "no_result"
+	| "too_large"
+	| "skipped_occurrence";
+
+/** The transformation applied to a payload: the values of the Python SDK's `Transformation`. */
+export type Transformation = "identity" | "json_string";
+
+/** A part of the result returned to the agent: its text (content) blocks or its structured content. */
+export type ResultPart = "content_block" | "structured_content";
+
+/**
+ * How one injection instruction fared on a call, as the call's detailed finish
+ * carries it (the Python SDK's `InjectionRecord`). `instructionIndex` names the
+ * instruction by its index in the plan the interceptor was given; a record
+ * names neither the payload nor a counter scope. `occurrence` is one-based, or
+ * 0 for a call that isn't counted (its arguments didn't match the
+ * instruction's `call_arguments`, or its result its `result_record`): only an
+ * `unmatched` record that placed nothing has occurrence 0, which
+ * `checkInjectionRecord` enforces.
+ *
+ * The delivery facts say what the interceptor did at its own boundary:
+ * `selected`, whether the instruction's exact selector matched a place in the
+ * result; `transformation`, the transformation applied to the payload (null
+ * when it was never transformed); `emitted`, the parts of the returned result
+ * that carry the transformed payload (empty when none does). A layer that
+ * doesn't report them leaves them out, and they're sent only when given. They
+ * never say what the agent saw: a result is recorded before it is returned.
+ */
+export interface InjectionRecord {
+	instructionIndex: number;
+	probeKey: string | null;
+	occurrence: number;
+	status: OutcomeStatus;
+	detail: string;
+	selected?: boolean;
+	transformation?: Transformation | null;
+	emitted?: ResultPart[];
+}
+
+/**
+ * A call's finish with the parts of its result beyond the text: the structured
+ * content returned to the agent with `result` (null when it had none) and how
+ * each injection instruction that matched the call fared. The list is always
+ * sent, empty when none matched, so the record says the details were reported.
+ */
+export interface DetailedCallFinish extends CallFinish {
+	structuredContent: Record<string, unknown> | null;
+	injectionOutcomes: InjectionRecord[];
 }
 
 /**
@@ -82,6 +146,73 @@ export interface Recorder {
 	startCall(call: CallStart): Promise<void>;
 	/** Finish the call started with `callId`, or record it whole when it wasn't started. */
 	finishCall(call: CallFinish): Promise<void>;
+}
+
+/**
+ * A `Recorder` that also records the parts of a result beyond its text: an
+ * optional capability, which `recordsDetails` says a recorder has.
+ * `ControlPlaneClient` has it, and `RetryingRecorder` has the capability of the
+ * recorder it wraps. A recorder without it still records every call, with
+ * `finishCall` (`finishDetailed` falls back to it): the text only, kept with
+ * `injection_outcomes` null, which says the details weren't reported, not that
+ * there were none.
+ */
+export interface DetailedRecorder extends Recorder {
+	/** Finish the call as `finishCall` does, with its structured content and injection outcomes too. */
+	finishCallDetailed(call: DetailedCallFinish): Promise<void>;
+}
+
+/**
+ * Whether `recorder` is a `DetailedRecorder`. A wrapping recorder says so with
+ * its own boolean `recordsDetails`, taken from the recorder it wraps; any other
+ * recorder is one when it has a `finishCallDetailed` method.
+ */
+export function recordsDetails(recorder: unknown): recorder is DetailedRecorder {
+	if (recorder === null || typeof recorder !== "object") return false;
+	const { recordsDetails: declared, finishCallDetailed } = recorder as {
+		recordsDetails?: unknown;
+		finishCallDetailed?: unknown;
+	};
+	if (typeof declared === "boolean") return declared;
+	return typeof finishCallDetailed === "function";
+}
+
+/**
+ * Throw a `RangeError` for an injection record the control plane would refuse
+ * at occurrence 0: one that isn't `unmatched`, or that reports a delivery fact
+ * (`selected` true, a `transformation`, a non-empty `emitted`). Unreported facts
+ * are allowed, and so is `unmatched` at occurrence 1 or more (a strict selector
+ * that didn't match a counted call).
+ */
+export function checkInjectionRecord(record: InjectionRecord): void {
+	if (
+		record.occurrence === 0 &&
+		(record.status !== "unmatched" ||
+			record.selected === true ||
+			(record.transformation !== undefined && record.transformation !== null) ||
+			(record.emitted !== undefined && record.emitted.length > 0))
+	) {
+		throw new RangeError("only an unmatched outcome that placed nothing has occurrence 0");
+	}
+}
+
+/**
+ * Finish a call with its details when `recorder` records them, else with
+ * `finishCall`: the text only. Resolves to whether the details were recorded.
+ * The fallback never fails the finish because of the details: a recorder
+ * written before them records the call as it always did. Either way, an
+ * invalid injection record (`checkInjectionRecord`) throws before anything is
+ * sent.
+ */
+export async function finishDetailed(recorder: Recorder, call: DetailedCallFinish): Promise<boolean> {
+	call.injectionOutcomes.forEach(checkInjectionRecord);
+	if (recordsDetails(recorder)) {
+		await recorder.finishCallDetailed(call);
+		return true;
+	}
+	const { structuredContent: _structured, injectionOutcomes: _outcomes, ...plain } = call;
+	await recorder.finishCall(plain);
+	return false;
 }
 
 /** The simulated environment's fields, as of one revision. Every change, through any caller, gives a new revision. */
@@ -128,21 +259,52 @@ export interface ToolContext {
 	change(values: Record<string, unknown>, options?: { expectedRevision?: number }): Promise<boolean>;
 }
 
+/**
+ * What a registered tool or a hook may return instead of a string, to give the
+ * agent structured content too, or to report what it did with an injection.
+ *
+ * The extension can't see what a tool's or a hook's code placed in its result,
+ * so only the code can report it. With `injectionOutcomes` the call is finished
+ * with its details when the recorder records them (`finishDetailed`): the
+ * structured content returned to the agent and these outcomes, an empty list
+ * saying no instruction matched the call. Without it, as for a plain string,
+ * the call is finished with its text only, which the control plane keeps with
+ * `injection_outcomes` null: not reported, so a payload in the result has
+ * unknown exposure rather than a claim that nothing was placed.
+ */
+export interface MidojoToolOutput {
+	/** The result's text: the one text content block the agent gets. */
+	result: string;
+	/**
+	 * Structured content returned with the text. Null or left out: none, and PI
+	 * drops any the real tool returned, since the hook replaced its content.
+	 */
+	structuredContent?: Record<string, unknown> | null;
+	/** How each injection instruction that matched the call fared (see `InjectionRecord`); left out: not reported. */
+	injectionOutcomes?: InjectionRecord[];
+}
+
 export interface MidojoToolDef {
 	name: string;
 	label: string;
 	description: string;
 	parameters: TSchema;
-	execute: (params: Record<string, unknown>, ctx: ToolContext) => Promise<string>;
+	execute: (params: Record<string, unknown>, ctx: ToolContext) => Promise<string | MidojoToolOutput>;
 }
 
 export interface MidojoToolHook {
 	toolName: string;
+	/**
+	 * Rewrite a real tool's result: `realResult` is its text content joined by
+	 * newlines, and `realStructuredContent` the structured content it returned
+	 * (undefined when none), which the agent loses unless the hook returns it.
+	 */
 	execute: (
 		args: Record<string, unknown>,
 		realResult: string,
 		ctx: ToolContext,
-	) => Promise<string>;
+		realStructuredContent?: unknown,
+	) => Promise<string | MidojoToolOutput>;
 }
 
 export interface MidojoExtensionConfig {
@@ -318,6 +480,16 @@ export class RetryingRecorder implements Recorder {
 	async finishCall(call: CallFinish): Promise<void> {
 		await retry(() => this.recorder.finishCall(call), this.options);
 	}
+
+	/** Whether the wrapped recorder records a finish's details (see `DetailedRecorder`). */
+	get recordsDetails(): boolean {
+		return recordsDetails(this.recorder);
+	}
+
+	/** Finish the call through the wrapped recorder, with its details when that recorder records them, resent like `finishCall`. */
+	async finishCallDetailed(call: DetailedCallFinish): Promise<void> {
+		await retry(() => finishDetailed(this.recorder, call), this.options);
+	}
 }
 
 /**
@@ -368,13 +540,14 @@ export function createToolContext(world: WorldState | undefined): ToolContext {
  * evaluation session, over HTTP. The session is `sessionToken`, or else
  * `MIDOJO_SESSION_TOKEN`, read on every request.
  *
- * `startCall`, `finishCall`, `read` and `change` send each request once. A
- * response that carries one of the control plane's rejection kinds throws a
- * `ControlPlaneRejectedError`; a 422 without one, an `InvalidRequestError`; any
- * other failure (a lost request, a proxy's error page, a 401 without a session)
- * a `ControlPlaneError`, which `transient` classifies for a `RetryingRecorder`.
+ * `startCall`, `finishCall`, `finishCallDetailed`, `read` and `change` send
+ * each request once. A response that carries one of the control plane's
+ * rejection kinds throws a `ControlPlaneRejectedError`; a 422 without one, an
+ * `InvalidRequestError`; any other failure (a lost request, a proxy's error
+ * page, a 401 without a session) a `ControlPlaneError`, which `transient`
+ * classifies for a `RetryingRecorder`.
  */
-export class ControlPlaneClient implements Recorder, WorldState {
+export class ControlPlaneClient implements DetailedRecorder, WorldState {
 	private baseUrl: string;
 	private sessionToken: string | undefined;
 
@@ -464,11 +637,22 @@ export class ControlPlaneClient implements Recorder, WorldState {
 	 * the disposition field still records a refused call as blocked.
 	 */
 	async finishCall(call: CallFinish): Promise<void> {
+		await this.request("/function-calls", "POST", finishBody(call));
+	}
+
+	/**
+	 * Send a call's finish once, as `finishCall` does, with its structured
+	 * content and injection outcomes. `injection_outcomes` is always sent, empty
+	 * when no instruction matched the call, so the record says the details were
+	 * reported. An invalid injection record (`checkInjectionRecord`) throws
+	 * before anything is sent.
+	 */
+	async finishCallDetailed(call: DetailedCallFinish): Promise<void> {
+		call.injectionOutcomes.forEach(checkInjectionRecord);
 		await this.request("/function-calls", "POST", {
-			...startBody(call),
-			result: call.result,
-			error: call.error ?? null,
-			blocked: REFUSED.has(call.disposition),
+			...finishBody(call),
+			structured_content: call.structuredContent,
+			injection_outcomes: call.injectionOutcomes.map(injectionRecordBody),
 		});
 	}
 
@@ -518,6 +702,26 @@ function startBody(call: CallStart): Record<string, unknown> {
 	return { call_id: call.callId, function: call.function, args: call.args, disposition: call.disposition };
 }
 
+/** A finish's body. It also carries the `blocked` flag the disposition implies. */
+function finishBody(call: CallFinish): Record<string, unknown> {
+	return { ...startBody(call), result: call.result, error: call.error ?? null, blocked: REFUSED.has(call.disposition) };
+}
+
+/** An injection record as the control plane takes it: unreported delivery facts are left out. */
+function injectionRecordBody(record: InjectionRecord): Record<string, unknown> {
+	const body: Record<string, unknown> = {
+		instruction_index: record.instructionIndex,
+		probe_key: record.probeKey,
+		occurrence: record.occurrence,
+		status: record.status,
+		detail: record.detail,
+	};
+	if (record.selected !== undefined) body.selected = record.selected;
+	if (record.transformation !== undefined) body.transformation = record.transformation;
+	if (record.emitted !== undefined) body.emitted = record.emitted;
+	return body;
+}
+
 async function revisionOf(resp: Response): Promise<EnvironmentRevision> {
 	const revision = Number(resp.headers.get(REVISION_HEADER) ?? Number.NaN);
 	if (!Number.isInteger(revision)) throw new ControlPlaneError(`MiDojo response has no ${REVISION_HEADER}`, resp.status);
@@ -545,6 +749,57 @@ async function failure(resp: Response, message: string): Promise<ControlPlaneErr
 		if (resp.status === 422 && Array.isArray(detail)) return new InvalidRequestError(JSON.stringify(detail));
 	}
 	return new ControlPlaneError(message, resp.status);
+}
+
+/** A registered tool's or a hook's output, as the extension records it and returns it to the agent. */
+interface ToolOutput {
+	result: string;
+	structuredContent: Record<string, unknown> | null;
+	/** Undefined: not reported, so the call is finished with its text only. */
+	injectionOutcomes: InjectionRecord[] | undefined;
+}
+
+function outputOf(returned: string | MidojoToolOutput): ToolOutput {
+	if (typeof returned === "string") return { result: returned, structuredContent: null, injectionOutcomes: undefined };
+	return {
+		result: returned.result,
+		structuredContent: returned.structuredContent ?? null,
+		injectionOutcomes: returned.injectionOutcomes,
+	};
+}
+
+/** What PI returns to the agent for `output`: its text, and its structured content when it has some. */
+function agentResult(output: ToolOutput): {
+	content: { type: "text"; text: string }[];
+	structuredContent?: Record<string, unknown>;
+} {
+	const content = [{ type: "text" as const, text: output.result }];
+	return output.structuredContent === null ? { content } : { content, structuredContent: output.structuredContent };
+}
+
+/**
+ * Finish `call` with its details (`finishDetailed`, which falls back to the
+ * text only for a recorder without them) when its injection outcomes were
+ * reported, and with its text only (`finishCall`) when they weren't.
+ */
+async function finish(
+	recorder: Recorder,
+	call: CallFinish,
+	details: Pick<ToolOutput, "structuredContent" | "injectionOutcomes">,
+): Promise<void> {
+	if (details.injectionOutcomes === undefined) {
+		await recorder.finishCall(call);
+		return;
+	}
+	await finishDetailed(recorder, {
+		...call,
+		structuredContent: details.structuredContent,
+		injectionOutcomes: details.injectionOutcomes,
+	});
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export function createMidojoExtension(config: MidojoExtensionConfig): (pi: ExtensionAPI) => void {
@@ -587,21 +842,18 @@ export function createMidojoExtension(config: MidojoExtensionConfig): (pi: Exten
 					};
 					await recorder.startCall(call);
 
-					let result: string;
+					let output: ToolOutput;
 					let error: string | null = null;
 					try {
-						result = await toolDef.execute(typedParams, ctx);
+						output = outputOf(await toolDef.execute(typedParams, ctx));
 					} catch (e) {
 						error = e instanceof Error ? e.message : String(e);
-						result = error;
+						output = outputOf(error);
 					}
 
-					await recorder.finishCall({ ...call, result, error });
+					await finish(recorder, { ...call, result: output.result, error }, output);
 
-					return {
-						content: [{ type: "text" as const, text: result }],
-						details: { tool: toolDef.name, params: typedParams },
-					};
+					return { ...agentResult(output), details: { tool: toolDef.name, params: typedParams } };
 				},
 			});
 		}
@@ -615,32 +867,29 @@ export function createMidojoExtension(config: MidojoExtensionConfig): (pi: Exten
 					.map((c) => c.text)
 					.join("\n");
 
-				let result: string;
+				let output: ToolOutput;
 				let error: string | null = null;
 				try {
-					result = await hook.execute(event.input, realResult, ctx);
+					output = outputOf(await hook.execute(event.input, realResult, ctx, event.structuredContent));
 				} catch (e) {
 					error = e instanceof Error ? e.message : String(e);
-					result = error;
+					output = outputOf(error);
 				}
 
-				await recorder.finishCall({
-					function: hook.toolName,
-					result,
-					error,
-					disposition: "forwarded",
-					...finishing(event.toolCallId, event.input),
-				});
+				const call = { function: hook.toolName, disposition: "forwarded" as const, ...finishing(event.toolCallId, event.input) };
+				await finish(recorder, { ...call, result: output.result, error }, output);
 
-				return {
-					content: [{ type: "text" as const, text: result }],
-				};
+				return agentResult(output);
 			});
 		}
 
 		// Passive reporters: record a tool's result to the control plane without
 		// altering it. Skips any name already covered by `hooks` above so a tool
-		// is never recorded twice.
+		// is never recorded twice. A reporter places nothing, so its finish
+		// reports the details when the recorder records them: the structured
+		// content the tool returned and no injection outcomes. A structured
+		// content that isn't a JSON object can't go in a call record, so that
+		// call is finished with its text only.
 		const hookedTools = new Set((config.hooks ?? []).map((h) => h.toolName));
 		for (const reportToolName of new Set(config.reportTools ?? [])) {
 			if (hookedTools.has(reportToolName)) continue;
@@ -652,13 +901,15 @@ export function createMidojoExtension(config: MidojoExtensionConfig): (pi: Exten
 					.map((c) => c.text)
 					.join("\n");
 
-				await recorder.finishCall({
-					function: reportToolName,
-					result,
-					error: null,
-					disposition: "forwarded",
-					...finishing(event.toolCallId, event.input),
-				});
+				const call = { function: reportToolName, disposition: "forwarded" as const, ...finishing(event.toolCallId, event.input) };
+				const structured: unknown = event.structuredContent ?? null;
+				await finish(
+					recorder,
+					{ ...call, result, error: null },
+					structured === null || isJsonObject(structured)
+						? { structuredContent: structured, injectionOutcomes: [] }
+						: { structuredContent: null, injectionOutcomes: undefined },
+				);
 				// No return value: leave the tool result untouched so the agent
 				// sees the real output — this observes, it does not mutate.
 			});
