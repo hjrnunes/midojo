@@ -15,7 +15,7 @@ from midojo.types import Environment, FunctionCallRecord, SuiteName
 from midojo.yaml_task_suite import YAMLTaskSuite
 
 from .config import AppConfig
-from .lifecycle import RejectedError, Rejection
+from .lifecycle import Rejected, RejectedError, Rejection
 from .service import ById, ControlPlane
 from .state import Evaluation, Run
 
@@ -113,6 +113,46 @@ async def require_control_token(
         credentials.credentials.encode(), config.control_token.encode()
     ):
         raise HTTPException(401, "Control token required", headers={"WWW-Authenticate": "Bearer"})
+
+
+def control_token_required() -> RejectedError:
+    """The refusal of a host-mode evaluation on an app without a control token."""
+    detail = (
+        "Host interception needs a control plane started with a control token (MIDOJO_CONTROL_TOKEN): "
+        "without one, its run-scoped routes are open to anything that reaches it, the agent included."
+    )
+    return RejectedError(Rejected(Rejection.CONTROL_TOKEN_REQUIRED, detail))
+
+
+def exposed_without_control_token(config: AppConfig, evaluation: Evaluation) -> bool:
+    """Whether the run-scoped routes may serve ``evaluation``: always with a control token, else only in agent mode.
+
+    Without a control token the run-scoped routes take any request, the
+    target's included, so a host-mode evaluation is never served there,
+    whatever path created it.
+    """
+    return config.control_token is not None or evaluation.interception != "host"
+
+
+async def refuse_unguarded_host_evaluation(
+    request: Request,
+    config: Annotated[AppConfig, Depends(get_config)],
+    control: Annotated[ControlPlane, Depends(get_control)],
+) -> None:
+    """Refuse (403 ``control_token_required``) a run-scoped request about a host-mode evaluation on an unguarded app.
+
+    A dependency of every route under ``/runs``: those that name an evaluation
+    (``{eval_id}``) read its interception, a copy taken through the writer, so
+    no lock is held past the read. The interception is set at creation and
+    never changes. With a control token, or for an agent-mode evaluation,
+    nothing is read and nothing changes.
+    """
+    eval_id = request.path_params.get("eval_id")
+    if config.control_token is not None or eval_id is None:
+        return
+    evaluation = control.evaluation(ById(request.path_params["run_id"], eval_id))
+    if not exposed_without_control_token(config, evaluation):
+        raise control_token_required()
 
 
 def validate_environment(evaluation: Evaluation, body: dict) -> Environment:

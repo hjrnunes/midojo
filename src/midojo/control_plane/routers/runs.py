@@ -12,17 +12,20 @@ from ..config import AppConfig
 from ..dependencies import (
     RECORD_FUNCTION_CALL_RESPONSES,
     START_FUNCTION_CALL_RESPONSES,
+    control_token_required,
     created_or_replayed,
+    exposed_without_control_token,
     get_config,
     get_control,
     get_evaluation_by_id,
     get_run,
     get_suites,
+    refuse_unguarded_host_evaluation,
     resolve_suite,
     validate_environment,
     validate_observations,
 )
-from ..lifecycle import Rejected, RejectedError, Rejection, json_data
+from ..lifecycle import json_data
 from ..models import (
     CaptureFailureResponse,
     CloseResponse,
@@ -48,7 +51,8 @@ from ..models import (
 from ..service import ById, ControlPlane
 from ..state import Evaluation, Run, Snapshot
 
-router = APIRouter(prefix="/runs")
+# Every route here, and any added later, refuses a host-mode evaluation on an app without a control token.
+router = APIRouter(prefix="/runs", dependencies=[Depends(refuse_unguarded_host_evaluation)])
 
 
 def _user_task_id(evaluation: Evaluation) -> str:
@@ -69,7 +73,12 @@ async def create_run(
 
 
 @router.get("/{run_id}", response_model=RunResponse, status_code=status.HTTP_200_OK)
-async def retrieve_run(run: Annotated[Run, Depends(get_run)], control: Annotated[ControlPlane, Depends(get_control)]):
+async def retrieve_run(
+    run: Annotated[Run, Depends(get_run)],
+    control: Annotated[ControlPlane, Depends(get_control)],
+    config: Annotated[AppConfig, Depends(get_config)],
+):
+    """The run and a summary of each evaluation; without a control token, of its agent-mode evaluations only."""
     return RunResponse(
         id=run.id,
         suite_name=run.suite_name,
@@ -87,6 +96,7 @@ async def retrieve_run(run: Annotated[Run, Depends(get_run)], control: Annotated
                 grade_validity=e.grade.grade_validity if e.grade else None,
             )
             for e in control.evaluations(run.id)
+            if exposed_without_control_token(config, e)
         ],
     )
 
@@ -116,14 +126,11 @@ async def create_evaluation(
     a control token: without one, the run-scoped routes take any request, so a
     target that reached the server could read and change its evaluation there
     as the host. It is refused with 403 ``control_token_required``, and nothing
-    is kept. In process, a ``ControlPlane`` has no such routes to guard.
+    is kept. One created in process on this app's control plane is refused on
+    every run-scoped route instead (``refuse_unguarded_host_evaluation``).
     """
     if req.interception == "host" and config.control_token is None:
-        detail = (
-            "Host interception needs a control plane started with a control token (MIDOJO_CONTROL_TOKEN): "
-            "without one, its run-scoped routes are open to anything that reaches it, the agent included."
-        )
-        raise RejectedError(Rejected(Rejection.CONTROL_TOKEN_REQUIRED, detail))
+        raise control_token_required()
     return control.create_evaluation(
         run.id,
         req.user_task_id,
