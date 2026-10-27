@@ -273,6 +273,18 @@ agent_runtime:
 
 `midojo-run --agent-timeout SECONDS` overrides the suite's value for one run. For an unmanaged agent, `--agent-timeout` sets the client's timeout instead, which is 120 seconds by default.
 
+An agent reached over the OpenAI Responses API (`--protocol openai`) is `midojo.agent_client.OpenAIResponsesAgentClient`, which you can also construct yourself, from an external caller such as a Garak generator. Its keyword-only `allowed_tools` limits the MCP server's tools the model is offered: every request's MCP tool block, on every turn and in host mode too, then ends with `"allowed_tools": [...]`, the names in the order given. Left unset (`None`, the default), the requests are unchanged and the model is offered every tool the server lists. The names must be distinct, non-empty strings, at least one: a bare string, a non-`str` name, an empty name, a repeated name or an empty list is refused when the client is built (to offer no tools, give the agent no MCP server). `midojo-run` has no flag for it.
+
+```python
+from midojo.agent_client import OpenAIResponsesAgentClient
+
+client = OpenAIResponsesAgentClient(
+    "http://localhost:8321/v1", "gpt-4o-mini", "http://localhost:8082/mcp",
+    api_key="...", allowed_tools=["get_weather"],
+)
+reply = await client.send_task("What is the weather in New York?", session_token=token)
+```
+
 Suite YAML places payloads with probe placeholders. `YAMLTaskSuite.episode(...)` compiles the active placeholders into a frozen injection plan while preserving the rendered prompt, environment and runtime files. Programmatic hosts can add exact tool-result instructions—channel, selector, occurrence, transformation, size limit, mode and mismatch policy—and hand the relevant channel subset to an interceptor. Strict mismatch is the default; exploratory fallback must be explicit and is reported.
 
 A structured-content path normally uses string keys and non-negative integer indexes. To address one record in a list by an identifier, use the frozen selector step `RecordSelector("NOTE-1")` (the field defaults to `id`), for example `("notes", RecordSelector("NOTE-1"), "body")`. A custom identifier field is `RecordSelector("X", field="sku")`. Matching is exact and type-preserving—integer `1` does not match string `"1"`, and booleans are not selector values—and exactly one record must match. A plain key step against a list fails strictly (for example, `field 'NOTE-1' requires an object, got list`), so a caller addressing a record by id must use a selector step. In `InjectionPlan.to_json()` the same path is `["notes", {"field": "id", "equals": "NOTE-1"}, "body"]`; `InjectionPlan.from_json()` also accepts `{"equals": "NOTE-1"}` with the default `id` field, while `to_data()` and `from_data()` provide the same shape to callers that already hold parsed JSON data. A missing record, duplicate identifier, non-list selector input, or missing destination field is a strict unmatched outcome with its cause in `InjectionOutcome.detail`; `fallback_append` retains its explicit fallback behavior.

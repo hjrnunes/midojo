@@ -1259,6 +1259,7 @@ def main(
                 mcp_server_label=mcp_server_label or suite_name,
                 api_key=api_key,
                 instructions=system_message,
+                allowed_tools=None,  # every tool; named so **timeout_kwargs can only fill `timeout`
                 **timeout_kwargs,
             )
     else:
