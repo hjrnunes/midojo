@@ -132,7 +132,7 @@ def _tool_names(allowed_tools: Sequence[str]) -> tuple[str, ...]:
         raise TypeError("allowed_tools must be a sequence of tool names, not a single string")
     names = tuple(allowed_tools)
     if not names:
-        raise ValueError("allowed_tools must name at least one tool; to offer none, give the agent no MCP server")
+        raise ValueError("allowed_tools must name at least one tool")
     for name in names:
         if type(name) is not str:
             raise TypeError(f"allowed_tools names must be str, got {type(name).__name__}")
