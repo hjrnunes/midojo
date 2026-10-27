@@ -40,6 +40,7 @@ type PathPart = str | int | RecordSelector
 type FieldPath = tuple[PathPart, ...]
 type ArgumentValue = str | int | float | bool | None
 type CallArguments = tuple[tuple[str, ArgumentValue], ...]
+type CallArgumentsInput = CallArguments | Mapping[str, ArgumentValue]
 
 
 class Channel(enum.StrEnum):
@@ -97,7 +98,7 @@ class OutcomeStatus(enum.StrEnum):
     SKIPPED_OCCURRENCE = "skipped_occurrence"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class InjectionTarget:
     """An exact record selector within a channel.
 
@@ -105,26 +106,46 @@ class InjectionTarget:
     ``tool`` whose arguments match: each named top-level argument must be
     present and equal, type for type (``"1"`` isn't ``1``, ``True`` isn't
     ``1``, ``1.0`` isn't ``1``), to its JSON scalar value. It is given as
-    ``(name, value)`` pairs, or a mapping, and kept as pairs sorted by name.
-    A call to ``tool`` whose arguments don't match isn't an occurrence of the
-    instruction: it isn't counted, and its result is left unchanged with an
-    ``unmatched`` outcome that names the argument.
+    ``(name, value)`` pairs or a mapping (``{"order_id": "ORD-102"}``), and
+    always read as the pairs sorted by name. A call to ``tool`` whose
+    arguments don't match isn't an occurrence of the instruction: it isn't
+    counted, and its result is left unchanged with an ``unmatched`` outcome
+    that names the argument.
     """
 
-    tool: str | None = None
-    surface: SelectorSurface = SelectorSurface.CONTENT_BLOCK
-    content_block_index: int | None = None
-    content_block_type: str | None = None
-    structured_content_path: FieldPath = ()
-    template_path: FieldPath = ()
-    template_key: str | None = None
-    call_arguments: CallArguments = ()
+    tool: str | None
+    surface: SelectorSurface
+    content_block_index: int | None
+    content_block_type: str | None
+    structured_content_path: FieldPath
+    template_path: FieldPath
+    template_key: str | None
+    call_arguments: CallArguments
 
-    def __post_init__(self) -> None:
+    def __init__(
+        self,
+        tool: str | None = None,
+        surface: SelectorSurface = SelectorSurface.CONTENT_BLOCK,
+        content_block_index: int | None = None,
+        content_block_type: str | None = None,
+        structured_content_path: FieldPath = (),
+        template_path: FieldPath = (),
+        template_key: str | None = None,
+        call_arguments: CallArgumentsInput = (),
+    ) -> None:
+        # Written out, not generated, so that it takes either form of call_arguments while the attribute is typed
+        # as the pairs it always holds.
+        object.__setattr__(self, "tool", tool)
+        object.__setattr__(self, "surface", surface)
+        object.__setattr__(self, "content_block_index", content_block_index)
+        object.__setattr__(self, "content_block_type", content_block_type)
+        object.__setattr__(self, "structured_content_path", structured_content_path)
+        object.__setattr__(self, "template_path", template_path)
+        object.__setattr__(self, "template_key", template_key)
         if type(self.surface) is not SelectorSurface:
             raise TypeError("surface must be a SelectorSurface")
         _optional_str(self.tool, "target tool")
-        object.__setattr__(self, "call_arguments", _call_arguments(self.call_arguments))
+        object.__setattr__(self, "call_arguments", _call_arguments(call_arguments))
         if self.call_arguments:
             if self.surface not in {SelectorSurface.CONTENT_BLOCK, SelectorSurface.STRUCTURED_CONTENT}:
                 raise ValueError("call_arguments only select tool-output calls")
@@ -390,6 +411,11 @@ class InjectionOutcome:
     checked on the result as returned, after every instruction for the call:
     empty when none does. These are facts about what the interceptor sent,
     not about what the agent or its model saw.
+
+    Occurrence 0 is only for a call whose arguments didn't match the target's
+    ``call_arguments``: an ``unmatched`` outcome that placed nothing, so
+    building any other at occurrence 0 raises ValueError. ``unmatched`` is
+    also counted (a strict selector that didn't match is occurrence 1 or more).
     """
 
     instruction_index: int
@@ -404,6 +430,12 @@ class InjectionOutcome:
     selected: bool = False
     transformation: Transformation | None = None
     emitted: tuple[SelectorSurface, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.occurrence == 0 and (
+            self.status != OutcomeStatus.UNMATCHED or self.selected or self.transformation is not None or self.emitted
+        ):
+            raise ValueError("only an unmatched outcome that placed nothing has occurrence 0")
 
 
 def capability_gaps(
@@ -681,7 +713,7 @@ def _instruction_from_data(value: Any) -> InjectionInstruction:
         ),
         template_path=_path_from_data(target_data.get("template_path", []), "template path", record_selectors=False),
         template_key=target_data.get("template_key"),
-        call_arguments=tuple(_object(target_data.get("call_arguments", {}), "call_arguments").items()),
+        call_arguments=_object(target_data.get("call_arguments", {}), "call_arguments"),
     )
     occurrence_data = _object(data.get("occurrence", {}), "occurrence")
     _only_fields(occurrence_data, {"kind", "nth"}, "occurrence")

@@ -18,6 +18,7 @@ from midojo_sdk.injection import (
     GeneratorPermissions,
     InjectionInstruction,
     InjectionMode,
+    InjectionOutcome,
     InjectionPlan,
     InjectionTarget,
     MismatchPolicy,
@@ -36,6 +37,7 @@ from midojo_sdk.recorder import Disposition, InjectionRecord
 
 from midojo.episode import Episode
 from midojo.suites import get_suite
+from midojo.types import CallInjectionOutcome
 from tests.scripted_mcp import ScriptedMCP
 from tests.test_mcp_fidelity import CapturingRecorder
 
@@ -1033,7 +1035,7 @@ def _item(result: CallToolResult) -> str:
 def test_call_arguments_are_sorted_hashable_pairs_of_exact_json_scalars():
     target = InjectionTarget(tool="lookup", call_arguments=(("b", 1), ("a", True), ("c", None), ("d", 1.5)))
     assert target.call_arguments == (("a", True), ("b", 1), ("c", None), ("d", 1.5))
-    assert InjectionTarget(tool="lookup", call_arguments={"b": 1, "a": True, "c": None, "d": 1.5}) == target  # type: ignore[arg-type]
+    assert InjectionTarget(tool="lookup", call_arguments={"b": 1, "a": True, "c": None, "d": 1.5}) == target
     assert hash(target) == hash(dataclasses.replace(target))
     assert InjectionTarget().call_arguments == ()
     invalid = [
@@ -1084,7 +1086,7 @@ def test_call_argument_matching_is_type_exact(expected, actual):
 
 
 def test_every_named_argument_must_match_and_each_failure_is_named():
-    target = InjectionTarget(tool="lookup", call_arguments={"a": 1, "b": "x", "c": False})  # type: ignore[arg-type]
+    target = InjectionTarget(tool="lookup", call_arguments={"a": 1, "b": "x", "c": False})
     assert target.call_argument_mismatch({"a": 1, "b": "x", "c": False}) is None
     assert target.call_argument_mismatch({"a": 2, "c": False}) == (
         "call argument 'a' is 2, not 1; call argument 'b' is missing"
@@ -1272,6 +1274,55 @@ async def test_fallback_append_never_places_a_payload_on_a_call_whose_arguments_
     assert _texts(result) == ['{"order_id":"ORD-101","item":"item of ORD-101"}']
     [outcome] = mcp.injection_outcomes
     assert (outcome.status, outcome.occurrence) == (OutcomeStatus.UNMATCHED, 0)
+
+
+def _outcome_at(occurrence: int, status: OutcomeStatus, **facts: Any) -> InjectionOutcome:
+    return InjectionOutcome(0, None, "scope", "c1", "lookup_order", occurrence, 1, status, "d", **facts)
+
+
+@pytest.mark.parametrize(
+    ("status", "facts"),
+    [
+        (OutcomeStatus.APPLIED, {"selected": True, "transformation": Transformation.IDENTITY}),
+        (OutcomeStatus.SKIPPED_OCCURRENCE, {}),
+        (OutcomeStatus.NO_RESULT, {}),
+        (OutcomeStatus.UNMATCHED, {"selected": True}),
+        (OutcomeStatus.UNMATCHED, {"transformation": Transformation.IDENTITY}),
+        (OutcomeStatus.UNMATCHED, {"emitted": (SelectorSurface.CONTENT_BLOCK,)}),
+    ],
+    ids=["applied", "skipped", "no-result", "unmatched-selected", "unmatched-transformed", "unmatched-emitted"],
+)
+def test_only_an_unmatched_outcome_that_placed_nothing_has_occurrence_0(status, facts):
+    with pytest.raises(ValueError, match="occurrence 0"):
+        _outcome_at(0, status, **facts)
+    # Counted, the same outcome is valid: an unmatched one too (a strict selector that didn't match).
+    assert _outcome_at(1, status, **facts).occurrence == 1
+    assert _outcome_at(0, OutcomeStatus.UNMATCHED).occurrence == 0
+
+
+@pytest.mark.asyncio
+async def test_midojo_mcp_reports_occurrence_0_only_for_a_call_argument_miss():
+    # A strict selector that misses the matching calls (no "missing" field): unmatched, but counted.
+    target = InjectionTarget(
+        tool="lookup_order",
+        surface=SelectorSurface.STRUCTURED_CONTENT,
+        structured_content_path=("missing",),
+        call_arguments={"order_id": "ORD-102"},
+    )
+    instruction = _instruction(target=target, occurrence=OccurrenceRule(Occurrence.NTH, 2))
+    calls = ("ORD-101", "ORD-102", "ORD-102", "ORD-102")
+
+    _, mcp, recorder = await _lookups(*({"order_id": order} for order in calls), instruction=instruction)
+
+    assert [(o.occurrence, o.status, o.selected, o.transformation, o.emitted) for o in mcp.injection_outcomes] == [
+        (0, OutcomeStatus.UNMATCHED, False, None, ()),
+        (1, OutcomeStatus.SKIPPED_OCCURRENCE, False, None, ()),
+        (2, OutcomeStatus.UNMATCHED, False, Transformation.IDENTITY, ()),
+        (3, OutcomeStatus.SKIPPED_OCCURRENCE, False, None, ()),
+    ]
+    # And the control plane takes every record it sent.
+    records = [record for finish in recorder.finishes for record in finish["injection_outcomes"]]
+    assert [CallInjectionOutcome.model_validate(record).occurrence for record in records] == [0, 1, 2, 3]
 
 
 # --- delivery facts: what the interceptor selected, transformed and emitted ---

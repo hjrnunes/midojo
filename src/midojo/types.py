@@ -61,6 +61,12 @@ class CallInjectionOutcome(BaseModel):
     its own boundary. The interceptor records a result before it returns it,
     so a fact never says what the agent, or its model, saw. Each is None when
     the layer didn't report it (a record made before the fields).
+
+    Occurrence 0 is only for an ``unmatched`` call whose arguments didn't
+    match the instruction's ``call_arguments``: it places nothing, so its
+    facts, when reported, are empty (``selected`` False, ``transformation``
+    None, ``emitted`` empty). An ``unmatched`` outcome may also be counted
+    (occurrence 1 or more: a strict selector that didn't match).
     """
 
     instruction_index: int = Field(ge=0, description="The instruction's index in the interceptor's plan.")
@@ -69,7 +75,8 @@ class CallInjectionOutcome(BaseModel):
         ge=0,
         description=(
             "Which matching call of the instruction's this was, one-based; 0 for a call whose arguments didn't "
-            "match the instruction's `call_arguments` (`unmatched`), which isn't counted."
+            "match the instruction's `call_arguments`, which isn't counted. Only an `unmatched` outcome has "
+            "occurrence 0, and its delivery facts, when reported, are empty."
         ),
     )
     status: InjectionStatus
@@ -93,6 +100,16 @@ class CallInjectionOutcome(BaseModel):
             "it, checked after every instruction for the call. Empty when none does. None: not reported."
         ),
     )
+
+    @model_validator(mode="after")
+    def _uncounted_only_when_unmatched(self) -> "CallInjectionOutcome":
+        if self.occurrence != 0:
+            return self
+        if self.status != "unmatched":
+            raise ValueError(f"Only an unmatched outcome has occurrence 0, not a {self.status} one.")
+        if self.selected or self.transformation is not None or self.emitted:
+            raise ValueError("An outcome at occurrence 0 placed nothing: its delivery facts must be empty.")
+        return self
 
 
 class FunctionCallRecord(BaseModel):
