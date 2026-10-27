@@ -1,9 +1,8 @@
-"""Validate and evaluate a tool-call condition as ``tool-call-condition-v1`` states it.
+"""Validate and evaluate a tool-call condition as ``tool-call-condition-v2`` states it.
 
-Ported from ``asago-artifact-generator``,
-``src/asago_artifact_generator/authoring/condition_eval.py`` at commit ``9631b4e``.
 Conformance is the contract's own vectors, copied unedited into
 ``tests/fixtures/tool_call_condition/``; they must never be edited by hand.
+Validation is unchanged from ``tool-call-condition-v1``.
 
 Every comparison is true, false, or unknown (``None``). The vectors pin the
 reference implementation's behavior where it is surprising, and this module
@@ -12,19 +11,22 @@ keeps that behavior. Input the reference cannot handle returns a result here: a
 problem, and an integer beyond float range saturates to an infinity.
 
 A false ``complete`` makes inconclusive only what a missing call could change:
-a ``not_called`` no captured call breaks, and a call-level assignment no choice
-of captured calls satisfies. An ``order`` comparison itself is decided from the
-captured prior calls alone, so an operation with no captured prior is detected
-even when ``complete`` is false (the contract's
-``completeness.order-clean.complete-false`` vector), while one whose prior was
-captured is inconclusive (``completeness.order-violated.complete-false``).
+a ``not_called`` no captured call breaks, a call-level assignment no choice of
+captured calls satisfies, and an ``order`` comparison that finds no captured
+prior call (a lost record may have held it). An ``order`` comparison whose
+prior was captured is false whatever ``complete`` is.
 
-One call fact goes beyond the contract: a call whose ``blocked`` fact is
-``True`` (its tool never ran) is no prior call for an ``order`` comparison,
-with or without ``same_argument``. It still counts everywhere else, as the call
-the agent attempted: it may be the call an ``order`` or ``value`` comparison is
-assigned, and it breaks ``not_called``. The contract's calls carry no
-``blocked`` fact, so its vectors evaluate as they always did.
+``same_argument`` compares the assigned call's value with a prior call's by the
+equality of value comparisons: a boolean equals only a boolean (``true`` is not
+``1``), two numbers compare by value (``1.0`` is ``1``), and anything else by
+JSON structural equality. A prior call that lacks the argument never matches,
+even when the assigned call's value is ``null``; one whose value is ``null``
+matches a wanted ``null``.
+
+A call whose ``blocked`` fact is ``True`` (its tool never ran) is no prior call
+for an ``order`` comparison, with or without ``same_argument``. It still counts
+everywhere else, as the call the agent attempted: it may be the call an
+``order`` or ``value`` comparison is assigned, and it breaks ``not_called``.
 """
 
 from __future__ import annotations
@@ -220,7 +222,7 @@ def _assignment(
     candidates = [[index for index, call in enumerate(calls) if call.get("name") == name] for name in operations]
     if not all(candidates):
         return (False if complete else None), ()
-    picks, seen_unknown = _first_true_picks(comparisons, calls, operations, candidates)
+    picks, seen_unknown = _first_true_picks(comparisons, calls, operations, candidates, complete)
     if picks is not None:
         return True, picks
     return (None if seen_unknown or not complete else False), ()
@@ -231,13 +233,14 @@ def _first_true_picks(
     calls: Sequence[Call],
     operations: Sequence[str],
     candidates: Sequence[Sequence[int]],
+    complete: bool,
 ) -> tuple[tuple[int, ...] | None, bool]:
     """Return the first choice that makes every comparison true, and whether any was unknown."""
 
     seen_unknown = False
     for picks in itertools.product(*candidates):
         choice = dict(zip(operations, picks, strict=True))
-        truth = _all(_call_level_truth(comparison, calls, choice) for comparison in comparisons)
+        truth = _all(_call_level_truth(comparison, calls, choice, complete) for comparison in comparisons)
         if truth:
             return picks, seen_unknown
         seen_unknown = seen_unknown or truth is None
@@ -260,9 +263,11 @@ def _operations(comparisons: Sequence[Mapping[str, Any]]) -> list[str]:
     return list(dict.fromkeys(names))
 
 
-def _call_level_truth(comparison: Mapping[str, Any], calls: Sequence[Call], choice: Mapping[str, int]) -> Truth:
+def _call_level_truth(
+    comparison: Mapping[str, Any], calls: Sequence[Call], choice: Mapping[str, int], complete: bool
+) -> Truth:
     if comparison["kind"] == "order":
-        return _order_truth(comparison, calls, choice[comparison["operation"]])
+        return _order_truth(comparison, calls, choice[comparison["operation"]], complete)
     left = _operand_value(comparison["left"], calls, choice)
     right = _operand_value(comparison["right"], calls, choice)
     if left is _NO_VALUE or right is _NO_VALUE:
@@ -337,23 +342,26 @@ def _to_number(value: Any) -> float | None:
     return None
 
 
-def _order_truth(comparison: Mapping[str, Any], calls: Sequence[Call], assigned: int) -> Truth:
+def _order_truth(comparison: Mapping[str, Any], calls: Sequence[Call], assigned: int, complete: bool) -> Truth:
     required = comparison["requires_prior"]
     # A blocked call's tool never ran, so it can't be what the operation required first.
     earlier = [call for call in calls[:assigned] if call.get("name") == required and call.get("blocked") is not True]
     same = comparison.get("same_argument")
     if not same:
-        return not earlier
-    wanted = _argument_value(calls[assigned], same)
-    if wanted is _NO_VALUE:
-        return None
-    for call in earlier:
-        arguments = call.get("arguments")
-        if not isinstance(arguments, dict):
-            return None
-        if arguments.get(same) == wanted:
+        if earlier:
             return False
-    return True
+    else:
+        wanted = _argument_value(calls[assigned], same)
+        if wanted is _NO_VALUE:
+            return None
+        for call in earlier:
+            if not isinstance(call.get("arguments"), dict):
+                return None
+            value = _argument_value(call, same)
+            if value is not _NO_VALUE and _equal(value, wanted):
+                return False
+    # No prior call was captured, but a lost record may have held one.
+    return True if complete else None
 
 
 def _not_called_truth(comparison: Mapping[str, Any], calls: Sequence[Call], complete: bool) -> Truth:

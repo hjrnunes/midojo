@@ -206,7 +206,7 @@ class ToolCalled:
 
 @dataclass
 class ToolCallCondition:
-    """Passes if a ``tool-call-condition-v1`` condition holds on the agent's tool calls.
+    """Passes if a ``tool-call-condition-v2`` condition holds on the agent's tool calls.
 
     Each call is given to the evaluator with all its recorded facts. A blocked
     call counts as the call the agent attempted, as it does for
@@ -224,14 +224,13 @@ class ToolCallCondition:
     an incomplete capture, what the recorded calls decide still decides: a
     condition they satisfy holds, and a ``not_called`` a recorded call breaks
     fails. What only a missing record could decide is inconclusive: a
-    ``not_called`` no recorded call breaks, and call-level comparisons no
-    choice of recorded calls satisfies (an operation with no recorded call
-    included). An ``order`` comparison is decided from the recorded prior
-    calls alone, so an operation with no recorded prior (a blocked one
-    included) is detected even on an incomplete capture, though a lost record
-    may have held the prior: that is ``tool-call-condition-v1``'s behaviour,
-    pinned by its vectors, not MiDojo's choice. An inconclusive outcome is
-    unknown (None) with the evaluator's reason, not a pass or a fail.
+    ``not_called`` no recorded call breaks, call-level comparisons no choice
+    of recorded calls satisfies (an operation with no recorded call
+    included), and an ``order`` comparison that finds no recorded prior (a
+    blocked one included), since a lost record may have held it. An ``order``
+    comparison whose prior was recorded fails either way. An inconclusive
+    outcome is unknown (None) with the evaluator's reason, not a pass or a
+    fail.
     """
 
     condition: dict
