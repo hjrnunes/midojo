@@ -11,6 +11,14 @@ keeps that behavior. Input the reference cannot handle returns a result here: a
 ``kind``, ``source``, or ``op`` that is a list or an object is an unknown value
 problem, and an integer beyond float range saturates to an infinity.
 
+A false ``complete`` makes inconclusive only what a missing call could change:
+a ``not_called`` no captured call breaks, and a call-level assignment no choice
+of captured calls satisfies. An ``order`` comparison itself is decided from the
+captured prior calls alone, so an operation with no captured prior is detected
+even when ``complete`` is false (the contract's
+``completeness.order-clean.complete-false`` vector), while one whose prior was
+captured is inconclusive (``completeness.order-violated.complete-false``).
+
 One call fact goes beyond the contract: a call whose ``blocked`` fact is
 ``True`` (its tool never ran) is no prior call for an ``order`` comparison,
 with or without ``same_argument``. It still counts everywhere else, as the call
