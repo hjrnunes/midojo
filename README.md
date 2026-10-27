@@ -231,6 +231,8 @@ uv run --env-file .env midojo-run --suite weather --gateway openshell \
 
 `results.json` then also records every attempt (`attempt_log`: its grade, delivery and exposure, and how its target was isolated) and per-pairing counts (`metrics`).
 
+The attempts replay the suite's payloads unchanged (`StaticAttacker`); MiDojo has no adaptive attacker yet. To search for a payload that breaks the agent, drive MiDojo episodes from PyRIT or Garak instead. An adaptive attacker plugged into `run_benchmark(attacker_factory=...)` follows the same rules: it may only fill the probes the pair's injection task declares, and a success counts only once its injections break the agent again in a fresh episode from a clean start.
+
 **Compare with a clean run.** Selecting a user task without an injection task runs it without attacks, so you can compare the agent's answer with step 2's:
 
 ```bash
