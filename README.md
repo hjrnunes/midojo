@@ -344,6 +344,18 @@ Each forwarded call's record carries what the interceptor returned to the agent 
 
 By default the interception layer runs in or beside the agent (a PI extension, LangChain middleware, a fake MCP server the agent reaches) and records calls with the evaluation's session token, so the agent under test can hold that token. With it, the agent could read hidden environment state or rewrite its own record. `midojo-run --interception host` moves interception out of the agent. For each evaluation, `midojo-run` starts an MCP interceptor inside the `midojo-run` process (an asyncio server task, not a separate process). The interceptor mirrors the real MCP server at `--upstream-mcp-url`, applies the evaluation's tool-output injections, and records every call. The agent gets only that interceptor's tool endpoint: a URL and a bearer token valid for that one interceptor. It never gets a session token, the control plane's URL or token, or a run or evaluation ID. In host mode, MiDojo also withholds `UPSTREAM_MCP_URL` and `MCP_SERVER_URL`, which name the real MCP server, so the agent can't call its tools directly and skip the record.
 
+In agent mode, an OpenShell sandbox gets the session token as `MIDOJO_SESSION_TOKEN` and the control plane's URL as `MIDOJO_URL`, for an interception layer inside it, such as the weather suite's PI extension and fake MCP server. The agent can read them too. The token lets it read the evaluation's whole environment, hidden state included, replace or change it, and add or finish call records (all with `provenance` `agent`). A suite whose agent doesn't record its calls from inside the sandbox can keep the session out, with `inject_session: false` under `agent_runtime`:
+
+```yaml
+agent_runtime:
+  image: localhost/my-agent:latest
+  inject_session: false
+```
+
+The sandbox then gets neither variable, nor `MIDOJO_CONTROL_TOKEN`, even when the suite's `env_vars` set them, and it gets the random name and suite label a host-mode sandbox has. `UPSTREAM_MCP_URL` and `MCP_SERVER_URL` are kept: without an interceptor, there's no record for the agent to skip. Nothing in the sandbox records calls then, so the evaluation's `function_calls` evidence is `incomplete`, and a check that needs a call's absence grades unknown. Checks on the environment and on the OpenShell observations work as usual. In host mode the sandbox never gets the session, whatever `inject_session` says.
+
+The interceptor's token opens only its interceptor: the control plane refuses it on every route. The run-scoped routes take the control token instead, so without `MIDOJO_CONTROL_TOKEN` they're open to anything that can reach the server. Set one whenever the agent could reach the control plane, and leave the control plane out of a host-mode sandbox's network policy.
+
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `--interception agent\|host` | `agent` | where tool calls are intercepted |

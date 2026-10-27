@@ -38,7 +38,7 @@ Where each SDK stands:
 
 The control plane issues a session token for each evaluation. An interception layer sends it on every call as `Authorization: Bearer <token>`, and the token selects the evaluation's environment and call record. How the layer gets the token depends on how MiDojo reaches the agent:
 
-- The `openshell` runtime sets `MIDOJO_SESSION_TOKEN` and `MIDOJO_URL` (the control plane URL) in the sandbox's environment. The SDKs read them.
+- The `openshell` runtime sets `MIDOJO_SESSION_TOKEN` and `MIDOJO_URL` (the control plane URL) in the sandbox's environment. The SDKs read them. A suite that sets `inject_session: false` under `agent_runtime` gets neither, so no SDK in its sandbox can record.
 - For an `unmanaged` agent, `midojo-run` sends the token in the `X-Midojo-Session` request header. `midojo_sdk.mcp` reads the header from the incoming MCP request, and `midojo_sdk.session` has helpers for agents that pass it on to their own tool servers.
 
 These layers run where the agent can reach the token, so their records have `provenance` `agent`: lower-trust evidence. An evaluation intercepted this way that is sealed with no call recorded at all has its `function_calls` evidence `incomplete`, since a layer that fails open records nothing. With `midojo-run --interception host`, the host runs a `MidojoMCP` interceptor for each evaluation and keeps the session itself. The agent gets only the interceptor's URL and a bearer token for that interceptor, and the records have `provenance` `interceptor` (see [Keep the evaluation out of the agent's reach](../README.md#keep-the-evaluation-out-of-the-agents-reach)).
