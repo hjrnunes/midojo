@@ -11,6 +11,10 @@ run-scoped route. All of them refuse it, and the evaluation's environment and
 records stay as they were, through the seal. The interceptor's token calls
 tools, and nothing else.
 
+The run-scoped routes take only the control token, so a control plane served
+without one opens no host-mode evaluation over HTTP: its run-scoped routes
+would take the target's requests, or any request, as the host's.
+
 No model, no gateway, no network beyond loopback.
 """
 
@@ -31,11 +35,14 @@ from fastmcp import Client
 from openshell import ExecResult, SandboxRef, SandboxStatusRef
 
 from midojo.agent_client import OpenAIResponsesAgentClient, PIAgentClient
+from midojo.control_plane.client import ControlPlaneClient
 from midojo.control_plane.config import CONTROL_TOKEN_ENV, AppConfig
 from midojo.control_plane.inprocess_control import InProcessControlClient
 from midojo.control_plane.main import create_app
-from midojo.control_plane.service import ById
-from midojo.interception_host import HostInterceptor
+from midojo.control_plane.service import ById, ControlPlane
+from midojo.episode_context import open_episode
+from midojo.interception_host import HostInterception, HostInterceptor
+from midojo.runtimes import UnmanagedRuntime
 from midojo.runtimes.openshell import OpenShellRuntime
 from midojo.tool_endpoint import ToolEndpoint
 from tests.fixtures.scripted_target.upstream import scripted_upstream
@@ -247,3 +254,77 @@ async def test_the_interceptor_token_is_made_apart_from_the_session(host_mode):
     tokens = {host_mode.endpoint.token, again._token}
     assert len(tokens) == 2 and session_token not in tokens
     assert not any(session_token in token or token in session_token for token in tokens)
+
+
+@pytest.mark.asyncio
+async def test_a_control_plane_without_a_control_token_opens_no_host_mode_evaluation_over_http(suite):
+    # No control token: the run-scoped routes would take the target's requests, or any request, as the host's.
+    app = create_app({"weather": suite})
+    control = app.state.control
+    run = control.create_run("weather")
+    body = {"user_task_id": "weather_new_york", "interception": "host"}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url=CONTROL_URL) as http:
+        for keyed in ({}, {"idempotency_key": "k1"}):
+            refused = await http.post(f"/runs/{run.id}/evaluations", json={**body, **keyed})
+            assert refused.status_code == 403
+            assert (refused.json()["kind"], refused.json()["late_fact"]) == ("control_token_required", False)
+            assert "control token" in refused.json()["detail"]
+
+        # The orchestrator's client and the episode context get the refusal before any interceptor or runtime runs.
+        upstream_calls: list = []
+        runtime = MagicMock(wraps=UnmanagedRuntime())
+        client = ControlPlaneClient(CONTROL_URL, http=http)
+        with pytest.raises(httpx.HTTPStatusError) as raised:
+            async with open_episode(
+                suite.episode("weather_new_york"),
+                runtime=runtime,
+                interception=HostInterception(upstream=scripted_upstream(upstream_calls)),
+                control=client,
+                run_id=run.id,
+            ):
+                pytest.fail("a host-mode episode opened on a control plane without a control token")
+        assert raised.value.response.status_code == 403
+        runtime.setup.assert_not_called()
+        assert upstream_calls == []
+
+        # Nothing was created or kept: the refused key is free, and an agent-mode evaluation still opens.
+        assert control.evaluations(run.id) == []
+        agent = await http.post(
+            f"/runs/{run.id}/evaluations", json={**body, "interception": "agent", "idempotency_key": "k1"}
+        )
+        assert agent.status_code == 201, agent.text
+        assert [e.interception for e in control.evaluations(run.id)] == ["agent"]
+
+
+@pytest.mark.asyncio
+async def test_a_guarded_control_plane_opens_a_host_mode_evaluation_over_http(suite):
+    app = create_app({"weather": suite}, config=AppConfig(control_token=CONTROL_TOKEN))
+    run = app.state.control.create_run("weather")
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url=CONTROL_URL) as http:
+        client = ControlPlaneClient(CONTROL_URL, token=CONTROL_TOKEN, http=http)
+        created = await client.create_evaluation(run.id, "weather_new_york", None, {}, interception="host")
+        # The same key with the other interception is another request.
+        keyed = await client.create_evaluation(
+            run.id, "weather_new_york", None, {}, interception="host", idempotency_key="k1"
+        )
+        conflict = await http.post(
+            f"/runs/{run.id}/evaluations",
+            headers={"Authorization": f"Bearer {CONTROL_TOKEN}"},
+            json={"user_task_id": "weather_new_york", "idempotency_key": "k1"},
+        )
+    assert conflict.status_code == 409 and conflict.json()["kind"] == "idempotency_conflict"
+    stored = {e.id: e.interception for e in app.state.control.evaluations(run.id)}
+    assert stored == {created.id: "host", keyed.id: "host"}
+
+
+@pytest.mark.asyncio
+async def test_in_process_a_control_plane_without_a_control_token_still_opens_host_mode_evaluations(suite):
+    # No server, no run-scoped routes to guard.
+    control = ControlPlane({"weather": suite})
+    run = control.create_run("weather")
+    assert control.create_evaluation(run.id, "weather_new_york", interception="host").session_token
+    created = await InProcessControlClient(control).create_evaluation(
+        run.id, "weather_new_york", None, {}, interception="host"
+    )
+    assert [e.interception for e in control.evaluations(run.id)] == ["host", "host"]
+    assert created.id in {e.id for e in control.evaluations(run.id)}

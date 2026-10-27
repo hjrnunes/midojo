@@ -17,7 +17,7 @@ from fastmcp.exceptions import ToolError
 
 from midojo import orchestrator
 from midojo.agent_client import AgentClient, SimpleHTTPAgentClient
-from midojo.control_plane.config import AppConfig
+from midojo.control_plane.config import CONTROL_TOKEN_ENV, AppConfig
 from midojo.control_plane.inprocess_control import InProcessControlClient
 from midojo.control_plane.service import ControlPlane
 from midojo.interception_host import HostInterception
@@ -182,11 +182,14 @@ async def test_host_mode_is_refused_before_a_run_for_a_client_that_cant_pass_an_
 def cli_benchmark(monkeypatch):
     for name in ("MODEL_NAME", "MCP_SERVER_URL", "OPENAI_API_KEY", "UPSTREAM_MCP_URL"):
         monkeypatch.delenv(name, raising=False)
+    # Host mode needs the control plane's token; agent mode passes it through as it always did.
+    monkeypatch.setenv(CONTROL_TOKEN_ENV, CONTROL_TOKEN)
     mock = AsyncMock(return_value=orchestrator.BenchmarkOutcome(graded=1, failed=0))
     monkeypatch.setattr(orchestrator, "run_benchmark", mock)
     return mock
 
 
+CONTROL_TOKEN = "control-secret"
 PI = ["--suite", "minibank", "--agent-uri", "/agent", "--protocol", "pi"]
 OPENSHELL = ["--suite", "document_assistant", "--gateway", "g"]
 UPSTREAM = ["--upstream-mcp-url", "http://localhost:9000/mcp"]
@@ -199,6 +202,22 @@ def test_the_cli_runs_an_unmanaged_agent_in_host_mode_on_loopback(cli_benchmark)
     assert interception == HostInterception(
         upstream="http://localhost:9000/mcp", bind_host="127.0.0.1", port=0, advertise_host=None
     )
+    assert cli_benchmark.call_args.kwargs["control_token"] == CONTROL_TOKEN
+
+
+@pytest.mark.parametrize("args", [[*PI, "--interception", "host", *UPSTREAM], [*OPENSHELL, "--interception", "host"]])
+def test_the_cli_refuses_host_mode_without_a_control_token(cli_benchmark, args):
+    # Without one, the control plane's run-scoped routes are open to anything that reaches it, the agent included.
+    result = CliRunner().invoke(orchestrator.main, args, env={CONTROL_TOKEN_ENV: None})
+    assert result.exit_code == 2
+    assert f"--interception host requires --control-token or {CONTROL_TOKEN_ENV}" in result.output
+    cli_benchmark.assert_not_called()
+
+
+def test_the_cli_runs_in_agent_mode_without_a_control_token(cli_benchmark):
+    result = CliRunner().invoke(orchestrator.main, PI, env={CONTROL_TOKEN_ENV: None})
+    assert result.exit_code == 0, result.output
+    assert cli_benchmark.call_args.kwargs["control_token"] is None
 
 
 def test_the_cli_runs_in_agent_mode_by_default(cli_benchmark):

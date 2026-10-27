@@ -8,10 +8,12 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 from midojo.types import FunctionCallRecord, SuiteName
 from midojo.yaml_task_suite import YAMLTaskSuite
 
+from ..config import AppConfig
 from ..dependencies import (
     RECORD_FUNCTION_CALL_RESPONSES,
     START_FUNCTION_CALL_RESPONSES,
     created_or_replayed,
+    get_config,
     get_control,
     get_evaluation_by_id,
     get_run,
@@ -20,7 +22,7 @@ from ..dependencies import (
     validate_environment,
     validate_observations,
 )
-from ..lifecycle import json_data
+from ..lifecycle import Rejected, RejectedError, Rejection, json_data
 from ..models import (
     CaptureFailureResponse,
     CloseResponse,
@@ -89,12 +91,39 @@ async def retrieve_run(run: Annotated[Run, Depends(get_run)], control: Annotated
     )
 
 
-@router.post("/{run_id}/evaluations", response_model=CreateEvaluationResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/{run_id}/evaluations",
+    response_model=CreateEvaluationResponse,
+    status_code=status.HTTP_201_CREATED,
+    responses={
+        status.HTTP_403_FORBIDDEN: {
+            "description": (
+                "`kind` control_token_required: `interception` is host and the server has no control token. "
+                "Nothing is created or kept."
+            )
+        }
+    },
+)
 async def create_evaluation(
     req: CreateEvaluationRequest,
     run: Annotated[Run, Depends(get_run)],
     control: Annotated[ControlPlane, Depends(get_control)],
+    config: Annotated[AppConfig, Depends(get_config)],
 ):
+    """Create an evaluation in the run, and issue its session token.
+
+    A host-mode evaluation (``interception`` host) needs a server started with
+    a control token: without one, the run-scoped routes take any request, so a
+    target that reached the server could read and change its evaluation there
+    as the host. It is refused with 403 ``control_token_required``, and nothing
+    is kept. In process, a ``ControlPlane`` has no such routes to guard.
+    """
+    if req.interception == "host" and config.control_token is None:
+        detail = (
+            "Host interception needs a control plane started with a control token (MIDOJO_CONTROL_TOKEN): "
+            "without one, its run-scoped routes are open to anything that reaches it, the agent included."
+        )
+        raise RejectedError(Rejected(Rejection.CONTROL_TOKEN_REQUIRED, detail))
     return control.create_evaluation(
         run.id,
         req.user_task_id,
