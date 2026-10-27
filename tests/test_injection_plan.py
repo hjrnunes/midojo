@@ -1560,3 +1560,394 @@ async def test_appends_a_later_replace_overwrote_are_not_emitted_though_it_wrote
     first, second, last = recorder.finishes[0]["injection_outcomes"]
     assert _facts(first) == _facts(second) == ("applied", True, "identity", [])
     assert _facts(last) == ("applied", True, "identity", ["structured_content", "content_block"])
+
+
+# --- the result-record predicate: a single-object result chosen by a field of the result ---
+
+REF_1 = RecordSelector("REF-1", field="referral_id")
+REFERRALS = {"P-1": "REF-1", "P-2": "REF-2", "P-3": "REF-1"}
+
+
+class ReferralsUpstream:
+    """``get_referral(patient_id)``: one referral, whose id the call doesn't name, mirrored compactly in its text."""
+
+    async def call_tool_mcp(self, _name: str, args: dict[str, Any]) -> CallToolResult:
+        patient = args.get("patient_id")
+        referral = {"patient_id": patient, "reason": f"reason for {patient}"}
+        if patient in REFERRALS:
+            referral = {"referral_id": REFERRALS[patient]} | referral
+        text = json.dumps(referral, separators=(",", ":"))
+        return CallToolResult(content=[TextContent(type="text", text=text)], structuredContent=referral)
+
+
+class QueuedUpstream:
+    """Answers each call with the next of its results."""
+
+    def __init__(self, *results: CallToolResult) -> None:
+        self.results = list(results)
+
+    async def call_tool_mcp(self, _name: str, _args: dict[str, Any]) -> CallToolResult:
+        return self.results.pop(0)
+
+
+def _referral_instruction(result_record: Any = REF_1, **changes: Any) -> InjectionInstruction:
+    target_fields = {
+        "tool": "get_referral",
+        "surface": SelectorSurface.STRUCTURED_CONTENT,
+        "structured_content_path": ("reason",),
+        "result_record": result_record,
+    } | changes.pop("target", {})
+    return _instruction(target=InjectionTarget(**target_fields), **changes)
+
+
+async def _referrals(
+    *patients: str | None, instruction: InjectionInstruction, upstream: Any = None
+) -> tuple[list[CallToolResult], MidojoMCP, DetailedCapturingRecorder]:
+    mcp, _, recorder = _mcp(InjectionPlan((instruction,)))
+    mcp._upstream = upstream or ReferralsUpstream()  # type: ignore[assignment]
+    results = []
+    for patient in patients:
+        arguments = {} if patient is None else {"patient_id": patient}
+        results.append(_wire_result(await mcp._forward_call("get_referral", arguments)))
+    return results, mcp, recorder
+
+
+def _reason(result: CallToolResult) -> str:
+    return _structured(result)["reason"]
+
+
+def test_result_record_is_a_record_selector_on_a_tool_output_target_with_a_tool():
+    target = InjectionTarget(tool="get_referral", result_record=REF_1)
+    assert target.result_record == RecordSelector("REF-1", "referral_id")
+    assert hash(target) == hash(dataclasses.replace(target))
+    assert InjectionTarget().result_record is None
+    # It combines with call_arguments.
+    both = InjectionTarget(tool="get_referral", call_arguments={"patient_id": "P-1"}, result_record=REF_1)
+    assert (both.call_arguments, both.result_record) == ((("patient_id", "P-1"),), REF_1)
+    invalid = [
+        ({"tool": "get_referral", "result_record": {"field": "referral_id", "equals": "REF-1"}}, TypeError, "Record"),
+        ({"tool": "get_referral", "result_record": "REF-1"}, TypeError, "RecordSelector or None"),
+        ({"result_record": REF_1}, ValueError, "needs a target tool"),
+        (
+            {"surface": SelectorSurface.DESCRIPTION, "tool": "get_referral", "result_record": REF_1},
+            ValueError,
+            "only selects tool-output results",
+        ),
+        (
+            {"surface": SelectorSurface.TEMPLATE, "template_key": "t:main", "result_record": REF_1},
+            ValueError,
+            "only selects tool-output results",
+        ),
+    ]
+    for fields, error, message in invalid:
+        with pytest.raises(error, match=message):
+            InjectionTarget(**fields)
+
+
+@pytest.mark.parametrize(
+    ("selector", "structured", "mismatch"),
+    [
+        (REF_1, {"referral_id": "REF-1", "reason": "x"}, None),
+        (REF_1, {"referral_id": "REF-2"}, "result field 'referral_id' is 'REF-2', not 'REF-1'"),
+        (REF_1, {"template_id": "REF-1"}, "result field 'referral_id' is missing"),
+        (REF_1, {"referral_id": None}, "result field 'referral_id' is None, not 'REF-1'"),
+        (RecordSelector(1, "referral_id"), {"referral_id": "1"}, "result field 'referral_id' is '1', not 1"),
+        (RecordSelector("1", "referral_id"), {"referral_id": 1}, "result field 'referral_id' is 1, not '1'"),
+        (RecordSelector(1, "referral_id"), {"referral_id": True}, "result field 'referral_id' is True, not 1"),
+        (RecordSelector(7), {"id": 7}, None),
+        (REF_1, None, "result has no structured content to match field 'referral_id'"),
+        (
+            REF_1,
+            [{"referral_id": "REF-1"}],
+            "result structured content is list, not an object with field 'referral_id'",
+        ),
+    ],
+    ids=["match", "different", "missing", "null", "int-vs-str", "str-vs-int", "bool-vs-int", "id", "none", "list"],
+)
+def test_result_record_mismatch_names_the_field_and_why(selector, structured, mismatch):
+    target = InjectionTarget(tool="get_referral", result_record=selector)
+    assert target.result_record_mismatch(structured) == mismatch
+
+
+def test_a_target_without_result_record_matches_any_result():
+    assert InjectionTarget(tool="get_referral").result_record_mismatch(None) is None
+
+
+def test_plan_json_round_trip_carries_result_record_through_an_episode():
+    instruction = _referral_instruction(target={"call_arguments": {"patient_id": "P-1"}})
+    plan = InjectionPlan((instruction, _referral_instruction(RecordSelector(7))))
+    encoded = plan.to_json()
+    data = plan.to_data()
+
+    targets = [item["target"] for item in data["instructions"]]
+    assert [target["result_record"] for target in targets] == [
+        {"field": "referral_id", "equals": "REF-1"},
+        {"field": "id", "equals": 7},
+    ]
+    assert targets[0]["call_arguments"] == {"patient_id": "P-1"}
+    assert InjectionPlan.from_json(encoded) == InjectionPlan.from_data(data) == plan == Episode(plan=plan).plan
+    assert InjectionPlan.from_json(encoded).to_json() == encoded
+
+
+def test_plan_data_with_result_record_and_no_field_selects_id():
+    data = InjectionPlan((_referral_instruction(),)).to_data()
+    data["instructions"][0]["target"]["result_record"] = {"equals": "REF-1"}
+
+    [instruction] = InjectionPlan.from_data(data)
+
+    assert instruction.target.result_record == RecordSelector("REF-1")
+
+
+def test_plan_data_without_result_record_decodes_and_encodes_as_before():
+    plan = InjectionPlan((_instruction(), _order_instruction(), _referral_instruction(None)))
+    data = plan.to_data()
+
+    assert all("result_record" not in item["target"] for item in data["instructions"])
+    decoded = InjectionPlan.from_data(data)
+    assert [item.target.result_record for item in decoded] == [None, None, None]
+    assert decoded.to_json() == plan.to_json()
+
+
+@pytest.mark.parametrize(
+    "result_record",
+    [
+        None,
+        "REF-1",
+        ["referral_id", "REF-1"],
+        {"field": "referral_id"},
+        {"field": "referral_id", "equals": True},
+        {"field": "referral_id", "equals": 1.5},
+        {"field": "referral_id", "equals": None},
+        {"field": "", "equals": "REF-1"},
+        {"field": 1, "equals": "REF-1"},
+        {"field": "referral_id", "equals": "REF-1", "nested": True},
+    ],
+    ids=["null", "string", "array", "no-equals", "bool", "float", "null-value", "empty-field", "int-field", "extra"],
+)
+def test_plan_data_refuses_a_result_record_that_is_not_a_record_selector(result_record):
+    data = InjectionPlan((_referral_instruction(),)).to_data()
+    data["instructions"][0]["target"]["result_record"] = result_record
+    with pytest.raises(ValueError, match="invalid injection plan data"):
+        InjectionPlan.from_data(data)
+
+
+def test_plan_data_refuses_a_result_record_without_a_tool():
+    data = InjectionPlan((_referral_instruction(),)).to_data()
+    data["instructions"][0]["target"]["tool"] = None
+    with pytest.raises(ValueError, match="result_record needs a target tool"):
+        InjectionPlan.from_data(data)
+
+
+def test_an_interceptor_without_result_record_matching_reports_a_capability_gap():
+    plan = InjectionPlan((_referral_instruction(),))
+    unaware = dataclasses.replace(MIDOJO_MCP_CAPABILITY, result_record=False)
+
+    assert MIDOJO_MCP_CAPABILITY.result_record is True
+    assert [(gap.aspect, gap.value) for gap in capability_gaps(plan, unaware)] == [("result_record", "referral_id")]
+    assert capability_gaps(plan, MIDOJO_MCP_CAPABILITY) == ()
+    assert capability_gaps(InjectionPlan((_order_instruction(),)), unaware) == ()
+    assert "instruction 0 result_record='referral_id'" in str(CapabilityError(capability_gaps(plan, unaware)))
+
+
+@pytest.mark.asyncio
+async def test_only_the_result_whose_field_matches_is_changed_and_the_others_say_why():
+    instruction = _referral_instruction(occurrence=OccurrenceRule(Occurrence.EVERY), mode=InjectionMode.REPLACE)
+
+    # P-2 answers REF-2, P-4 a referral with no referral_id, P-1 REF-1.
+    results, mcp, recorder = await _referrals("P-2", "P-4", "P-1", instruction=instruction)
+
+    assert [_reason(result) for result in results] == ["reason for P-2", "reason for P-4", " INJECTED"]
+    assert [_texts(result) for result in results][2] == [
+        json.dumps({"referral_id": "REF-1", "patient_id": "P-1", "reason": " INJECTED"}, separators=(",", ":"))
+    ]
+    assert [(o.status, o.occurrence, o.admission_order, o.detail) for o in mcp.injection_outcomes] == [
+        (OutcomeStatus.UNMATCHED, 0, 1, "result field 'referral_id' is 'REF-2', not 'REF-1'; result unchanged"),
+        (OutcomeStatus.UNMATCHED, 0, 2, "result field 'referral_id' is missing; result unchanged"),
+        (OutcomeStatus.APPLIED, 1, 3, MIRRORED),
+    ]
+    # A result that doesn't match placed nothing: nothing selected, transformed or emitted.
+    assert [_facts(finish["injection_outcomes"][0]) for finish in recorder.finishes] == [
+        ("unmatched", False, None, []),
+        ("unmatched", False, None, []),
+        ("applied", True, "identity", ["structured_content", "content_block"]),
+    ]
+    assert [finish["structured_content"] for finish in recorder.finishes] == [r.structuredContent for r in results]
+    # And the control plane takes every record it sent.
+    records = [record for finish in recorder.finishes for record in finish["injection_outcomes"]]
+    assert [CallInjectionOutcome.model_validate(record).occurrence for record in records] == [0, 0, 1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("rule", "injected"),
+    [
+        (OccurrenceRule(Occurrence.FIRST), [False, True, False, False, False]),
+        (OccurrenceRule(Occurrence.NTH, 2), [False, False, False, True, False]),
+        (OccurrenceRule(Occurrence.EVERY), [False, True, False, True, True]),
+    ],
+    ids=["first", "nth-2", "every"],
+)
+async def test_occurrences_count_only_results_whose_field_matches(rule, injected):
+    # P-1 and P-3 both answer REF-1.
+    results, mcp, _ = await _referrals(
+        "P-2", "P-1", "P-2", "P-3", "P-1", instruction=_referral_instruction(occurrence=rule)
+    )
+
+    assert [_reason(result).endswith(" INJECTED") for result in results] == injected
+    assert [outcome.occurrence for outcome in mcp.injection_outcomes] == [0, 1, 0, 2, 3]
+    statuses = [outcome.status for outcome in mcp.injection_outcomes]
+    assert [status is OutcomeStatus.UNMATCHED for status in statuses] == [True, False, True, False, False]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("selector", "result", "detail"),
+    [
+        (
+            RecordSelector(1, "referral_id"),
+            _text_result('{"referral_id":"1"}', structured={"referral_id": "1"}),
+            "result field 'referral_id' is '1', not 1; result unchanged",
+        ),
+        (
+            RecordSelector("1", "referral_id"),
+            _text_result('{"referral_id":1}', structured={"referral_id": 1}),
+            "result field 'referral_id' is 1, not '1'; result unchanged",
+        ),
+        (
+            REF_1,
+            _text_result("Referral REF-1: reason"),
+            "result has no structured content to match field 'referral_id'; result unchanged",
+        ),
+    ],
+    ids=["int-vs-str", "str-vs-int", "no-structured-content"],
+)
+@pytest.mark.parametrize("policy", list(MismatchPolicy))
+@pytest.mark.parametrize("surface", ["structured", "content"])
+async def test_a_result_that_cant_match_is_left_unchanged_whatever_the_policy(
+    selector, result, detail, policy, surface
+):
+    target = {"result_record": selector}
+    if surface == "content":
+        target |= {"surface": SelectorSurface.CONTENT_BLOCK, "structured_content_path": (), "content_block_index": 0}
+    instruction = _referral_instruction(target=target, mismatch_policy=policy)
+    texts = _texts(result)
+
+    [returned], mcp, recorder = await _referrals("P-1", instruction=instruction, upstream=FixedUpstream(result))
+
+    assert _texts(returned) == texts
+    assert returned.structuredContent == result.structuredContent
+    [outcome] = mcp.injection_outcomes
+    assert (outcome.status, outcome.occurrence, outcome.detail) == (OutcomeStatus.UNMATCHED, 0, detail)
+    assert [_facts(record) for record in recorder.finishes[0]["injection_outcomes"]] == [("unmatched", False, None, [])]
+
+
+@pytest.mark.asyncio
+async def test_structured_content_that_isnt_an_object_never_matches():
+    listed = CallToolResult.model_construct(
+        content=[TextContent(type="text", text="[]")], structuredContent=[{"referral_id": "REF-1"}]
+    )
+    mcp, _, recorder = _mcp(InjectionPlan((_referral_instruction(),)))
+    mcp._upstream = FixedUpstream(listed)  # type: ignore[assignment]
+
+    # FastMCP itself refuses to return structured content that isn't an object; the call's outcome is decided first.
+    with pytest.raises(ValueError, match="structured_content must be a dict"):
+        await mcp._forward_call("get_referral", {"patient_id": "P-1"})
+
+    [outcome] = mcp.injection_outcomes
+    detail = "result structured content is list, not an object with field 'referral_id'; result unchanged"
+    assert (outcome.status, outcome.occurrence, outcome.detail) == (OutcomeStatus.UNMATCHED, 0, detail)
+    assert [_facts(record) for record in recorder.finishes[0]["injection_outcomes"]] == [("unmatched", False, None, [])]
+
+
+@pytest.mark.asyncio
+async def test_a_content_block_target_is_decided_by_the_structured_content_too():
+    target = {"surface": SelectorSurface.CONTENT_BLOCK, "structured_content_path": (), "content_block_index": 0}
+    instruction = _referral_instruction(target=target, occurrence=OccurrenceRule(Occurrence.EVERY))
+
+    unmatched, matched = (await _referrals("P-2", "P-1", instruction=instruction))[0]
+
+    assert _texts(unmatched) == ['{"referral_id":"REF-2","patient_id":"P-2","reason":"reason for P-2"}']
+    assert _texts(matched) == ['{"referral_id":"REF-1","patient_id":"P-1","reason":"reason for P-1"} INJECTED']
+
+
+@pytest.mark.asyncio
+async def test_result_record_and_call_arguments_must_both_match():
+    instruction = _referral_instruction(
+        target={"call_arguments": {"patient_id": "P-3"}}, occurrence=OccurrenceRule(Occurrence.EVERY)
+    )
+
+    # P-1 answers REF-1 but isn't P-3; P-3 answers REF-1; P-2 is neither.
+    results, mcp, _ = await _referrals("P-1", "P-3", "P-2", instruction=instruction)
+
+    assert [_reason(result).endswith(" INJECTED") for result in results] == [False, True, False]
+    # A call argument miss is decided before the call, so it's the one named.
+    assert [(o.status, o.occurrence, o.detail) for o in mcp.injection_outcomes] == [
+        (OutcomeStatus.UNMATCHED, 0, "call argument 'patient_id' is 'P-1', not 'P-3'; result unchanged"),
+        (OutcomeStatus.APPLIED, 1, MIRRORED),
+        (OutcomeStatus.UNMATCHED, 0, "call argument 'patient_id' is 'P-2', not 'P-3'; result unchanged"),
+    ]
+
+    results, mcp, _ = await _referrals(
+        "P-2", instruction=_referral_instruction(target={"call_arguments": {"patient_id": "P-2"}})
+    )
+    [outcome] = mcp.injection_outcomes
+    assert (outcome.status, outcome.occurrence, outcome.detail) == (
+        OutcomeStatus.UNMATCHED,
+        0,
+        "result field 'referral_id' is 'REF-2', not 'REF-1'; result unchanged",
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_result_record_is_read_from_the_upstream_result_before_any_instruction_changes_it():
+    # The first instruction rewrites the field the second matches on; the second still sees the upstream's value.
+    rewrite = _referral_instruction(
+        None, target={"structured_content_path": ("referral_id",)}, payload="REF-9", mode=InjectionMode.REPLACE
+    )
+    matching = _referral_instruction()
+
+    mcp, _, _ = _mcp(InjectionPlan((rewrite, matching)))
+    mcp._upstream = ReferralsUpstream()  # type: ignore[assignment]
+    result = _wire_result(await mcp._forward_call("get_referral", {"patient_id": "P-1"}))
+
+    assert _structured(result) == {"referral_id": "REF-9", "patient_id": "P-1", "reason": "reason for P-1 INJECTED"}
+    assert [(o.instruction_index, o.status) for o in mcp.injection_outcomes] == [
+        (0, OutcomeStatus.APPLIED),
+        (1, OutcomeStatus.APPLIED),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_call_with_no_result_is_no_occurrence_of_a_result_record():
+    class FailingUpstream:
+        async def call_tool_mcp(self, name: str, args: dict[str, Any]) -> CallToolResult:
+            raise RuntimeError("upstream failed")
+
+    instruction = _referral_instruction(occurrence=OccurrenceRule(Occurrence.FIRST))
+    mcp, _, recorder = _mcp(InjectionPlan((instruction,)))
+    mcp._upstream = FailingUpstream()  # type: ignore[assignment]
+    with pytest.raises(RuntimeError):
+        await mcp._forward_call("get_referral", {"patient_id": "P-1"})
+    mcp._upstream = ReferralsUpstream()  # type: ignore[assignment]
+    result = _wire_result(await mcp._forward_call("get_referral", {"patient_id": "P-1"}))
+
+    # The failed call wasn't counted, so the first result that matches is still the first occurrence.
+    assert _reason(result) == "reason for P-1 INJECTED"
+    assert [(o.status, o.occurrence, o.detail) for o in mcp.injection_outcomes] == [
+        (OutcomeStatus.UNMATCHED, 0, "upstream produced no tool result to match a result record"),
+        (OutcomeStatus.APPLIED, 1, MIRRORED),
+    ]
+    assert _facts(recorder.finishes[0]["injection_outcomes"][0]) == ("unmatched", False, None, [])
+
+
+@pytest.mark.asyncio
+async def test_size_limit_applies_to_the_matched_result_only():
+    instruction = _referral_instruction(occurrence=OccurrenceRule(Occurrence.EVERY), size_limit=1)
+
+    results, mcp, _ = await _referrals("P-2", "P-1", instruction=instruction)
+
+    assert [_reason(result) for result in results] == ["reason for P-2", "reason for P-1"]
+    assert [(o.status, o.occurrence) for o in mcp.injection_outcomes] == [
+        (OutcomeStatus.UNMATCHED, 0),
+        (OutcomeStatus.TOO_LARGE, 1),
+    ]

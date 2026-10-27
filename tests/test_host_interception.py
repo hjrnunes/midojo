@@ -379,6 +379,76 @@ async def test_an_argument_mismatch_recorded_over_http_reads_back_sealed_over_ht
     await backend.aclose()
 
 
+REFERRALS = {"P-1": "REF-1", "P-2": "REF-2", "P-3": "REF-1"}
+
+
+def referrals_upstream() -> FastMCP:
+    """A single-record lookup by patient: the referral's id is in its result only, as FastMCP mirrors it in its text."""
+    upstream = FastMCP("referrals")
+
+    @upstream.tool()
+    def get_referral(patient_id: str) -> dict:
+        return {"referral_id": REFERRALS[patient_id], "patient_id": patient_id, "reason": f"reason for {patient_id}"}
+
+    return upstream
+
+
+def referral_plan(mode: InjectionMode, **changes) -> InjectionPlan:
+    return InjectionPlan(
+        (
+            InjectionInstruction(
+                channel=Channel.TOOL_OUTPUT,
+                payload=" INJECTED",
+                target=InjectionTarget(
+                    tool="get_referral",
+                    surface=SelectorSurface.STRUCTURED_CONTENT,
+                    structured_content_path=("reason",),
+                    result_record=RecordSelector("REF-1", field="referral_id"),
+                ),
+                mode=mode,
+                probe_key="referrals:reason",
+                **changes,
+            ),
+        )
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("mode", "reason"), [(InjectionMode.REPLACE, " INJECTED"), (InjectionMode.APPEND, None)])
+async def test_host_interceptor_places_a_payload_only_on_the_result_whose_record_matches(control, serve, mode, reason):
+    run, evaluation = open_evaluation(control)
+    recorder = InProcessControlClient(control).recorder(evaluation.session_token)
+    plan = referral_plan(mode, occurrence=OccurrenceRule(Occurrence.NTH, 2))
+    interceptor = HostInterceptor(recorder, upstream=referrals_upstream(), evaluation_id=evaluation.id, plan=plan)
+
+    endpoint = await serve(interceptor)
+    async with Client(endpoint.url, auth=endpoint.token) as target:
+        results = [
+            await target.call_tool_mcp("get_referral", {"patient_id": patient}) for patient in ("P-1", "P-2", "P-3")
+        ]
+    calls = (await control.complete(run.id, evaluation.id, "done")).function_calls
+
+    def referral(patient: str, reason: str | None = None) -> dict:
+        return {"referral_id": REFERRALS[patient], "patient_id": patient, "reason": reason or f"reason for {patient}"}
+
+    expected = [referral("P-1"), referral("P-2"), referral("P-3", reason or "reason for P-3 INJECTED")]
+    # nth=2 is the second result whose referral_id is REF-1, not the second call; the text mirrors what was placed.
+    assert [result.structuredContent for result in results] == expected
+    assert [agent_text(result) for result in results] == [json.dumps(r, separators=(",", ":")) for r in expected]
+    assert [(o.status, o.occurrence, o.detail) for o in interceptor.injection_outcomes] == [
+        (OutcomeStatus.SKIPPED_OCCURRENCE, 1, "occurrence rule did not select this call"),
+        (OutcomeStatus.UNMATCHED, 0, "result field 'referral_id' is 'REF-2', not 'REF-1'; result unchanged"),
+        (OutcomeStatus.APPLIED, 2, "exact selector matched; mirrored text re-serialised"),
+    ]
+    # The sealed records are what the agent got, each with its own outcome.
+    assert [(c.args, c.structured_content) for c in calls] == [({"patient_id": r["patient_id"]}, r) for r in expected]
+    assert [[(o.probe_key, o.occurrence, o.status, o.detail) for o in sealed_outcomes(c)] for c in calls] == [
+        [("referrals:reason", o.occurrence, o.status.value, o.detail)] for o in interceptor.injection_outcomes
+    ]
+    unmatched = sealed_outcomes(calls[1])[0]
+    assert (unmatched.selected, unmatched.transformation, unmatched.emitted) == (False, None, [])
+
+
 @pytest.mark.asyncio
 async def test_one_evaluations_credential_and_address_are_refused_by_another_evaluations_interceptor(control, serve):
     first_run, first = open_evaluation(control)

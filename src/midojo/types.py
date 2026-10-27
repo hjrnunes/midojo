@@ -63,7 +63,8 @@ class CallInjectionOutcome(BaseModel):
     the layer didn't report it (a record made before the fields).
 
     Occurrence 0 is only for an ``unmatched`` call whose arguments didn't
-    match the instruction's ``call_arguments``: it places nothing, so its
+    match the instruction's ``call_arguments``, or whose result didn't match
+    its ``result_record``: it places nothing, so its
     facts, when reported, are empty (``selected`` False, ``transformation``
     None, ``emitted`` empty). An ``unmatched`` outcome may also be counted
     (occurrence 1 or more: a strict selector that didn't match).
@@ -75,8 +76,9 @@ class CallInjectionOutcome(BaseModel):
         ge=0,
         description=(
             "Which matching call of the instruction's this was, one-based; 0 for a call whose arguments didn't "
-            "match the instruction's `call_arguments`, which isn't counted. Only an `unmatched` outcome has "
-            "occurrence 0, and its delivery facts, when reported, are empty."
+            "match the instruction's `call_arguments`, or whose result didn't match its `result_record`, which "
+            "isn't counted. Only an `unmatched` outcome has occurrence 0, and its delivery facts, when reported, "
+            "are empty."
         ),
     )
     status: InjectionStatus
@@ -89,8 +91,8 @@ class CallInjectionOutcome(BaseModel):
         default=None,
         description=(
             "The transformation applied to the payload. None when it was never transformed (its occurrence rule "
-            "skipped the call, the call's arguments didn't match its `call_arguments`, or there was no result) or "
-            "the layer didn't report it."
+            "skipped the call, the call's arguments didn't match its `call_arguments` or its result its "
+            "`result_record`, or there was no result) or the layer didn't report it."
         ),
     )
     emitted: list[ResultPart] | None = Field(
@@ -165,8 +167,8 @@ class FunctionCallRecord(BaseModel):
         description=(
             "How each injection instruction that matched the call fared, as the interception layer reported it: "
             "the instructions it admitted for the call, those whose `call_arguments` the call's arguments didn't "
-            "match (`unmatched`, occurrence 0), and those whose occurrence rule skipped it "
-            "(`skipped_occurrence`); `partial` when only `structured_content` carries the payload. Empty when no "
+            "match or whose `result_record` its result didn't (`unmatched`, occurrence 0), and those whose "
+            "occurrence rule skipped it (`skipped_occurrence`); `partial` when only `structured_content` carries the payload. Empty when no "
             "instruction matched. None when the layer recorded the call's text only (a plain finish, a layer or "
             "recorder without details, or a record made before the field): the record then doesn't say whether "
             "the result had structured content or an injection was placed in it."

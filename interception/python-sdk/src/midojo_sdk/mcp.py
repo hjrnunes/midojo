@@ -85,10 +85,14 @@ MIDOJO_MCP_CAPABILITY = InterceptorCapability(
     transformations=frozenset(Transformation),
     mismatch_policies=frozenset(MismatchPolicy),
     call_arguments=True,
+    result_record=True,
 )
 """Placements the MCP forwarding interceptor implements for mirrored tool results without degradation."""
 
 type _AdmittedInstruction = tuple[str, int, InjectionInstruction, int, int]
+# Scope, index, instruction and admission order of an instruction whose target's result_record decides, once the
+# result is in, whether the call is an occurrence of it.
+type _PendingInstruction = tuple[str, int, InjectionInstruction, int]
 
 
 class UpstreamClient:
@@ -481,17 +485,19 @@ class MidojoMCP:
 
     async def _admit_injections(
         self, scope: str, call_id: str, name: str, arguments: dict[str, Any]
-    ) -> tuple[list[_AdmittedInstruction], list[InjectionOutcome]]:
+    ) -> tuple[list[_AdmittedInstruction], list[InjectionOutcome], list[_PendingInstruction]]:
         """Number matches under a lock before forwarding; that is admission order.
 
-        Returns the instructions admitted for the call, and the outcomes of
-        those whose call arguments didn't match it (``unmatched``, occurrence
-        0: the call isn't counted) or whose occurrence rule skipped it.
+        Returns the instructions admitted for the call, the outcomes of those
+        whose call arguments didn't match it (``unmatched``, occurrence 0: the
+        call isn't counted) or whose occurrence rule skipped it, and those
+        whose ``result_record`` the result decides (see ``_admit_on_result``).
         """
         admitted: list[_AdmittedInstruction] = []
         skipped: list[InjectionOutcome] = []
+        pending: list[_PendingInstruction] = []
         async with self._plan_lock:
-            counts = self._occurrences.setdefault(scope, [0] * len(self._plan))
+            self._occurrences.setdefault(scope, [0] * len(self._plan))
             order = self._admissions.get(scope, 0) + 1
             self._admissions[scope] = order
             for index, instruction in enumerate(self._plan):
@@ -512,11 +518,28 @@ class MidojoMCP:
                         )
                     )
                     continue
-                counts[index] += 1
-                occurrence = counts[index]
-                if instruction.occurrence.selects(occurrence):
-                    admitted.append((scope, index, instruction, occurrence, order))
-                else:
+                if instruction.target.result_record is not None:
+                    pending.append((scope, index, instruction, order))
+                    continue
+                self._count(scope, index, instruction, call_id, name, order, admitted, skipped)
+            self._outcomes.extend(skipped)
+        return admitted, skipped, pending
+
+    async def _admit_on_result(
+        self, call_id: str, name: str, structured_content: Any, pending: Sequence[_PendingInstruction]
+    ) -> tuple[list[_AdmittedInstruction], list[InjectionOutcome]]:
+        """Number the pending instructions whose ``result_record`` the result matches, as they arrive.
+
+        The result is the upstream's, before any instruction changed it. One
+        that doesn't match is ``unmatched`` at occurrence 0, like a call
+        argument miss: the call isn't counted, so occurrence rules count only
+        results that match, in the order they come back.
+        """
+        admitted: list[_AdmittedInstruction] = []
+        skipped: list[InjectionOutcome] = []
+        async with self._plan_lock:
+            for scope, index, instruction, order in pending:
+                if (mismatch := instruction.target.result_record_mismatch(structured_content)) is not None:
                     skipped.append(
                         _outcome(
                             scope,
@@ -524,14 +547,67 @@ class MidojoMCP:
                             instruction,
                             call_id,
                             name,
-                            occurrence,
+                            0,
                             order,
-                            OutcomeStatus.SKIPPED_OCCURRENCE,
-                            "occurrence rule did not select this call",
+                            OutcomeStatus.UNMATCHED,
+                            f"{mismatch}; result unchanged",
                         )
                     )
+                    continue
+                self._count(scope, index, instruction, call_id, name, order, admitted, skipped)
             self._outcomes.extend(skipped)
         return admitted, skipped
+
+    def _count(
+        self,
+        scope: str,
+        index: int,
+        instruction: InjectionInstruction,
+        call_id: str,
+        name: str,
+        order: int,
+        admitted: list[_AdmittedInstruction],
+        skipped: list[InjectionOutcome],
+    ) -> None:
+        """Count a matching call as the instruction's next occurrence; the caller holds the plan lock."""
+        counts = self._occurrences[scope]
+        counts[index] += 1
+        occurrence = counts[index]
+        if instruction.occurrence.selects(occurrence):
+            admitted.append((scope, index, instruction, occurrence, order))
+        else:
+            skipped.append(
+                _outcome(
+                    scope,
+                    index,
+                    instruction,
+                    call_id,
+                    name,
+                    occurrence,
+                    order,
+                    OutcomeStatus.SKIPPED_OCCURRENCE,
+                    "occurrence rule did not select this call",
+                )
+            )
+
+    def _report_unread(self, call_id: str, name: str, pending: Sequence[_PendingInstruction]) -> list[InjectionOutcome]:
+        """With no result, no ``result_record`` matched: the call isn't counted for those instructions."""
+        outcomes = [
+            _outcome(
+                scope,
+                index,
+                instruction,
+                call_id,
+                name,
+                0,
+                order,
+                OutcomeStatus.UNMATCHED,
+                "upstream produced no tool result to match a result record",
+            )
+            for scope, index, instruction, order in pending
+        ]
+        self._outcomes.extend(outcomes)
+        return outcomes
 
     def _report_no_result(
         self, call_id: str, name: str, admitted: Sequence[_AdmittedInstruction]
@@ -593,13 +669,19 @@ class MidojoMCP:
         await self._refuse(recorder, name, arguments)
         call_id = str(uuid.uuid4())
         await recorder.start_call(call_id=call_id, function=name, args=arguments, disposition="forwarded")
-        admitted, skipped = (
-            await self._admit_injections(self._evaluation_scope(), call_id, name, arguments) if self._plan else ([], [])
+        admitted, skipped, pending = (
+            await self._admit_injections(self._evaluation_scope(), call_id, name, arguments)
+            if self._plan
+            else ([], [], [])
         )
         try:
             result = await self._upstream.call_tool_mcp(name, arguments)
         except McpError as e:
-            outcomes = [*skipped, *self._report_no_result(call_id, name, admitted)]
+            outcomes = [
+                *skipped,
+                *self._report_unread(call_id, name, pending),
+                *self._report_no_result(call_id, name, admitted),
+            ]
             message = e.error.message
             await _finish_forwarded(recorder, call_id, name, arguments, message, message, None, outcomes)
             errors = _protocol_errors.get()
@@ -607,14 +689,23 @@ class MidojoMCP:
                 errors.append(e)
             raise
         except Exception as e:
-            outcomes = [*skipped, *self._report_no_result(call_id, name, admitted)]
+            outcomes = [
+                *skipped,
+                *self._report_unread(call_id, name, pending),
+                *self._report_no_result(call_id, name, admitted),
+            ]
             await _finish_forwarded(recorder, call_id, name, arguments, str(e), str(e), None, outcomes)
             raise
         except BaseException:
             # Cancellation leaves the started disposition record unfinished,
-            # but this admitted call still consumed its occurrence.
+            # but this admitted call still consumed its occurrence. A pending one never became an occurrence.
+            self._report_unread(call_id, name, pending)
             self._report_no_result(call_id, name, admitted)
             raise
+        if pending:
+            more, unmatched = await self._admit_on_result(call_id, name, result.structuredContent, pending)
+            admitted = sorted([*admitted, *more], key=lambda admission: admission[1])
+            skipped = [*skipped, *unmatched]
         placements = []
         # One key per content block and per structured field written, tracking each through the instructions
         # (see _track and _track_field).

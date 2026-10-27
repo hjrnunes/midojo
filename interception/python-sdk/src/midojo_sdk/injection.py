@@ -86,7 +86,8 @@ class OutcomeStatus(enum.StrEnum):
     doesn't carry: the result's text isn't a JSON mirror of its structured
     content, so only ``structuredContent`` has the payload. ``unmatched`` is
     also a call to the target's tool whose arguments don't match its
-    ``call_arguments``, whatever the mismatch policy; its occurrence is 0.
+    ``call_arguments``, or whose result doesn't match its ``result_record``,
+    whatever the mismatch policy; its occurrence is 0.
     """
 
     APPLIED = "applied"
@@ -111,6 +112,17 @@ class InjectionTarget:
     arguments don't match isn't an occurrence of the instruction: it isn't
     counted, and its result is left unchanged with an ``unmatched`` outcome
     that names the argument.
+
+    ``result_record`` restricts it the same way by the result instead: the
+    call's structured content must be an object whose ``field`` exactly
+    equals ``value``, by the list record selector's rules. It is for a tool
+    that returns one record whose id is in the result only
+    (``get_referral(patient_id)`` answering ``{"referral_id": "REF-1", ...}``);
+    when the id is an argument of the call, use ``call_arguments``. Both may
+    be given, and both must match. A result with no structured content, or
+    structured content that isn't an object, never matches, whatever the
+    target's surface: a content-block target is decided by the structured
+    content too.
     """
 
     tool: str | None
@@ -121,6 +133,7 @@ class InjectionTarget:
     template_path: FieldPath
     template_key: str | None
     call_arguments: CallArguments
+    result_record: RecordSelector | None
 
     def __init__(
         self,
@@ -132,6 +145,7 @@ class InjectionTarget:
         template_path: FieldPath = (),
         template_key: str | None = None,
         call_arguments: CallArgumentsInput = (),
+        result_record: RecordSelector | None = None,
     ) -> None:
         # Written out, not generated, so that it takes either form of call_arguments while the attribute is typed
         # as the pairs it always holds.
@@ -151,6 +165,14 @@ class InjectionTarget:
                 raise ValueError("call_arguments only select tool-output calls")
             if self.tool is None:
                 raise ValueError("call_arguments need a target tool")
+        object.__setattr__(self, "result_record", result_record)
+        if self.result_record is not None:
+            if type(self.result_record) is not RecordSelector:
+                raise TypeError("result_record must be a RecordSelector or None")
+            if self.surface not in {SelectorSurface.CONTENT_BLOCK, SelectorSurface.STRUCTURED_CONTENT}:
+                raise ValueError("result_record only selects tool-output results")
+            if self.tool is None:
+                raise ValueError("result_record needs a target tool")
         _optional_str(self.content_block_type, "content block type")
         _optional_str(self.template_key, "template key")
         if self.content_block_index is not None and (
@@ -183,6 +205,22 @@ class InjectionTarget:
             elif not _same_scalar(arguments[name], expected):
                 problems.append(f"call argument {name!r} is {arguments[name]!r}, not {expected!r}")
         return "; ".join(problems) or None
+
+    def result_record_mismatch(self, structured_content: Any) -> str | None:
+        """Why a result with ``structured_content`` doesn't match ``result_record``, or None when it does."""
+        if self.result_record is None:
+            return None
+        name, expected = self.result_record.field, self.result_record.value
+        if structured_content is None:
+            return f"result has no structured content to match field {name!r}"
+        if not isinstance(structured_content, dict):
+            kind = type(structured_content).__name__
+            return f"result structured content is {kind}, not an object with field {name!r}"
+        if name not in structured_content:
+            return f"result field {name!r} is missing"
+        if not _same_scalar(structured_content[name], expected):
+            return f"result field {name!r} is {structured_content[name]!r}, not {expected!r}"
+        return None
 
 
 @dataclass(frozen=True)
@@ -342,7 +380,9 @@ class InjectionPlan:
         selector is ``{"field": "id", "equals": "NOTE-1"}``; ``from_json``
         also accepts an omitted ``field``, which defaults to ``id``. A
         target's ``call_arguments`` is a JSON object of argument names to
-        scalar values, ``{"order_id": "ORD-102"}``, left out when empty.
+        scalar values, ``{"order_id": "ORD-102"}``, left out when empty, and
+        its ``result_record`` a record selector,
+        ``{"field": "referral_id", "equals": "REF-1"}``, left out when None.
         """
         return json.dumps(self.to_data(), sort_keys=True, separators=(",", ":"))
 
@@ -370,7 +410,11 @@ class InjectionPlan:
 
 @dataclass(frozen=True)
 class InterceptorCapability:
-    """What an interceptor places exactly; ``call_arguments`` says it matches a target's call arguments."""
+    """What an interceptor places exactly.
+
+    ``call_arguments`` says it matches a target's call arguments, and
+    ``result_record`` that it matches a target's result record.
+    """
 
     channels: frozenset[Channel]
     selector_surfaces: frozenset[SelectorSurface]
@@ -379,6 +423,7 @@ class InterceptorCapability:
     transformations: frozenset[Transformation]
     mismatch_policies: frozenset[MismatchPolicy]
     call_arguments: bool = False
+    result_record: bool = False
 
 
 @dataclass(frozen=True)
@@ -405,7 +450,8 @@ class InjectionOutcome:
     in the call's result. ``transformation`` is the transformation applied to
     the payload, None when the payload was never transformed (the occurrence
     rule skipped the call, the call's arguments didn't match the target's
-    ``call_arguments``, or there was no result). ``emitted`` names the
+    ``call_arguments`` or its result the target's ``result_record``, or there
+    was no result). ``emitted`` names the
     parts of the result the interceptor returned that carry the transformed
     payload where it placed it (``content_block``, ``structured_content``),
     checked on the result as returned, after every instruction for the call:
@@ -413,7 +459,9 @@ class InjectionOutcome:
     not about what the agent or its model saw.
 
     Occurrence 0 is only for a call whose arguments didn't match the target's
-    ``call_arguments``: an ``unmatched`` outcome that placed nothing, so
+    ``call_arguments``, or whose result didn't match its ``result_record``
+    (an upstream that produced no result included): an ``unmatched`` outcome
+    that placed nothing, so
     building any other at occurrence 0 raises ValueError. ``unmatched`` is
     also counted (a strict selector that didn't match is occurrence 1 or more).
     """
@@ -462,6 +510,8 @@ def capability_gaps(
         if instruction.target.call_arguments and not capability.call_arguments:
             names = ",".join(name for name, _ in instruction.target.call_arguments)
             gaps.append(CapabilityGap(index, "call_arguments", names))
+        if instruction.target.result_record is not None and not capability.result_record:
+            gaps.append(CapabilityGap(index, "result_record", instruction.target.result_record.field))
     return tuple(gaps)
 
 
@@ -575,10 +625,14 @@ def _path_to_data(path: FieldPath) -> list[str | int | dict[str, str | int]]:
     encoded: list[str | int | dict[str, str | int]] = []
     for part in path:
         if isinstance(part, RecordSelector):
-            encoded.append({"field": part.field, "equals": part.value})
+            encoded.append(_selector_to_data(part))
         else:
             encoded.append(part)
     return encoded
+
+
+def _selector_to_data(selector: RecordSelector) -> dict[str, str | int]:
+    return {"field": selector.field, "equals": selector.value}
 
 
 def _path_from_data(value: Any, what: str, *, record_selectors: bool = True) -> FieldPath:
@@ -611,8 +665,13 @@ def _plan_to_data(plan: InjectionPlan) -> dict[str, Any]:
                     "template_path": _path_to_data(target.template_path),
                     "template_key": target.template_key,
                 }
-                # Left out when empty, so a plan without it encodes as before.
-                | ({"call_arguments": dict(target.call_arguments)} if target.call_arguments else {}),
+                # Each left out when empty, so a plan without them encodes as before.
+                | ({"call_arguments": dict(target.call_arguments)} if target.call_arguments else {})
+                | (
+                    {"result_record": _selector_to_data(target.result_record)}
+                    if target.result_record is not None
+                    else {}
+                ),
                 "occurrence": {"kind": item.occurrence.kind.value, "nth": item.occurrence.nth},
                 "transformation": item.transformation.value,
                 "size_limit": item.size_limit,
@@ -700,6 +759,7 @@ def _instruction_from_data(value: Any) -> InjectionInstruction:
             "template_path",
             "template_key",
             "call_arguments",
+            "result_record",
         },
         "target",
     )
@@ -714,6 +774,11 @@ def _instruction_from_data(value: Any) -> InjectionInstruction:
         template_path=_path_from_data(target_data.get("template_path", []), "template path", record_selectors=False),
         template_key=target_data.get("template_key"),
         call_arguments=_object(target_data.get("call_arguments", {}), "call_arguments"),
+        result_record=(
+            _selector_from_data(_object(target_data["result_record"], "result_record"))
+            if "result_record" in target_data
+            else None
+        ),
     )
     occurrence_data = _object(data.get("occurrence", {}), "occurrence")
     _only_fields(occurrence_data, {"kind", "nth"}, "occurrence")
