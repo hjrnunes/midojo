@@ -18,6 +18,7 @@ import asyncio
 import contextlib
 import os
 import uuid
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import httpx
@@ -97,16 +98,49 @@ def _session_headers(session_token: str | None) -> dict[str, str]:
 
 
 def _mcp_server(
-    url: str | None, label: str, session_token: str | None, tool_endpoint: ToolEndpoint | None
+    url: str | None,
+    label: str,
+    session_token: str | None,
+    tool_endpoint: ToolEndpoint | None,
+    allowed_tools: tuple[str, ...] | None = None,
 ) -> dict[str, object]:
-    """The Responses API's MCP tool block: the interceptor and its token in host mode, else the session header."""
+    """The Responses API's MCP tool block: the interceptor and its token in host mode, else the session header.
+
+    With ``allowed_tools``, the block ends with them, so the model is offered only those tools.
+    """
     if tool_endpoint is not None:
         url, headers = tool_endpoint.url, tool_endpoint.headers
     else:
         headers = _session_headers(session_token)
     if url is None:
         raise ValueError("No MCP server URL: pass mcp_server_url, or a tool endpoint in host mode")
-    return {"type": "mcp", "server_label": label, "server_url": url, "headers": headers, "require_approval": "never"}
+    block: dict[str, object] = {
+        "type": "mcp",
+        "server_label": label,
+        "server_url": url,
+        "headers": headers,
+        "require_approval": "never",
+    }
+    if allowed_tools is not None:
+        block["allowed_tools"] = list(allowed_tools)
+    return block
+
+
+def _tool_names(allowed_tools: Sequence[str]) -> tuple[str, ...]:
+    """``allowed_tools`` as a tuple of distinct, non-empty tool names, or an error saying what's wrong."""
+    if isinstance(allowed_tools, str | bytes | bytearray):
+        raise TypeError("allowed_tools must be a sequence of tool names, not a single string")
+    names = tuple(allowed_tools)
+    if not names:
+        raise ValueError("allowed_tools must name at least one tool")
+    for name in names:
+        if type(name) is not str:
+            raise TypeError(f"allowed_tools names must be str, got {type(name).__name__}")
+        if not name:
+            raise ValueError("allowed_tools names must not be empty")
+    if len(set(names)) != len(names):
+        raise ValueError("allowed_tools names a tool more than once")
+    return names
 
 
 class SimpleHTTPAgentClient(AgentClient):
@@ -203,6 +237,12 @@ class OpenAIResponsesAgentClient(AgentClient):
     The MCP tool block names ``mcp_server_url`` with the session in
     ``X-Midojo-Session``; in host mode, the interceptor's URL with its bearer
     token, and no session.
+
+    ``allowed_tools`` limits the MCP server's tools the model is offered: every
+    request's MCP tool block then ends with ``"allowed_tools": [...]``, the names
+    in the order given. Unset (None), the block has no such key and the model is
+    offered every tool the server lists. The names must be distinct, non-empty
+    strings, at least one (a bare string is refused: it isn't a list of names).
     """
 
     supports_multiturn = True
@@ -218,6 +258,7 @@ class OpenAIResponsesAgentClient(AgentClient):
         instructions: str = "",
         api_key: str,
         timeout: float = 120.0,
+        allowed_tools: Sequence[str] | None = None,
     ) -> None:
         self.base_url = base_url
         self.model = model
@@ -226,6 +267,7 @@ class OpenAIResponsesAgentClient(AgentClient):
         self.instructions = instructions
         self.api_key = api_key
         self.timeout = timeout
+        self.allowed_tools: tuple[str, ...] | None = None if allowed_tools is None else _tool_names(allowed_tools)
 
     async def send_task(
         self, prompt: str, *, session_token: str | None = None, tool_endpoint: ToolEndpoint | None = None
@@ -251,11 +293,12 @@ class OpenAIResponsesAgentClient(AgentClient):
         tool_endpoint: ToolEndpoint | None = None,
     ):
         continuation = {"previous_response_id": previous_response_id} if previous_response_id is not None else {}
+        tool = _mcp_server(self.mcp_server_url, self.mcp_server_label, session_token, tool_endpoint, self.allowed_tools)
         return await openai_client.responses.create(
             model=self.model,
             input=message,
             instructions=self.instructions,
-            tools=[_mcp_server(self.mcp_server_url, self.mcp_server_label, session_token, tool_endpoint)],
+            tools=[tool],
             stream=False,
             **continuation,
         )

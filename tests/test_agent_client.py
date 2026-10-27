@@ -344,6 +344,130 @@ async def test_responses_client_needs_a_server_url_or_a_tool_endpoint():
         )
 
 
+async def _two_turns(client: OpenAIResponsesAgentClient, **binding) -> list[dict]:
+    """The ``responses.create`` keyword arguments of a two-turn conversation."""
+    import sys
+
+    module, create = _mock_openai()
+    with patch.dict(sys.modules, {"openai": module}):
+        conversation = client.start_conversation(**binding)
+        await conversation.send("first")
+        await conversation.send("second")
+        await conversation.aclose()
+    return [dict(call.kwargs) for call in create.call_args_list]
+
+
+def _responses_client(**options) -> OpenAIResponsesAgentClient:
+    return OpenAIResponsesAgentClient(
+        "http://localhost:8321/v1",
+        "m",
+        "http://localhost:8082/mcp",
+        mcp_server_label="weather",
+        instructions="Be concise.",
+        api_key="x",
+        **options,
+    )
+
+
+_AGENT_MODE_TOOL = {
+    "type": "mcp",
+    "server_label": "weather",
+    "server_url": "http://localhost:8082/mcp",
+    "headers": {"X-Midojo-Session": "session-a"},
+    "require_approval": "never",
+}
+_HOST_MODE_TOOL = {
+    "type": "mcp",
+    "server_label": "weather",
+    "server_url": ENDPOINT.url,
+    "headers": {"Authorization": "Bearer tool-token"},
+    "require_approval": "never",
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("binding", "tool"),
+    [({"session_token": "session-a"}, _AGENT_MODE_TOOL), ({"tool_endpoint": ENDPOINT}, _HOST_MODE_TOOL)],
+    ids=["agent-mode", "host-mode"],
+)
+async def test_responses_client_without_allowed_tools_sends_the_tool_block_unchanged(binding, tool):
+    client = _responses_client()
+    assert client.allowed_tools is None
+    calls = await _two_turns(client, **binding)
+    common = {"model": "m", "instructions": "Be concise.", "stream": False}
+    assert calls == [
+        {**common, "input": "first", "tools": [tool]},
+        {**common, "input": "second", "tools": [tool], "previous_response_id": "resp-1"},
+    ]
+    for call in calls:
+        assert list(call["tools"][0]) == list(tool)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("binding", "tool"),
+    [({"session_token": "session-a"}, _AGENT_MODE_TOOL), ({"tool_endpoint": ENDPOINT}, _HOST_MODE_TOOL)],
+    ids=["agent-mode", "host-mode"],
+)
+async def test_responses_client_offers_only_the_allowed_tools_on_every_turn(binding, tool):
+    client = _responses_client(allowed_tools=["get_weather", "send_alert"])
+    assert client.allowed_tools == ("get_weather", "send_alert")
+    calls = await _two_turns(client, **binding)
+    limited = {**tool, "allowed_tools": ["get_weather", "send_alert"]}
+    common = {"model": "m", "instructions": "Be concise.", "stream": False}
+    assert calls == [
+        {**common, "input": "first", "tools": [limited]},
+        {**common, "input": "second", "tools": [limited], "previous_response_id": "resp-1"},
+    ]
+    for call in calls:
+        [block] = call["tools"]
+        assert list(block) == [*tool, "allowed_tools"]
+        assert type(block["allowed_tools"]) is list
+
+
+@pytest.mark.parametrize(
+    ("allowed_tools", "error", "match"),
+    [
+        ("get_weather", TypeError, "not a single string"),
+        (b"get_weather", TypeError, "not a single string"),
+        ([], ValueError, "at least one tool"),
+        ((), ValueError, "at least one tool"),
+        (["get_weather", 1], TypeError, "must be str, got int"),
+        (["get_weather", None], TypeError, "must be str, got NoneType"),
+        ([b"get_weather"], TypeError, "must be str, got bytes"),
+        (["get_weather", ""], ValueError, "must not be empty"),
+        (["get_weather", "send_alert", "get_weather"], ValueError, "more than once"),
+    ],
+)
+def test_responses_client_refuses_invalid_allowed_tools(allowed_tools, error, match):
+    with pytest.raises(error, match=match):
+        _responses_client(allowed_tools=allowed_tools)
+
+
+def test_responses_client_refuses_a_str_subclass_as_a_tool_name():
+    class Name(str):
+        pass
+
+    with pytest.raises(TypeError, match="must be str, got Name"):
+        _responses_client(allowed_tools=[Name("get_weather")])
+
+
+@pytest.mark.asyncio
+async def test_responses_client_keeps_its_own_copy_of_allowed_tools():
+    names = ["get_weather"]
+    client = _responses_client(allowed_tools=names)
+    names.append("send_alert")
+    names[0] = "delete_everything"
+    assert client.allowed_tools == ("get_weather",)
+    first, second = await _two_turns(client, session_token="session-a")
+    assert first["tools"][0]["allowed_tools"] == second["tools"][0]["allowed_tools"] == ["get_weather"]
+    # Each request gets a list of its own: changing one changes neither the client nor another request.
+    assert first["tools"][0]["allowed_tools"] is not second["tools"][0]["allowed_tools"]
+    first["tools"][0]["allowed_tools"].append("send_alert")
+    assert client.allowed_tools == ("get_weather",)
+
+
 @pytest.mark.asyncio
 async def test_http_client_without_a_session_sends_no_session_header():
     requests: list[httpx.Request] = []
