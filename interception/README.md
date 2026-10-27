@@ -16,7 +16,7 @@ The SDKs intercept tools the same way, so a suite's evaluation means the same th
 
 - **The agent keeps its real tools.** An SDK attaches to the agent's tools by name instead of replacing them, so the agent sees the same tool names, descriptions and arguments as it does without MiDojo. Only a tool the agent doesn't have, such as a fake notification tool a suite adds, gets its own definition.
 - **A tool is hooked, blocked or reported:**
-  - *hook*: the real tool runs, and the hook's return value is what the agent gets. The hook can read and update the evaluation's environment.
+  - *hook*: the real tool runs, and the hook's return value is what the agent gets. The hook can read and update the evaluation's environment. A PI hook (or registered tool) that places a payload can report how it fared by returning `{ result, structuredContent, injectionOutcomes }`: the call's record then carries them, as MidojoMCP's do; one that returns a string records the text only.
   - *block*: the tool never runs, and the agent gets `Tool execution was blocked` as an error result. Use it for a tool whose effect must not happen during an evaluation, such as sending email.
   - *report*: the tool runs, and the agent gets its result unchanged.
 - **The SDK attempts to record every intercepted call,** with `POST /agent/function-calls`: the agent's arguments, the result the layer returned to the agent, the error if there was one, and whether the call was blocked. Each record carries a `call_id`, so the SDK can resend a record whose response it lost without recording the call twice; a record that never arrives is still missing (see [Record IDs and retries](#record-ids-and-retries)). Tools that aren't intercepted run as usual and aren't recorded.
