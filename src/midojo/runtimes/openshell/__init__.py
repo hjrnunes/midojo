@@ -72,7 +72,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from midojo.observations import EvidenceStatus, register_observation_type
 from midojo.probes import substitute_probes
 from midojo.runtimes.openshell.logs import OCSFEvents, parse_ocsf_lines
-from midojo.tool_endpoint import HOST_MODE_WITHHELD_ENV, ToolEndpoint
+from midojo.tool_endpoint import HOST_MODE_WITHHELD_ENV, SESSION_ENV, ToolEndpoint
 
 # ---------------------------------------------------------------------------
 
@@ -418,6 +418,7 @@ class OpenShellRuntime:
           policy: {...}            # inline policy; omit for the image's built-in policy
           files:                   # seeded files, relative to the workdir or absolute (probe placeholders allowed)
             customer_report.txt: "Q4 report ... {injection_task_0:main}"
+          inject_session: false    # keep the session and control-plane URL out of an agent-mode sandbox too
 
     Lifecycle (driven by the orchestrator):
       1. ``configure(cluster=..., control_url=...)`` — inject deployment config (once);
@@ -445,6 +446,7 @@ class OpenShellRuntime:
         agent_command: list[str] | None = None,
         files: dict[str, str] | None = None,
         agent_timeout_seconds: float | None = None,
+        inject_session: bool = True,
     ) -> None:
         self._suite_name = suite_name
         self._image: str = image
@@ -469,6 +471,9 @@ class OpenShellRuntime:
         self._agent_timeout_seconds: float = (
             _DEFAULT_AGENT_TIMEOUT_SECONDS if agent_timeout_seconds is None else agent_timeout_seconds
         )
+        # The suite's `inject_session`: whether an agent-mode sandbox gets the session and the control plane's
+        # URL. A host-mode sandbox never gets them, whatever it says.
+        self._inject_session: bool = inject_session
         # setup() touches the baseline after seeding, so a seed there could never
         # look modified.
         for path in self._files:
@@ -518,6 +523,10 @@ class OpenShellRuntime:
     def agent_timeout_seconds(self) -> float:
         return self._agent_timeout_seconds
 
+    @property
+    def inject_session(self) -> bool:
+        return self._inject_session
+
     # --- Deployment config ---
 
     def configure(self, *, cluster: str, control_url: str = "", interceptor_url: str = "") -> None:
@@ -557,10 +566,11 @@ class OpenShellRuntime:
         self._run_labels = labels
 
         # Policy and control-plane (or interceptor) URL are fixed for the whole run, so check the
-        # allow rule once here rather than on every setup().
+        # allow rule once here rather than on every setup(). A sandbox without the session never
+        # reaches the control plane, so it needs no rule for it.
         if self._interceptor_url:
             _warn_if_interceptor_not_allowed(self._policy_spec, self._interceptor_url)
-        elif self._control_url:
+        elif self._control_url and self._inject_session:
             _warn_if_control_plane_not_allowed(self._policy_spec, self._control_url)
         return f"workspace {self._workspace_name}"
 
@@ -590,11 +600,15 @@ class OpenShellRuntime:
         ``MIDOJO_SESSION_TOKEN`` and the control plane as ``MIDOJO_URL``, for
         an in-sandbox SDK; or, in host mode, only ``tool_endpoint`` as
         ``MIDOJO_TOOL_URL`` and ``MIDOJO_TOOL_TOKEN``: no session token, no
-        control-plane URL and no URL of the real MCP server.
+        control-plane URL and no URL of the real MCP server. With
+        ``inject_session`` False, an agent-mode sandbox gets no session token
+        and no control-plane URL either (none of ``SESSION_ENV``, even from the
+        suite's ``env_vars``), so nothing in it records on the control plane;
+        the real MCP server's URL stays, as there is no interceptor to bypass.
 
         The sandbox is named ``eval-<eval_id>`` and labelled with the run,
-        evaluation and tasks; in host mode, it has a random name and only the
-        suite's label.
+        evaluation and tasks; in host mode, or without the session, it has a
+        random name and only the suite's label.
         """
         if (session_token is None) == (tool_endpoint is None):
             raise ValueError("setup needs exactly one of session_token and tool_endpoint")
@@ -606,6 +620,11 @@ class OpenShellRuntime:
             for variable in HOST_MODE_WITHHELD_ENV:
                 env.pop(variable, None)
             env.update(tool_endpoint.environment())
+        elif not self._inject_session:
+            # The suite keeps the session out: nothing that gives or names it or the control plane, even if the
+            # suite's env_vars set it.
+            for variable in SESSION_ENV:
+                env.pop(variable, None)
         else:
             assert session_token is not None
             env["MIDOJO_SESSION_TOKEN"] = session_token
@@ -624,9 +643,9 @@ class OpenShellRuntime:
         _resolve_policy(self._policy_spec, spec)
         self._policy_digest = _policy_digest(spec)
 
-        if tool_endpoint is not None:
-            # The agent may read its sandbox's name (its hostname) and labels: in host mode they name no run,
-            # evaluation or task. Which sandbox runs the evaluation stays on the host, in `sandbox_name` and the log.
+        if tool_endpoint is not None or not self._inject_session:
+            # The agent may read its sandbox's name (its hostname) and labels: in host mode, or without the
+            # session, they name no run, evaluation or task. Which sandbox runs the evaluation stays on the host, in `sandbox_name` and the log.
             name = _opaque_sandbox_name()
             labels = {"midojo.suite": self._run_labels.get("midojo.suite", self._suite_name)}
             logging.getLogger(__name__).info("Evaluation %s runs in sandbox %s", eval_id, name)
