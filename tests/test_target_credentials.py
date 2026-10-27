@@ -11,10 +11,11 @@ run-scoped route. All of them refuse it, and the evaluation's environment and
 records stay as they were, through the seal. The interceptor's token calls
 tools, and nothing else.
 
-The run-scoped routes take only the control token, so a control plane served
-without one opens no host-mode evaluation over HTTP, and serves none that was
-opened in process on it: its run-scoped routes would take the target's
-requests, or any request, as the host's.
+The run-scoped routes take only the control token, and a server without one
+is open to anything that reaches it. So a control plane an app serves without
+a control token opens no host-mode evaluation, whatever path asks: over HTTP,
+in process on the app's control plane, or through the episode context. A
+control plane no app serves has no routes, and opens host mode as before.
 
 No model, no gateway, no network beyond loopback.
 """
@@ -39,8 +40,10 @@ from midojo.agent_client import OpenAIResponsesAgentClient, PIAgentClient
 from midojo.control_plane.client import ControlPlaneClient
 from midojo.control_plane.config import CONTROL_TOKEN_ENV, AppConfig
 from midojo.control_plane.inprocess_control import InProcessControlClient
+from midojo.control_plane.lifecycle import RejectedError, Rejection
 from midojo.control_plane.main import create_app
 from midojo.control_plane.service import ById, ControlPlane
+from midojo.control_plane.store import InMemoryStore
 from midojo.episode_context import open_episode
 from midojo.interception_host import HostInterception, HostInterceptor
 from midojo.runtimes import UnmanagedRuntime
@@ -319,7 +322,7 @@ async def test_a_guarded_control_plane_opens_a_host_mode_evaluation_over_http(su
 
 
 @pytest.mark.asyncio
-async def test_in_process_a_control_plane_without_a_control_token_still_opens_host_mode_evaluations(suite):
+async def test_a_control_plane_no_app_serves_opens_host_mode_evaluations_without_a_control_token(suite):
     # No server, no run-scoped routes to guard.
     control = ControlPlane({"weather": suite})
     run = control.create_run("weather")
@@ -331,129 +334,105 @@ async def test_in_process_a_control_plane_without_a_control_token_still_opens_ho
     assert created.id in {e.id for e in control.evaluations(run.id)}
 
 
-def _evaluation_routes(app) -> list[tuple[str, str]]:
-    """Every (method, path template) that names an evaluation: walked from the app, so a new route can't escape."""
-    return sorted(
-        (method, route.path)
-        for route in app.routes
-        if isinstance(route, APIRoute) and "{eval_id}" in route.path
-        for method in route.methods
-    )
+def _held(control: ControlPlane, run_id: str) -> list:
+    """Every evaluation the control plane's store holds, in the run and outside any run."""
+    return control.store.list_evaluations(run_id) + control.store.list_evaluations(None)
 
 
-def _bodies(environment: dict) -> dict[tuple[str, str], dict]:
-    """Bodies a run-scoped write would accept: what is refused below is the request, not its body."""
-    forged = {**environment, "weather_alerts": [{"city": "New York", "message": "forged"}]}
-    call = {"call_id": "forged-1", "function": "get_weather", "args": {"city": "New York"}}
-    prefix = "/runs/{run_id}/evaluations/{eval_id}"
-    return {
-        ("PUT", f"{prefix}/environment"): forged,
-        ("POST", f"{prefix}/function-calls/start"): call,
-        ("POST", f"{prefix}/function-calls"): {**call, "result": "72°F, sunny"},
-        ("POST", f"{prefix}/complete"): {"agent_output": "forged"},
-        ("POST", f"{prefix}/turns"): {"message": "forged"},
-        ("POST", f"{prefix}/turns/{{index}}/reply"): {"reply": "forged"},
-        ("POST", f"{prefix}/observations"): {"source": "openshell", "data": {}},
-    }
-
-
-def _fill(template: str, run_id: str, eval_id: str) -> str:
-    values = {"run_id": run_id, "eval_id": eval_id, "idx": "0", "index": "0"}
-    return re.sub(r"\{([^}]+)\}", lambda match: values[match.group(1)], template)
-
-
-def _stored(control: ControlPlane, run_id: str, eval_id: str) -> tuple:
-    stored = control.evaluation(ById(run_id, eval_id))
-    return (
-        stored.environment.model_dump(),
-        stored.environment_revision,
-        stored.function_calls,
-        stored.turns,
-        stored.observations,
-        stored.stage,
-        stored.session,
-        stored.late_facts,
-        stored.capture_failures,
-        stored.grade,
-    )
-
-
-async def _open_in_process(control: ControlPlane, suite, run_id: str, how: str) -> tuple[str, str]:
-    """A host-mode evaluation opened on the served app's own control plane, without its HTTP routes: ID and session."""
+async def _open_host_mode(control: ControlPlane, suite, run_id: str, how: str) -> object:
+    """Ask the app's control plane, in process, for a host-mode evaluation the way ``how`` names."""
+    episode = suite.episode("weather_new_york")
+    client = InProcessControlClient(control)
     if how == "create_evaluation":
-        opened = control.create_evaluation(run_id, "weather_new_york", interception="host", idempotency_key="k1")
-    elif how == "open_evaluation":
-        opened = control.open_evaluation(suite.episode("weather_new_york"), run_id=run_id, interception="host")
-    else:
-        client = InProcessControlClient(control)
-        opened = await client.create_evaluation(
+        return control.create_evaluation(run_id, "weather_new_york", interception="host")
+    if how == "create_evaluation with a key":
+        return control.create_evaluation(run_id, "weather_new_york", interception="host", idempotency_key="k1")
+    if how == "open_evaluation":
+        return control.open_evaluation(episode, run_id=run_id, interception="host")
+    if how == "open_evaluation outside a run":
+        return control.open_evaluation(episode, interception="host")
+    if how == "in-process client":
+        return await client.create_evaluation(
             run_id, "weather_new_york", None, {}, interception="host", idempotency_key="k1"
         )
-    return opened.id, opened.session_token
+    if how == "in-process client outside a run":
+        return await client.open_episode(episode, interception="host")
+    async with _host_episode(control, suite, run_id, how):
+        pytest.fail("a host-mode episode opened on a control plane served without a control token")
+
+
+def _host_episode(control: ControlPlane, suite, run_id: str, how: str):
+    """A host-mode episode context on the control plane itself, or on its in-process client in a run."""
+    given: ControlPlane | InProcessControlClient = control if how == "open_episode" else InProcessControlClient(control)
+    return open_episode(
+        suite.episode("weather_new_york"),
+        runtime=UnmanagedRuntime(),
+        interception=HostInterception(upstream=scripted_upstream()),
+        control=given,
+        run_id=None if how == "open_episode" else run_id,
+    )
+
+
+CREATION_PATHS = [
+    "create_evaluation",
+    "create_evaluation with a key",
+    "open_evaluation",
+    "open_evaluation outside a run",
+    "in-process client",
+    "in-process client outside a run",
+    "open_episode",
+    "open_episode with the in-process client",
+]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("how", ["create_evaluation", "open_evaluation", "in-process client"])
-async def test_a_host_mode_evaluation_opened_in_process_is_never_served_by_a_tokenless_app(suite, how):
-    app = create_app({"weather": suite}, config=AppConfig(closure_wait_seconds=0))
+@pytest.mark.parametrize("how", CREATION_PATHS)
+async def test_a_control_plane_served_without_a_control_token_opens_no_host_mode_evaluation_in_process(suite, how):
+    app = create_app({"weather": suite})
     control = app.state.control
     run = control.create_run("weather")
-    eval_id, session_token = await _open_in_process(control, suite, run.id, how)
-    opened = control.evaluation(ById(run.id, eval_id))
-    assert opened.interception == "host" and opened.session is not None
-    # Its interceptor, recording in process, and an agent-mode evaluation beside it on the same app.
-    agent = control.create_evaluation(run.id, "weather_new_york")
-    interceptor = HostInterceptor(
-        InProcessControlClient(control).recorder(session_token),
-        upstream=scripted_upstream(),
-        evaluation_id=eval_id,
+    with pytest.raises(RejectedError) as refused:
+        await _open_host_mode(control, suite, run.id, how)
+    assert refused.value.kind is Rejection.CONTROL_TOKEN_REQUIRED and not refused.value.late
+    # Nothing exists to serve: no evaluation, and no key kept.
+    assert _held(control, run.id) == []
+    agent = control.create_evaluation(run.id, "weather_new_york", idempotency_key="k1")
+    assert [e.interception for e in _held(control, run.id)] == ["agent"]
+    # Agent mode on the same app is served as before, without a credential.
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url=CONTROL_URL) as http:
+        read = await http.get(f"/runs/{run.id}/evaluations/{agent.id}/environment")
+    assert (
+        read.status_code == 200 and read.json() == control.evaluation(ById(run.id, agent.id)).environment.model_dump()
     )
-    endpoint = await interceptor.start()
-    try:
-        routes = _evaluation_routes(app)
-        # The walk finds the routes that matter, so an empty or renamed list fails here rather than passing.
-        for expected in ("environment", "function-calls", "function-calls/start", "snapshot", "session", "complete"):
-            assert any(path.endswith(f"/{{eval_id}}/{expected}") for _, path in routes), expected
-        environment = opened.environment.model_dump()
-        bodies = _bodies(environment)
-        before = _stored(control, run.id, eval_id)
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url=CONTROL_URL) as http:
-            for headers in ({"Authorization": f"Bearer {endpoint.token}"}, {}):
-                for method, template in routes:
-                    path = _fill(template, run.id, eval_id)
-                    response = await http.request(method, path, headers=headers, json=bodies.get((method, template)))
-                    assert response.status_code == 403, (method, path, response.status_code, response.text)
-                    assert response.json()["kind"] == "control_token_required"
-                    assert "New York" not in response.text
-                # No run-scoped PATCH exists; the /agent one takes a session, which this credential isn't.
-                change = {"set": {"weather_alerts": []}}
-                patched = await http.patch("/agent/environment", headers=headers, json=change)
-                assert patched.status_code == 401
-                # The run's summary leaves the host-mode evaluation out, and shows the agent-mode one.
-                listed = await http.get(f"/runs/{run.id}", headers=headers)
-                assert [e["id"] for e in listed.json()["evaluations"]] == [agent.id]
-                # A create that would replay the in-process one, and hand out a fresh session for it, is refused too.
-                replay = await http.post(
-                    f"/runs/{run.id}/evaluations",
-                    headers=headers,
-                    json={"user_task_id": "weather_new_york", "interception": "host", "idempotency_key": "k1"},
-                )
-                assert replay.status_code == 403 and "session_token" not in replay.text
 
-            # Control case: the agent-mode evaluation on the same app is served as before.
-            agent_url = f"/runs/{run.id}/evaluations/{agent.id}"
-            assert (await http.get(agent_url)).json()["interception"] == "agent"
-            assert (await http.get(f"{agent_url}/environment")).json() == environment
-            assert (await http.get(f"{agent_url}/function-calls")).json() == []
-            put = await http.put(
-                f"{agent_url}/environment", json=bodies[("PUT", "/runs/{run_id}/evaluations/{eval_id}/environment")]
-            )
-            assert put.status_code == 200, put.text
-        assert _stored(control, run.id, eval_id) == before
-    finally:
-        await interceptor.stop()
 
-    # In process, the host still reads and seals it.
-    await control.complete(run.id, eval_id, "done")
-    sealed = control.evaluation(ById(run.id, eval_id)).snapshot
-    assert sealed is not None and sealed.environment.model_dump() == environment and sealed.function_calls == ()
+@pytest.mark.asyncio
+@pytest.mark.parametrize("how", CREATION_PATHS)
+async def test_a_control_plane_served_with_a_control_token_opens_host_mode_evaluations_in_process(suite, how):
+    app = create_app({"weather": suite}, config=AppConfig(control_token=CONTROL_TOKEN))
+    control = app.state.control
+    run = control.create_run("weather")
+    if how.startswith("open_episode"):
+        # The episode context runs and seals it; there is no agent to send it a turn.
+        async with _host_episode(control, suite, run.id, how) as ep:
+            assert ep.binding.tool_endpoint is not None
+    else:
+        await _open_host_mode(control, suite, run.id, how)
+    assert [e.interception for e in _held(control, run.id)] == ["host"]
+
+
+@pytest.mark.parametrize("token", [None, CONTROL_TOKEN])
+def test_an_app_without_a_control_token_refuses_a_store_that_holds_a_host_mode_evaluation(suite, token):
+    # Kept by a control plane no app served, then given to an app: an evaluation the app's routes would expose.
+    standalone = ControlPlane({"weather": suite})
+    opened = standalone.open_evaluation(suite.episode("weather_new_york"), interception="host")
+    held = standalone.store.get_evaluation(None, opened.id)
+    assert held is not None
+    store = InMemoryStore()
+    store.insert_evaluation(held)
+    if token is None:
+        with pytest.raises(ValueError, match="can't hold host-mode evaluations"):
+            create_app({"weather": suite}, store=store)
+    else:
+        app = create_app({"weather": suite}, store=store, config=AppConfig(control_token=token))
+        assert [e.interception for e in app.state.control.store.list_evaluations(None)] == ["host"]

@@ -132,19 +132,22 @@ async def test_an_agent_hook_that_records_nothing_is_never_graded_secure(app):
 
 
 @pytest.mark.asyncio
-async def test_a_host_interceptor_that_saw_no_call_is_a_complete_capture(app):
-    graded, _ = await grade(app.state.control, "host", [])
+async def test_a_host_interceptor_that_saw_no_call_is_a_complete_capture(suite):
+    # In process, with no server: a served control plane without a control token opens no host-mode evaluation.
+    graded, _ = await grade(ControlPlane({"weather": suite}), "host", [])
     assert "function_calls" not in graded.evidence_status
     assert (graded.security, graded.grade_validity.security.status) == (False, "valid")
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("interception", ["agent", "host"])
-async def test_a_capture_with_records_is_complete_whatever_the_interception(app, interception: InterceptionMode):
-    graded, _ = await grade(app.state.control, interception, [("get_weather", {"city": "San Francisco"})])
+async def test_a_capture_with_records_is_complete_whatever_the_interception(suite, interception: InterceptionMode):
+    # In process, with no server: a served control plane without a control token opens no host-mode evaluation.
+    control = ControlPlane({"weather": suite})
+    graded, _ = await grade(control, interception, [("get_weather", {"city": "San Francisco"})])
     assert "function_calls" not in graded.evidence_status
     assert (graded.security, graded.grade_validity.security.status) == (False, "valid")
-    graded, _ = await grade(app.state.control, interception, [("send_email", SEND_EMAIL)])
+    graded, _ = await grade(control, interception, [("send_email", SEND_EMAIL)])
     assert graded.security is True
 
 

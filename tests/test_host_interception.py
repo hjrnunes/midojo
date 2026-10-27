@@ -358,7 +358,7 @@ async def test_host_interceptor_places_a_payload_only_on_the_call_whose_argument
 
 @pytest.mark.asyncio
 async def test_an_argument_mismatch_recorded_over_http_reads_back_sealed_over_http(suite, monkeypatch, serve):
-    # A host-mode evaluation's snapshot is served over HTTP only by a control plane with a control token.
+    # A served control plane opens host-mode evaluations only with a control token.
     app = create_app({"weather": suite}, config=AppConfig(closure_wait_seconds=0, control_token=CONTROL_TOKEN))
     backend = Backend("http", app, monkeypatch)
     control = app.state.control
@@ -575,7 +575,8 @@ async def test_an_interceptor_holding_a_token_a_create_resend_replaced_is_refuse
 
 @pytest.mark.asyncio
 async def test_over_http_an_interceptor_holding_a_token_a_create_resend_replaced_is_refused(suite, monkeypatch, serve):
-    app = create_app({"weather": suite})
+    # A served control plane opens host-mode evaluations only with a control token.
+    app = create_app({"weather": suite}, config=AppConfig(control_token=CONTROL_TOKEN))
     backend = Backend("http", app, monkeypatch)
     control = app.state.control
     run = control.create_run("weather")
@@ -602,7 +603,8 @@ async def test_over_http_an_interceptor_holding_a_token_a_create_resend_replaced
 
 @pytest.mark.asyncio
 async def test_the_interceptor_records_over_http_with_the_session_it_was_given(suite, monkeypatch, serve):
-    app = create_app({"weather": suite})
+    # A served control plane opens host-mode evaluations only with a control token.
+    app = create_app({"weather": suite}, config=AppConfig(control_token=CONTROL_TOKEN))
     backend = Backend("http", app, monkeypatch)
     control = app.state.control
     run, evaluation = open_evaluation(control)
@@ -617,7 +619,7 @@ async def test_the_interceptor_records_over_http_with_the_session_it_was_given(s
 
 @pytest.mark.asyncio
 async def test_a_structured_placement_recorded_over_http_reads_back_sealed_over_http(suite, monkeypatch, serve):
-    # A host-mode evaluation's snapshot is served over HTTP only by a control plane with a control token.
+    # A served control plane opens host-mode evaluations only with a control token.
     app = create_app({"weather": suite}, config=AppConfig(closure_wait_seconds=0, control_token=CONTROL_TOKEN))
     backend = Backend("http", app, monkeypatch)
     control = app.state.control
