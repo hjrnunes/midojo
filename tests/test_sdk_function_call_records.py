@@ -7,7 +7,7 @@ import httpx
 import pytest
 from midojo_sdk import client as sdk_client
 from midojo_sdk import recorder as sdk_recorder
-from midojo_sdk.client import RECORD_ATTEMPTS, AgentControlPlaneClient, CallIds, transient
+from midojo_sdk.client import RECORD_ATTEMPTS, AgentControlPlaneClient, CallIds, InvalidHTTPRequestError, transient
 from midojo_sdk.injection import OutcomeStatus, Transformation
 from midojo_sdk.recorder import (
     ControlPlaneRecorder,
@@ -18,6 +18,7 @@ from midojo_sdk.recorder import (
     RetryingRecorder,
     retry,
 )
+from pydantic import ValidationError
 
 from midojo.control_plane.lifecycle import Rejection
 from midojo.types import InjectionStatus, InjectionTransformation
@@ -519,6 +520,82 @@ async def test_an_unknown_injection_status_is_an_invalid_request(client, backend
             structured_content=None,
             injection_outcomes=[outcome],
         )
+
+
+UNCOUNTED: InjectionRecord = {
+    "instruction_index": 0,
+    "probe_key": None,
+    "occurrence": 0,
+    "status": "unmatched",
+    "detail": "d",
+}
+NO_FACTS = {"selected": False, "transformation": None, "emitted": []}
+
+
+def _uncounted(**changes: typing.Any) -> InjectionRecord:
+    """The outcome of a call whose arguments didn't match, with ``changes`` (InjectionRecord fields)."""
+    return typing.cast(InjectionRecord, UNCOUNTED | changes)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "changed",
+    [
+        {"status": "applied", "selected": True, "transformation": "identity", "emitted": ["content_block"]},
+        {"status": "skipped_occurrence"},
+        {"status": "no_result", **NO_FACTS},
+        {"selected": True},
+        {"transformation": "identity"},
+        {"emitted": ["structured_content"]},
+    ],
+    ids=["applied", "skipped", "no-result", "unmatched-selected", "unmatched-transformed", "unmatched-emitted"],
+)
+async def test_a_finish_with_an_outcome_at_occurrence_0_other_than_an_empty_unmatched_is_invalid(
+    client, backend, changed
+):
+    run_id, eval_id, token = new_evaluation(client)
+    with pytest.raises(InvalidRequestError) as refused:
+        await backend.agent(token).finish_call_detailed(
+            call_id="c1",
+            function="f",
+            args={},
+            result="r",
+            disposition="forwarded",
+            structured_content=None,
+            injection_outcomes=[_uncounted(**changed)],
+        )
+    if backend.in_process:
+        assert isinstance(refused.value.__cause__, ValidationError)
+    else:
+        assert isinstance(refused.value, InvalidHTTPRequestError)
+        assert refused.value.response.status_code == 422
+    assert client.get(f"/runs/{run_id}/evaluations/{eval_id}/function-calls").json() == []
+
+
+@pytest.mark.asyncio
+async def test_occurrence_0_takes_an_unmatched_outcome_and_any_status_is_counted(client, backend):
+    run_id, eval_id, token = new_evaluation(client)
+    outcomes = [
+        UNCOUNTED,  # its facts not reported
+        _uncounted(**NO_FACTS),
+        # A strict selector that missed is unmatched, counted, and transformed the payload.
+        _uncounted(occurrence=2, selected=False, transformation="identity", emitted=[]),
+        _uncounted(occurrence=1, status="skipped_occurrence", **NO_FACTS),
+        _uncounted(occurrence=3, status="applied", selected=True, transformation="identity", emitted=["content_block"]),
+    ]
+    await backend.agent(token).finish_call_detailed(
+        call_id="c1",
+        function="f",
+        args={},
+        result="r",
+        disposition="forwarded",
+        structured_content=None,
+        injection_outcomes=outcomes,
+    )
+
+    [call] = client.get(f"/runs/{run_id}/evaluations/{eval_id}/function-calls").json()
+    unreported = {"selected": None, "transformation": None, "emitted": None}
+    assert call["injection_outcomes"] == [UNCOUNTED | unreported, *outcomes[1:]]
 
 
 class Refusing:

@@ -411,6 +411,11 @@ class InjectionOutcome:
     checked on the result as returned, after every instruction for the call:
     empty when none does. These are facts about what the interceptor sent,
     not about what the agent or its model saw.
+
+    Occurrence 0 is only for a call whose arguments didn't match the target's
+    ``call_arguments``: an ``unmatched`` outcome that placed nothing, so
+    building any other at occurrence 0 raises ValueError. ``unmatched`` is
+    also counted (a strict selector that didn't match is occurrence 1 or more).
     """
 
     instruction_index: int
@@ -425,6 +430,12 @@ class InjectionOutcome:
     selected: bool = False
     transformation: Transformation | None = None
     emitted: tuple[SelectorSurface, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.occurrence == 0 and (
+            self.status != OutcomeStatus.UNMATCHED or self.selected or self.transformation is not None or self.emitted
+        ):
+            raise ValueError("only an unmatched outcome that placed nothing has occurrence 0")
 
 
 def capability_gaps(

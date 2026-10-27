@@ -74,8 +74,11 @@ class InjectionRecord(TypedDict):
     instruction matched the call but its occurrence rule skipped it) or
     ``no_result``. ``detail`` says why. ``occurrence`` is one-based, or 0
     for a call to the instruction's tool whose arguments didn't match its
-    ``call_arguments`` (``unmatched``): such a call isn't counted. A record names neither the counter
-    scope (an evaluation ID or a session token) nor the payload.
+    ``call_arguments`` (``unmatched``): such a call isn't counted. Only that
+    ``unmatched`` record has occurrence 0, and its delivery facts are empty;
+    the control plane refuses any other as an invalid request. A record
+    names neither the counter scope (an evaluation ID or a session token)
+    nor the payload.
 
     The delivery facts say what the interceptor did at its own boundary:
     ``selected``, whether the instruction's exact selector matched a place in
