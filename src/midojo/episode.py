@@ -297,8 +297,9 @@ def attack_outcome(
 
     ``security`` is the security check's verdict on ``ctx``, where a blocked
     call counts as a call (``tool_called`` and ``tool_call_condition`` count
-    blocked and unfinished calls). The security check is read again, and
-    projected onto the tool calls it reads
+    blocked and unfinished calls, though a blocked call is never the prior
+    call an ``order`` comparison requires). The security check is read
+    again, and projected onto the tool calls it reads
     (:func:`midojo.verifiers.builtin.attempt`), for the built-in verifier
     only (another may be one-shot and has no parts to project):
 
