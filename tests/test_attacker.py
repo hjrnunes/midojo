@@ -280,6 +280,20 @@ class TestPermittedSurface:
         with pytest.raises(OutOfSurfaceError, match="probes"):
             check_plan_within(InjectionPlan(probe_payloads=(("task:other", "x"),)), permitted)
 
+    def test_an_extra_copy_of_an_allowed_instruction_is_refused(self) -> None:
+        target = InjectionTarget(surface=SelectorSurface.TEMPLATE, template_path=("notes",), template_key="task:main")
+        instruction = InjectionInstruction(Channel.ENVIRONMENT_STATE, "payload", target, probe_key="task:main")
+        probes = (("task:main", "payload"),)
+        twice = InjectionPlan((instruction, instruction), probe_payloads=probes)
+        # Each proposed instruction consumes a distinct one of the pair's own: as many copies as it has pass.
+        check_plan_within(twice, twice)
+        check_plan_within(InjectionPlan((instruction,), probe_payloads=probes), twice)
+        with pytest.raises(OutOfSurfaceError, match="outside the pair's injection plan"):
+            check_plan_within(twice, InjectionPlan((instruction,), probe_payloads=probes))
+        changed = dataclasses.replace(instruction, payload="new")
+        with pytest.raises(OutOfSurfaceError, match="outside the pair's injection plan"):
+            check_plan_within(InjectionPlan((changed, changed, changed), probe_payloads=(("task:main", "new"),)), twice)
+
 
 def test_runtime_isolation_is_declared() -> None:
     assert attempt_isolation(UnmanagedRuntime()) is None

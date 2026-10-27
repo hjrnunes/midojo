@@ -20,6 +20,7 @@ probe, channel or target, so it never widens the episode's plan.
 from __future__ import annotations
 
 import dataclasses
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
@@ -240,18 +241,23 @@ def _placement(instruction: InjectionInstruction) -> InjectionInstruction:
 def check_plan_within(proposed: InjectionPlan, permitted: InjectionPlan) -> None:
     """Refuse a proposed plan that places anything the pair's own plan doesn't: it may only change payloads.
 
-    Every proposed instruction must match one of ``permitted``'s in all but
-    its payload (channel, target, probe key, occurrence, transformation, size
-    limit, mode and mismatch policy), and every proposed probe must be one of
+    Every proposed instruction must consume a distinct instruction of
+    ``permitted``'s that it matches in all but its payload (channel, target,
+    probe key, occurrence, transformation, size limit, mode and mismatch
+    policy): a placement may occur at most as often as in the pair's own plan,
+    so no extra copy of an allowed instruction passes. Fewer is allowed (a
+    probe left out isn't placed). Every proposed probe must be one of
     ``permitted``'s. Raises :class:`OutOfSurfaceError`.
     """
-    allowed = {_placement(instruction) for instruction in permitted.instructions}
+    remaining = Counter(_placement(instruction) for instruction in permitted.instructions)
     for instruction in proposed.instructions:
-        if _placement(instruction) not in allowed:
+        placement = _placement(instruction)
+        if remaining[placement] <= 0:
             raise OutOfSurfaceError(
                 f"instruction for probe {instruction.probe_key!r} on channel {instruction.channel.value} places "
                 f"outside the pair's injection plan"
             )
+        remaining[placement] -= 1
     probes = {key for key, _ in permitted.probe_payloads}
     if extra := sorted({key for key, _ in proposed.probe_payloads} - probes):
         raise OutOfSurfaceError(f"probes {extra} are outside the pair's injection plan")
