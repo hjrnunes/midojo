@@ -256,10 +256,12 @@ def test_the_same_idempotency_key_with_another_request_is_refused(client):
         {"user_task_id": "trip_weather"},
         {"injection_task_id": "book_shelter"},
         {"injections": {"book_shelter:main": "x"}},
-        {"interception": "host"},
     ):
         refused = _post_evaluation(client, run_id, idempotency_key="k1", **changed)
         assert refused.status_code == 409 and refused.json()["kind"] == "idempotency_conflict"
+    # This server has no control token, so it refuses a host-mode evaluation before it reads the key.
+    refused = _post_evaluation(client, run_id, idempotency_key="k1", interception="host")
+    assert refused.status_code == 403 and refused.json()["kind"] == "control_token_required"
     assert [summary["id"] for summary in client.get(f"/runs/{run_id}").json()["evaluations"]] == [first.json()["id"]]
     # Leaving out a default is the same request.
     resent = _post_evaluation(client, run_id, idempotency_key="k1", injections={})

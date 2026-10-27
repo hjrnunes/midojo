@@ -1109,7 +1109,7 @@ async def run_benchmark(
     show_default=True,
     help="Where tool calls are intercepted. agent: an SDK in the agent records them, with the evaluation's session "
     "(lower-trust evidence). host: midojo runs an interceptor for each evaluation in this process, and the agent "
-    "gets only its tool endpoint, never a session or the control-plane URL.",
+    "gets only its tool endpoint, never a session or the control-plane URL. host needs --control-token.",
 )
 @click.option(
     "--upstream-mcp-url",
@@ -1192,6 +1192,13 @@ def main(
     # Unmanaged clients keep their own default timeout unless --agent-timeout is given.
     timeout_kwargs = {} if agent_timeout is None else {"timeout": agent_timeout}
     host_mode = interception == "host"
+    if host_mode and not control_token:
+        # The control plane refuses a host-mode evaluation without one: say so before the run starts.
+        raise click.UsageError(
+            f"--interception host requires --control-token or {CONTROL_TOKEN_ENV}, and a control plane started with "
+            "it: without a control token, the control plane's run-scoped routes are open to anything that reaches "
+            "it, the agent included."
+        )
     host_interception = (
         _host_interception(
             upstream_mcp_url,

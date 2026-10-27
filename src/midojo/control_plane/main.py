@@ -29,8 +29,9 @@ def create_app(
     app.state.suites = {_SUITE_NAME.validate_python(name): suite for name, suite in suites.items()}
     app.state.store = store if store is not None else InMemoryStore()
     app.state.config = config if config is not None else AppConfig()
-    # Every route that reads or writes an evaluation goes through this one writer.
-    app.state.control = ControlPlane(app.state.suites, store=app.state.store, config=app.state.config)
+    # Every route that reads or writes an evaluation goes through this one writer. Served, it opens no host-mode
+    # evaluation without a control token, whatever path asks.
+    app.state.control = ControlPlane(app.state.suites, store=app.state.store, config=app.state.config, served=True)
     # /agent routes take an evaluation session token instead.
     control = [Depends(require_control_token)]
     app.include_router(suite.router, dependencies=control)

@@ -89,12 +89,33 @@ async def retrieve_run(run: Annotated[Run, Depends(get_run)], control: Annotated
     )
 
 
-@router.post("/{run_id}/evaluations", response_model=CreateEvaluationResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/{run_id}/evaluations",
+    response_model=CreateEvaluationResponse,
+    status_code=status.HTTP_201_CREATED,
+    responses={
+        status.HTTP_403_FORBIDDEN: {
+            "description": (
+                "`kind` control_token_required: `interception` is host and the server has no control token. "
+                "Nothing is created or kept."
+            )
+        }
+    },
+)
 async def create_evaluation(
     req: CreateEvaluationRequest,
     run: Annotated[Run, Depends(get_run)],
     control: Annotated[ControlPlane, Depends(get_control)],
 ):
+    """Create an evaluation in the run, and issue its session token.
+
+    A host-mode evaluation (``interception`` host) needs a server started with
+    a control token: without one, the run-scoped routes take any request, so a
+    target that reached the server could read and change its evaluation there
+    as the host. The served control plane refuses it, however it's asked
+    (``ControlPlane.served``): 403 ``control_token_required``, and nothing is
+    kept.
+    """
     return control.create_evaluation(
         run.id,
         req.user_task_id,

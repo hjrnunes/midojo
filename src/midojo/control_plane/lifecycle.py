@@ -123,6 +123,8 @@ class Rejection(enum.StrEnum):
     UNKNOWN_TASK = "unknown_task"
     # An idempotency key a run already answered another request under.
     IDEMPOTENCY_CONFLICT = "idempotency_conflict"
+    # A host-mode evaluation asked of a server whose run-scoped routes take no control token.
+    CONTROL_TOKEN_REQUIRED = "control_token_required"
     # Sessions.
     INVALID_SESSION = "invalid_session"
     SESSION_CLOSED = "session_closed"

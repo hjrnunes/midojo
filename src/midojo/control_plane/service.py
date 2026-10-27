@@ -104,6 +104,12 @@ def _reject(kind: Rejection, detail: str) -> RejectedError:
     return RejectedError(Rejected(kind, detail))
 
 
+CONTROL_TOKEN_REQUIRED_DETAIL = (
+    "Host interception needs a control plane served with a control token (MIDOJO_CONTROL_TOKEN): without one, "
+    "its run-scoped routes are open to anything that reaches it, the agent included."
+)
+
+
 def token_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
@@ -115,14 +121,45 @@ class ControlPlane:
         *,
         store: Store | None = None,
         config: AppConfig | None = None,
+        served: bool = False,
     ) -> None:
+        """A control plane over ``store``, for ``suites``.
+
+        ``served`` says an HTTP app serves it (``create_app`` sets it). Served
+        without a control token, its run-scoped routes take any request, so it
+        opens no host-mode evaluation (``control_token_required``), whatever
+        path asks, and refuses (ValueError) a store that already holds one. A
+        control plane no app serves has no such routes and opens host mode
+        without a token.
+        """
         self.suites = dict(suites)
         self.store: Store = store if store is not None else InMemoryStore()
         self.config = config if config is not None else AppConfig()
+        self.served = served
+        if self._refuses_host_mode():
+            runs = [run.id for run in self.store.list_runs()]
+            held = [
+                e.id
+                for run_id in [None, *runs]
+                for e in self.store.list_evaluations(run_id)
+                if e.interception == "host"
+            ]
+            if held:
+                raise ValueError(
+                    f"A control plane served without a control token can't hold host-mode evaluations: {held}"
+                )
         self._writer = self.store.writer()
         # Held while a create under an idempotency key looks up, opens and keeps its evaluation, or rotates its
         # session's token.
         self._creating = threading.Lock()
+
+    def _refuses_host_mode(self) -> bool:
+        """Whether host mode is refused: served over HTTP with no control token to guard the run-scoped routes."""
+        return self.served and self.config.control_token is None
+
+    def _check_interception(self, interception: InterceptionMode) -> None:
+        if interception == "host" and self._refuses_host_mode():
+            raise _reject(Rejection.CONTROL_TOKEN_REQUIRED, CONTROL_TOKEN_REQUIRED_DETAIL)
 
     # --- the single writer ---
 
@@ -225,8 +262,11 @@ class ControlPlane:
         or has expired, which leaves it as it was. The same key with another
         request is refused as ``idempotency_conflict``. A create refused
         outright (an unknown task, say) keeps nothing, so resending it tries
-        it afresh.
+        it afresh. On a control plane served without a control token, a
+        host-mode create is refused as ``control_token_required`` before its
+        key is read, and keeps nothing.
         """
+        self._check_interception(interception)
         # Read once, into a value of its own: the key's request and the compiled episode are the same injections,
         # whatever the caller does with its mapping meanwhile.
         injected: dict[str, str] = detached(dict(injections or {}))
@@ -305,9 +345,11 @@ class ControlPlane:
         an interception layer given the session) or ``host`` (by an interceptor
         the host runs outside the target, the only holder of the session). It
         labels each record the session makes (``FunctionCallRecord.provenance``).
-        An environment holding a value a snapshot can't hold
-        (``state.unsupported_value``) raises ValueError too.
+        A control plane served without a control token refuses ``host`` as
+        ``control_token_required``. An environment holding a value a snapshot
+        can't hold (``state.unsupported_value``) raises ValueError too.
         """
+        self._check_interception(interception)
         run = self.run(run_id) if run_id is not None else None
         if run is not None and episode.user_task_id is None:
             raise ValueError("An episode opened in a run needs a user_task_id")

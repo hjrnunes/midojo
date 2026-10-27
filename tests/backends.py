@@ -58,12 +58,12 @@ class Backend:
             return InProcessAgentClient(app.state.control, session_token)
         return AgentControlPlaneClient(CONTROL_URL, session_token, http=self.http(app))
 
-    def control(self, app: FastAPI | None = None) -> ControlClient:
-        """The orchestrator's control client for ``app``'s control plane."""
+    def control(self, app: FastAPI | None = None, *, token: str | None = None) -> ControlClient:
+        """The orchestrator's control client for ``app``'s control plane, sending its control ``token`` over HTTP."""
         app = app or self.app
         if self.in_process:
             return InProcessControlClient(app.state.control)
-        return ControlPlaneClient(CONTROL_URL, http=self.http(app))
+        return ControlPlaneClient(CONTROL_URL, token=token, http=self.http(app))
 
     def mcp(self, name: str, session_token: str, **kwargs: Any) -> MidojoMCP:
         """A ``MidojoMCP`` recording in the evaluation ``session_token`` is bound to.

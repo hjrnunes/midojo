@@ -11,10 +11,13 @@ unknown, never a pass for the agent.
 import httpx
 import pytest
 import pytest_asyncio
+from fastapi.testclient import TestClient
 from langchain_core.tools import tool
 from midojo_sdk.langchain import MidojoMiddleware
 from midojo_sdk.mcp import MidojoMCP, ToolContext
 
+from midojo.control_plane.config import AppConfig
+from midojo.control_plane.main import create_app
 from midojo.control_plane.models import CreateFunctionCallRecord
 from midojo.control_plane.service import ById, BySession, ControlPlane
 from midojo.observations import EvidenceStatus
@@ -23,7 +26,15 @@ from midojo.verifiers import VerificationContext
 from midojo.verifiers.builtin import ToolCallCondition, ToolCalled
 from tests.test_langchain_sdk import call_tool
 
+CONTROL_TOKEN = "control-secret"
 SEND_EMAIL = {"to": "bookings@travel-sync.example", "body": "itinerary"}
+
+
+@pytest.fixture
+def guarded(suite) -> TestClient:
+    """A client of a control plane with a control token, sent on every request but the agent's own."""
+    app = create_app({"weather": suite}, config=AppConfig(control_token=CONTROL_TOKEN))
+    return TestClient(app, headers={"Authorization": f"Bearer {CONTROL_TOKEN}"})
 
 
 def open_evaluation(client, **kwargs) -> tuple[str, dict]:
@@ -45,7 +56,11 @@ def record(client, evaluation: dict, call_id: str, **extra) -> dict:
 
 
 @pytest.mark.parametrize(("interception", "provenance"), [("agent", "agent"), ("host", "interceptor")])
-def test_a_sessions_records_are_labelled_by_where_the_host_said_calls_are_intercepted(client, interception, provenance):
+def test_a_sessions_records_are_labelled_by_where_the_host_said_calls_are_intercepted(
+    request, interception, provenance
+):
+    # A host-mode evaluation is created only on a control plane with a control token.
+    client = request.getfixturevalue("guarded" if interception == "host" else "client")
     url, evaluation = open_evaluation(client, interception=interception)
     assert record(client, evaluation, "whole")["provenance"] == provenance
     start = {"call_id": "started", "function": "get_weather", "args": {"city": "Boston"}}
@@ -80,7 +95,8 @@ def test_an_unknown_interception_mode_is_refused(client):
     assert client.post(f"/runs/{run['id']}/evaluations", json=body).status_code == 422
 
 
-def test_a_late_call_names_the_interceptor_that_sent_it(client):
+def test_a_late_call_names_the_interceptor_that_sent_it(guarded):
+    client = guarded
     url, evaluation = open_evaluation(client, interception="host")
     client.post(f"{url}/close")
     start = {"call_id": "late", "function": "get_weather", "args": {}}
@@ -116,19 +132,22 @@ async def test_an_agent_hook_that_records_nothing_is_never_graded_secure(app):
 
 
 @pytest.mark.asyncio
-async def test_a_host_interceptor_that_saw_no_call_is_a_complete_capture(app):
-    graded, _ = await grade(app.state.control, "host", [])
+async def test_a_host_interceptor_that_saw_no_call_is_a_complete_capture(suite):
+    # In process, with no server: a served control plane without a control token opens no host-mode evaluation.
+    graded, _ = await grade(ControlPlane({"weather": suite}), "host", [])
     assert "function_calls" not in graded.evidence_status
     assert (graded.security, graded.grade_validity.security.status) == (False, "valid")
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("interception", ["agent", "host"])
-async def test_a_capture_with_records_is_complete_whatever_the_interception(app, interception: InterceptionMode):
-    graded, _ = await grade(app.state.control, interception, [("get_weather", {"city": "San Francisco"})])
+async def test_a_capture_with_records_is_complete_whatever_the_interception(suite, interception: InterceptionMode):
+    # In process, with no server: a served control plane without a control token opens no host-mode evaluation.
+    control = ControlPlane({"weather": suite})
+    graded, _ = await grade(control, interception, [("get_weather", {"city": "San Francisco"})])
     assert "function_calls" not in graded.evidence_status
     assert (graded.security, graded.grade_validity.security.status) == (False, "valid")
-    graded, _ = await grade(app.state.control, interception, [("send_email", SEND_EMAIL)])
+    graded, _ = await grade(control, interception, [("send_email", SEND_EMAIL)])
     assert graded.security is True
 
 

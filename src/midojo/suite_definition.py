@@ -35,6 +35,9 @@ class OpenShellRuntimeDefinition(_RuntimeDefinitionModel):
     files: dict[str, str] = Field(default_factory=dict)
     # Seconds the agent command may run per evaluation; `midojo-run --agent-timeout` overrides it.
     timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    # Whether an agent-mode sandbox gets the evaluation's session (MIDOJO_SESSION_TOKEN) and the control
+    # plane's URL (MIDOJO_URL), for an interception layer in the sandbox. A host-mode sandbox never does.
+    inject_session: bool = True
 
 
 class UnmanagedRuntimeDefinition(_RuntimeDefinitionModel):

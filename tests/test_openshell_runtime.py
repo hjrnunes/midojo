@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 from openshell import ExecResult, SandboxRef, SandboxStatusRef
 from openshell._proto import openshell_pb2
+from pydantic import ValidationError
 
 import midojo.runtimes.openshell as openshell_runtime
 from midojo.agent_client import OpenShellAgentClient
@@ -35,6 +36,20 @@ def test_build_runtime_passes_the_definition_through():
     assert runtime.agent_command == ["pi", "-p", "--no-session"]
     assert runtime.policy == POLICY
     assert runtime.agent_timeout_seconds == 300
+
+
+@pytest.mark.parametrize("inject_session", [True, False])
+def test_build_runtime_passes_inject_session_through(inject_session):
+    definition = OpenShellRuntimeDefinition(image="pi", inject_session=inject_session)
+    runtime = build_runtime("shell_suite", definition)
+    assert isinstance(runtime, OpenShellRuntime)
+    assert runtime.inject_session is inject_session
+
+
+def test_a_sandbox_gets_the_session_unless_the_suite_says_otherwise():
+    assert OpenShellRuntimeDefinition(image="pi").inject_session is True
+    with pytest.raises(ValidationError):
+        OpenShellRuntimeDefinition.model_validate({"image": "pi", "inject_session": "no"})
 
 
 def test_build_runtime_passes_the_agent_timeout_through():
@@ -187,7 +202,50 @@ def test_sandbox_environment_never_carries_the_control_token(monkeypatch):
     }
 
 
-def test_host_mode_sandbox_environment_has_the_tool_endpoint_and_nothing_of_the_control_plane():
+# What a suite's env_vars may try to hand the sandbox: the session, the control plane and the real tools.
+_STALE_ENV = {
+    "MIDOJO_URL": "http://control",
+    "MIDOJO_SESSION_TOKEN": "stale",
+    "MIDOJO_CONTROL_TOKEN": "secret",
+    "UPSTREAM_MCP_URL": "http://upstream:9000/mcp",
+    "MCP_SERVER_URL": "http://upstream:9000/mcp",
+}
+
+
+def _sandbox_texts(client: _FakeSandboxClient) -> list[str]:
+    """Everything the sandbox was given: its environment, name and labels, and every command and input it ran."""
+    texts = [f"{key}={value}" for spec in client.specs for key, value in spec.environment.items()]
+    texts += [f"{name} {labels}" for name, labels in client.created]
+    texts += [repr(call) for call in client.exec_calls]
+    return texts
+
+
+def test_without_inject_session_an_agent_mode_sandbox_gets_no_session_and_no_control_plane():
+    runtime, client = _runtime_with_sandbox(
+        env_vars={"LITELLM_MODEL": "m", **_STALE_ENV}, files={"notes.txt": "hi"}, inject_session=False
+    )
+    runtime._run_labels = {"midojo.suite": "shell_suite", "midojo.run-id": "r" * 32}
+    runtime._agent_command = ["agent", "-p"]
+    runtime.configure(cluster="test", control_url="http://localhost:8090")
+    runtime.setup({}, session_token="session-secret", eval_id="e1", user_task_id="t", injection_task_id="attack")
+    runtime.exec_agent("hello", timeout_seconds=30, env={"MIDOJO_TURN_INDEX": "0", "MIDOJO_TURN_COUNT": "2"})
+    # The real tools' URL stays: there is no interceptor for the agent to bypass, and an agent observed only by
+    # OpenShell may need it.
+    assert dict(client.specs[0].environment) == {
+        "LITELLM_MODEL": "m",
+        "UPSTREAM_MCP_URL": "http://upstream:9000/mcp",
+        "MCP_SERVER_URL": "http://upstream:9000/mcp",
+    }
+    # Nor does the sandbox's name or a label name the run or the evaluation the control plane addresses it by.
+    [(name, labels)] = client.created
+    assert re.fullmatch(r"sbx-[0-9a-f]{12}", name) and labels == {"midojo.suite": "shell_suite"}
+    texts = _sandbox_texts(client)
+    for secret in ("session-secret", "host.openshell.internal:8090", "localhost:8090", "r" * 32, "eval-e1"):
+        assert not any(secret in text for text in texts), secret
+
+
+@pytest.mark.parametrize("inject_session", [True, False])
+def test_host_mode_sandbox_environment_has_the_tool_endpoint_and_nothing_of_the_control_plane(inject_session):
     stale = {
         "MIDOJO_URL": "http://control",
         "MIDOJO_SESSION_TOKEN": "stale",
@@ -196,7 +254,8 @@ def test_host_mode_sandbox_environment_has_the_tool_endpoint_and_nothing_of_the_
         "UPSTREAM_MCP_URL": "http://upstream:9000/mcp",
         "MCP_SERVER_URL": "http://upstream:9000/mcp",
     }
-    runtime, client = _runtime_with_sandbox(env_vars={"LITELLM_MODEL": "m", **stale})
+    # A host-mode sandbox never gets the session, whatever the suite's inject_session says.
+    runtime, client = _runtime_with_sandbox(env_vars={"LITELLM_MODEL": "m", **stale}, inject_session=inject_session)
     runtime.configure(cluster="test", interceptor_url="http://host.openshell.internal:8765/mcp")
     endpoint = ToolEndpoint("http://host.openshell.internal:8765/mcp", "tool-token")
     runtime.setup({}, tool_endpoint=endpoint, eval_id="e1", user_task_id="t", injection_task_id=None)
@@ -271,6 +330,23 @@ def test_start_run_warns_when_the_policy_does_not_allow_the_interceptor(monkeypa
     else:
         [message] = warnings
         assert warning in message and "control plane" not in message
+
+
+@pytest.mark.parametrize("inject_session,warned", [(True, True), (False, False)])
+def test_start_run_checks_the_policy_reaches_the_control_plane_only_for_a_sandbox_with_the_session(
+    monkeypatch, caplog, inject_session, warned
+):
+    runtime = OpenShellRuntime("shell_suite", image="pi", policy=POLICY, inject_session=inject_session)
+    workspaces = MagicMock()
+    workspaces.create.side_effect = lambda name, **kw: SimpleNamespace(name=name)
+    monkeypatch.setattr(openshell_runtime.SandboxClient, "from_active_cluster", lambda **kw: MagicMock())
+    monkeypatch.setattr(openshell_runtime.WorkspaceClient, "from_sandbox_client", lambda client: workspaces)
+    runtime.configure(cluster="test", control_url="http://localhost:8090")
+    with caplog.at_level("WARNING", logger="midojo.runtimes.openshell"):
+        runtime.start_run("a" * 32, suite_name="shell_suite")
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert bool(warnings) is warned
+    assert all("control plane at host.openshell.internal:8090" in message for message in warnings)
 
 
 _AGENT_RUN = {"workspace": "midojo-shell-abc123", "workdir": "/sandbox/workdir"}

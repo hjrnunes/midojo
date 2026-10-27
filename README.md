@@ -94,7 +94,7 @@ By default a tool call's record doesn't copy the environment. `midojo-serve --en
 
 Creating an evaluation (`POST /runs/{run_id}/evaluations`, `ControlPlaneClient.create_evaluation(..., idempotency_key=)`) takes an optional `idempotency_key`, a string you choose, one per request. The run then keeps the request and the evaluation it opened under the key, never the session token (only token hashes are kept): sending the same request (`user_task_id`, `injection_task_id`, `injections`, `interception`) with the same key again opens nothing and returns the same evaluation with a freshly issued session token, same expiry, and the token issued before stops resolving (the session is rotated), so a create whose response was lost can be resent safely and only the last response's token works. It rotates at any stage and changes nothing else about the evaluation: once it is closing or sealed, the new token is held to that stage's rules (a call it starts is a late fact, and after the seal it reads nothing), and the old one is refused as `invalid_session` and kept nowhere. A resend is refused, leaving the session as it was, once the session was revoked (it stays revoked) or has expired (its expiry is never extended): 401 `session_closed`. The same key with another request is a 409 with `kind` `idempotency_conflict`. A key belongs to its run, and a create refused outright (an unknown task, say) keeps nothing. Without a key, every create opens a new evaluation, as before.
 
-Anything that can reach the server can read and change its runs. To require a token on every route except the agent's callbacks and `/health`, add `MIDOJO_CONTROL_TOKEN=<a random secret>` to `.env`: `midojo-serve` and `midojo-run` both read it (or pass `--control-token`), and `midojo-run` never hands it to the agent.
+Anything that can reach the server can read and change its runs. To require a token on every route except the agent's callbacks and `/health`, add `MIDOJO_CONTROL_TOKEN=<a random secret>` to `.env`: `midojo-serve` and `midojo-run` both read it (or pass `--control-token`), and `midojo-run` never hands it to the agent. [Host interception](#keep-the-evaluation-out-of-the-agents-reach) requires it.
 
 ### 2. Run a red-team test
 
@@ -344,6 +344,18 @@ Each forwarded call's record carries what the interceptor returned to the agent 
 
 By default the interception layer runs in or beside the agent (a PI extension, LangChain middleware, a fake MCP server the agent reaches) and records calls with the evaluation's session token, so the agent under test can hold that token. With it, the agent could read hidden environment state or rewrite its own record. `midojo-run --interception host` moves interception out of the agent. For each evaluation, `midojo-run` starts an MCP interceptor inside the `midojo-run` process (an asyncio server task, not a separate process). The interceptor mirrors the real MCP server at `--upstream-mcp-url`, applies the evaluation's tool-output injections, and records every call. The agent gets only that interceptor's tool endpoint: a URL and a bearer token valid for that one interceptor. It never gets a session token, the control plane's URL or token, or a run or evaluation ID. In host mode, MiDojo also withholds `UPSTREAM_MCP_URL` and `MCP_SERVER_URL`, which name the real MCP server, so the agent can't call its tools directly and skip the record.
 
+In agent mode, an OpenShell sandbox gets the session token as `MIDOJO_SESSION_TOKEN` and the control plane's URL as `MIDOJO_URL`, for an interception layer inside it, such as the weather suite's PI extension and fake MCP server. The agent can read them too. The token lets it read the evaluation's whole environment, hidden state included, replace or change it, and add or finish call records (all with `provenance` `agent`). A suite whose agent doesn't record its calls from inside the sandbox can keep the session out, with `inject_session: false` under `agent_runtime`:
+
+```yaml
+agent_runtime:
+  image: localhost/my-agent:latest
+  inject_session: false
+```
+
+The sandbox then gets neither variable, nor `MIDOJO_CONTROL_TOKEN`, even when the suite's `env_vars` set them, and it gets the random name and suite label a host-mode sandbox has. `UPSTREAM_MCP_URL` and `MCP_SERVER_URL` are kept: without an interceptor, there's no record for the agent to skip. Nothing in the sandbox records calls then, so the evaluation's `function_calls` evidence is `incomplete`, and a check that needs a call's absence grades unknown. Checks on the environment and on the OpenShell observations work as usual. In host mode the sandbox never gets the session, whatever `inject_session` says.
+
+The interceptor's token is meant for its interceptor alone. The control plane's `/agent` routes refuse it as an invalid session (401), and its run-scoped routes take only the control token, so with `MIDOJO_CONTROL_TOKEN` set they refuse it too. A control plane served over HTTP without a control token is open to anyone who can reach it: every run-scoped route takes any request as the host's, and `GET /suites/{suite_name}` returns the suite's environment, hidden fixture state included. So a served control plane without a control token refuses host mode outright, whichever path asks for the evaluation: `POST /runs/{run_id}/evaluations` (403, `kind` `control_token_required`, nothing kept), and in process on the served control plane, through `ControlPlane`, `InProcessControlClient` or `open_episode` (a `RejectedError` of the same kind). A host-mode evaluation never exists on it, and `midojo-serve` refuses to serve a store that already holds one. `midojo-run --interception host` refuses to start without `--control-token` or `MIDOJO_CONTROL_TOKEN`. A standalone control plane, run in process with no server (`open_episode` without a control client, or a `ControlPlane` no app serves), has no routes to reach, so it needs no token. Agent mode on a tokenless server still runs, but with no isolation: the agent holds its session anyway, and anything that reaches the server can read the fixture environment. Leave the control plane out of a host-mode sandbox's network policy.
+
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `--interception agent\|host` | `agent` | where tool calls are intercepted |
@@ -355,6 +367,7 @@ By default the interception layer runs in or beside the agent (a PI extension, L
 For an unmanaged agent on this machine, the defaults keep the interceptor on loopback. `--protocol openai` and `ogx` put the endpoint in the request's MCP tool (no `--mcp-server-url` needed). `--protocol pi` passes it to the PI process as `MIDOJO_TOOL_URL` and `MIDOJO_TOOL_TOKEN`. `--protocol http` and `a2a` can't pass an endpoint, so `midojo-run` refuses them before the run starts.
 
 ```sh
+# MIDOJO_CONTROL_TOKEN set for both midojo-serve and midojo-run
 midojo-run --suite minibank --agent-uri ./agent --protocol pi \
   --interception host --upstream-mcp-url http://localhost:9000/mcp
 ```
@@ -362,6 +375,7 @@ midojo-run --suite minibank --agent-uri ./agent --protocol pi \
 An OpenShell sandbox can't reach the host's loopback. Bind an address the sandbox can reach and give a fixed port. The sandbox gets `MIDOJO_TOOL_URL` (`http://host.openshell.internal:<port>/mcp`) and `MIDOJO_TOOL_TOKEN`; its agent command connects its MCP client there. MiDojo drops `MIDOJO_SESSION_TOKEN`, `MIDOJO_URL`, `MIDOJO_CONTROL_TOKEN`, `UPSTREAM_MCP_URL` and `MCP_SERVER_URL` from the sandbox's environment, even when the suite's `env_vars` set them. Variables with other names aren't checked, so keep the real server's address out of a suite's `env_vars`. The sandbox gets a random name (`sbx-<hex>`) and only the suite's label, not the `eval-<id>` name and run, evaluation and task labels an agent-mode sandbox has; `midojo-run` logs which sandbox runs each evaluation. `--interceptor-bind` must not be a loopback address, and `--interceptor-advertise-host` must be neither a loopback nor an unspecified address (`0.0.0.0`, `::`). An IPv6 host may be given with or without brackets (`2001:db8::1` or `[2001:db8::1]`); the URL brackets it, and the policy names it without brackets.
 
 ```sh
+# MIDOJO_CONTROL_TOKEN set for both midojo-serve and midojo-run
 midojo-run --suite weather --gateway GATEWAY --control-url http://localhost:8090 \
   --interception host --upstream-mcp-url http://localhost:9000/mcp \
   --interceptor-bind 0.0.0.0 --interceptor-port 8765

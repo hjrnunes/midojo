@@ -15,11 +15,12 @@ from dataclasses import dataclass, field
 TOOL_URL_ENV = "MIDOJO_TOOL_URL"
 TOOL_TOKEN_ENV = "MIDOJO_TOOL_TOKEN"
 
-# What a host-mode target never gets, whoever set it: the variables that give or name an evaluation's
-# session or the control plane, and those that name the real MCP server, a route past the interceptor.
-HOST_MODE_WITHHELD_ENV = frozenset(
-    {"MIDOJO_SESSION_TOKEN", "MIDOJO_URL", "MIDOJO_CONTROL_TOKEN", "UPSTREAM_MCP_URL", "MCP_SERVER_URL"}
-)
+# The variables that give or name an evaluation's session or the control plane.
+SESSION_ENV = frozenset({"MIDOJO_SESSION_TOKEN", "MIDOJO_URL", "MIDOJO_CONTROL_TOKEN"})
+
+# What a host-mode target never gets, whoever set it: those, and the variables that name the real MCP
+# server, a route past the interceptor.
+HOST_MODE_WITHHELD_ENV = SESSION_ENV | {"UPSTREAM_MCP_URL", "MCP_SERVER_URL"}
 
 # The path an interceptor serves its tools on.
 TOOL_PATH = "/mcp"
