@@ -8,7 +8,8 @@ import json
 import math
 import os
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -28,7 +29,16 @@ from midojo.agent_client import (
     PIAgentClient,
     SimpleHTTPAgentClient,
 )
-from midojo.attacks import AttemptOutcome
+from midojo.attacks import (
+    Attacker,
+    AttemptIsolation,
+    AttemptOutcome,
+    OutOfSurfaceError,
+    StaticAttacker,
+    check_plan_within,
+    is_adaptive,
+    permitted_injections,
+)
 from midojo.control_plane.client import ControlClient, ControlPlaneClient
 from midojo.control_plane.config import CONTROL_TOKEN_ENV
 from midojo.control_plane.models import GradeResponse
@@ -36,7 +46,7 @@ from midojo.control_plane.state import Snapshot
 from midojo.delivery import EXPOSURE_BOUNDARIES, DeliveryFact, Exposure, ExposureStatus, delivery_facts, exposure
 from midojo.episode import Episode
 from midojo.episode_context import EpisodeContext, EpisodeStep, open_episode
-from midojo.runtimes import AgentRuntime
+from midojo.runtimes import AgentRuntime, attempt_isolation, is_disposable
 from midojo.runtimes.openshell import SANDBOX_HOST, OpenShellRuntime
 from midojo.suites import get_suite, list_suites
 from midojo.tool_endpoint import bare_host, tool_url
@@ -239,40 +249,51 @@ def _exposure_detail(report: Exposure) -> str:
     return f"payload emitted: {emitted}, agent tool result: {tool_result}, model input: {model_input}"
 
 
-def _with_count(cell: Text, count: int, outcomes: list[AttemptOutcome], attempts: int) -> Text:
+def _with_count(cell: Text, count: int, outcomes: Sequence[AttemptOutcome], attempts: int) -> Text:
     """Append a ``(count/total)`` attempt tally to a verdict cell when K>1.
 
     The tally sits inline instead of in a separate column, and never changes the
     verdict beside it.
     """
     if attempts > 1:
+        cell = cell.copy()
         cell.append(f"  ({count}/{len(outcomes)})", style="dim")
     return cell
 
 
-def _utility_cell(util: bool, outcomes: list[AttemptOutcome], attempts: int) -> Text:
-    return _with_count(_utility(util), sum(1 for o in outcomes if o.utility), outcomes, attempts)
+def _utility_cell(util: bool | None, outcomes: Sequence[AttemptOutcome], attempts: int) -> Text:
+    return _with_count(_utility(util), sum(1 for o in outcomes if o.utility is True), outcomes, attempts)
 
 
-def _security_cell(sec: bool | None, outcomes: list[AttemptOutcome], attempts: int) -> Text:
-    """The Security verdict (best-of-K: any attempt breaking is a win), or N/A when nothing was delivered."""
-    if sec is None:
-        return Text("N/A", style="dim")
-    return _with_count(_security(sec), sum(1 for o in outcomes if o.broke), outcomes, attempts)
+def _security_cell(sec: bool | None, outcomes: Sequence[AttemptOutcome], attempts: int) -> Text:
+    """The Security verdict (best-of-K: any attempt that counts as a break is a win), and the tally of breaks."""
+    return _with_count(_security(sec), sum(1 for o in outcomes if o.broke is True), outcomes, attempts)
 
 
-def _attempt_metrics(outcomes: list[AttemptOutcome]) -> dict[str, Any]:
+def _attempt_metrics(outcomes: Sequence[AttemptOutcome]) -> dict[str, Any]:
     """Aggregate per-attempt outcomes into the metrics recorded for a pair.
 
     The overall attack success rate is the Security column (share of pairs that
     broke), so this deliberately records raw counts — not a per-pair rate that
-    would read as a second, competing ASR.
+    would read as a second, competing ASR. ``successes`` counts the attempts
+    that count as a break (an adaptive attacker's only once its clean-start
+    replay broke too), ``unknown`` the graded ones whose break is unknown;
+    ``delivered`` and ``delivery_unknown`` count the graded attempts whose
+    ``injection_delivered`` is True and None. Failed and refused attempts are
+    counted apart, never as non-breaks.
     """
+    graded = [o for o in outcomes if o.status == "graded"]
     return {
         "attempts_run": len(outcomes),
-        "attempts_to_break": next((o.attempt for o in outcomes if o.broke), None),
-        "delivered": sum(1 for o in outcomes if o.delivered),
-        "successes": sum(1 for o in outcomes if o.broke),
+        "graded": len(graded),
+        "failed": sum(1 for o in outcomes if o.status == "failed"),
+        "refused": sum(1 for o in outcomes if o.status == "refused"),
+        "attempts_to_break": next((o.attempt for o in outcomes if o.broke is True), None),
+        "successes": sum(1 for o in graded if o.broke is True),
+        "unknown": sum(1 for o in graded if o.broke is None),
+        "delivered": sum(1 for o in graded if o.injection_delivered is True),
+        "delivery_unknown": sum(1 for o in graded if o.injection_delivered is None),
+        "replays": sum(1 for o in outcomes if o.replay is not None),
     }
 
 
@@ -284,9 +305,15 @@ def _print_results_table(
     results_file: Path,
     pairs: list[TaskPair] | None = None,
     failures: dict[TaskPair, PairFailure] | None = None,
+    attempt_log: dict[TaskPair, list[AttemptOutcome]] | None = None,
+    attempts: int = 1,
 ) -> None:
-    """The run's results; ``pairs`` orders graded and ``failures`` pairs alike, by default the graded ones."""
+    """The run's results; ``pairs`` orders graded and ``failures`` pairs alike, by default the graded ones.
+
+    With more than one attempt per pair, the Utility and Security cells tally the pair's attempts (``attempt_log``).
+    """
     failures = failures or {}
+    attempt_log = attempt_log or {}
     table = Table(title="Results", border_style="cyan", show_lines=True)
     table.add_column("User Task", style="bold")
     if has_injections:
@@ -298,10 +325,11 @@ def _print_results_table(
     for pair in pairs if pairs is not None else utility_results:
         if pair in failures:
             cells = [_FAILED, _FAILED] if has_injections else [_FAILED]
-        elif has_injections:
-            cells = [_utility(utility_results[pair]), _security(security_results[pair])]
         else:
-            cells = [_utility(utility_results[pair])]
+            outcomes = attempt_log.get(pair, [])
+            cells = [_utility_cell(utility_results[pair], outcomes, attempts)]
+            if has_injections:
+                cells.append(_security_cell(security_results[pair], outcomes, attempts))
         ids = [pair.user_task_id, pair.injection_task_id] if has_injections else [pair.user_task_id]
         table.add_row(*ids, *cells)
 
@@ -367,6 +395,7 @@ async def run_task(
     runtime: AgentRuntime,
     interception: HostInterception | None = None,
     on_context: Callable[[EpisodeContext], object] | None = None,
+    reset: bool = False,
 ) -> TaskResult:
     """Run one evaluation of a suite's ``episode`` in an episode context, and grade it on the control plane.
 
@@ -389,6 +418,8 @@ async def run_task(
 
     ``on_context`` is given the episode context before it's entered, so a
     caller can still read its ``evaluation_id`` (once opened) when this raises.
+    ``reset`` asks the context to reset the target first, when the runtime
+    declares a reset (see :func:`midojo.episode_context.open_episode`).
     """
     user_task_id, injection_task_id = episode.user_task_id, episode.injection_task_id
     if user_task_id is None:
@@ -408,7 +439,13 @@ async def run_task(
         return console.status(f"[dim]{pair} · {steps[step]}…[/dim]", spinner="dots")
 
     context = open_episode(
-        episode, runtime=runtime, interception=interception, control=control, run_id=run_id, progress=progress
+        episode,
+        runtime=runtime,
+        interception=interception,
+        control=control,
+        run_id=run_id,
+        reset=reset,
+        progress=progress,
     )
     if on_context is not None:
         on_context(context)
@@ -446,6 +483,288 @@ async def _converse(ep: EpisodeContext, agent_client: AgentClient, pair: str) ->
     return turns
 
 
+# Builds a pair's attacker from its user task, injection task and the suite's injections for it.
+AttackerFactory = Callable[[str, str | None, dict[str, str]], Attacker]
+
+
+def _static_attacker(_user_task_id: str, _injection_task_id: str | None, injections: dict[str, str]) -> Attacker:
+    return StaticAttacker(injections)
+
+
+class EpisodeRun(NamedTuple):
+    """One episode the attempt loop ran: its result or why it failed, how it was isolated, and what it delivered."""
+
+    result: TaskResult | None
+    failure: PairFailure | None
+    isolation: AttemptIsolation
+    facts: list[DeliveryFact]
+    exposure: Exposure | None
+
+
+class AttemptRun(NamedTuple):
+    """One attempt of a pair: its outcome, its episode (None when refused), and its clean-start replay, if any."""
+
+    outcome: AttemptOutcome
+    run: EpisodeRun | None
+    replay: EpisodeRun | None = None
+
+    @property
+    def counted(self) -> EpisodeRun | None:
+        """The episode whose verdict the attempt counts with: a confirmed adaptive break's replay, else its own."""
+        if self.outcome.broke is True and self.replay is not None:
+            return self.replay
+        return self.run
+
+
+def _isolation_used(contexts: list[EpisodeContext], runtime: AgentRuntime) -> AttemptIsolation:
+    if contexts and contexts[0].reset_outcome == "reset":
+        return "reset"
+    return "disposable" if is_disposable(runtime) else "none"
+
+
+async def _run_episode(
+    control: ControlClient,
+    agent_client: AgentClient,
+    run_id: str,
+    episode: Episode,
+    *,
+    runtime: AgentRuntime,
+    interception: HostInterception | None,
+    reset: bool,
+    pair_name: str,
+) -> EpisodeRun:
+    """Run one episode with :func:`run_task`; an ``Exception`` it raises is a failure, as for a failed pair."""
+    contexts: list[EpisodeContext] = []
+    cancellations = _cancellations()
+    try:
+        result = await run_task(
+            control,
+            agent_client,
+            run_id,
+            episode,
+            runtime=runtime,
+            interception=interception,
+            on_context=contexts.append,
+            reset=reset,
+        )
+    except Exception as error:
+        # An interrupt or a cancellation isn't an Exception, and stops the run. But the episode
+        # context raises its own failure ahead of a cancellation that arrived while it released
+        # the evaluation, noting the cancellation only: the task's cancellation count went up then.
+        # Only a rise during this episode counts: one a caller suppressed earlier isn't this one's.
+        if _cancellations() > cancellations:
+            raise asyncio.CancelledError(f"Cancelled while running {pair_name}") from error
+        # The episode failed. Its evaluation, if opened, is sealed and usually ungraded, but
+        # run_task can raise after the grade: either way it isn't counted.
+        failure = PairFailure(_opened_evaluation(contexts), f"{type(error).__name__}: {error}")
+        return EpisodeRun(None, failure, _isolation_used(contexts, runtime), [], None)
+    facts: list[DeliveryFact] = []
+    report: Exposure | None = None
+    if episode.injection_task_id is not None:
+        assert result.snapshot is not None  # run_task returns the snapshot it graded.
+        facts, report = _delivery(episode, result.snapshot)
+    return EpisodeRun(result, None, _isolation_used(contexts, runtime), facts, report)
+
+
+def _outcome(attempt: int, injections: dict[str, str], run: EpisodeRun) -> AttemptOutcome:
+    """An attempt's outcome, read from its episode's sealed verdict and delivery facts."""
+    if run.result is None:
+        assert run.failure is not None
+        return AttemptOutcome.unrun(
+            attempt, injections, "failed", run.failure.reason, eval_id=run.failure.eval_id, isolation=run.isolation
+        )
+    return AttemptOutcome.from_verdict(
+        attempt,
+        injections,
+        run.result.grade,
+        run.facts,
+        run.exposure,
+        eval_id=run.result.eval_id,
+        agent_output=run.result.agent_output,
+        isolation=run.isolation,
+    )
+
+
+def _proposed(proposal: object) -> dict[str, str]:
+    """A refused proposal's injections, as far as they can be recorded."""
+    injections = getattr(proposal, "injections", None)
+    if not isinstance(injections, dict):
+        return {}
+    return {str(key): value if type(value) is str else repr(value) for key, value in injections.items()}
+
+
+def _print_episode(control_url: str, run_id: str, label: str, run: EpisodeRun, injection: bool) -> None:
+    if run.result is None:
+        assert run.failure is not None
+        _print_failed_pair(control_url, run_id, label, run.failure)
+        return
+    result, grade = run.result, run.result.grade
+    eval_url = f"{control_url}/runs/{run_id}/evaluations/{result.eval_id}"
+    console.print(f"  [dim]\\[eval: [link={eval_url}][cyan]{result.eval_id}[/cyan][/link]][/dim] {label}")
+    for idx, (message, reply) in enumerate(result.turns):
+        _print_agent_text(_turn_label("agent input", idx, len(result.turns)), message)
+        _print_agent_text(_turn_label("agent output", idx, len(result.turns)), reply)
+    console.print("    ", _utility(grade.utility))
+    if injection:
+        assert run.exposure is not None
+        detail = _exposure_detail(run.exposure)
+        if grade.security is not False and grade.security_reason:
+            # attack succeeded, or couldn't be graded — name the criterion that decided it
+            detail += f" · {grade.security_reason}"
+        console.print("    ", _security(grade.security), Text(f"  ({detail})", style="dim"))
+
+
+_REFUSED = Text("⛔ refused (not run)", style="bold magenta")
+
+
+def _print_refused(label: str, outcome: AttemptOutcome) -> None:
+    console.print(f"  [dim]\\[eval: none][/dim] {label}")
+    console.print("    ", _REFUSED, Text(f"  ({outcome.failure_reason})", style="dim"))
+
+
+async def _run_pair_attempts(
+    control: ControlClient,
+    control_url: str,
+    agent_client: AgentClient,
+    run_id: str,
+    suite: YAMLTaskSuite,
+    ut_id: str,
+    it_id: str | None,
+    attacker: Attacker,
+    attempts: int,
+    *,
+    runtime: AgentRuntime,
+    interception: HostInterception | None = None,
+    label: str,
+) -> list[AttemptRun]:
+    """Run one (user_task x injection_task) pair for ``attempts`` attempts, each one episode.
+
+    The attacker proposes each attempt's injections given the outcomes of the
+    earlier ones (``goal`` is None: no objective source exists yet). A proposal
+    may only fill payloads of the probes the pair's injection task declares; one
+    naming another probe, or compiling to a plan that places anything the
+    pair's own plan doesn't, is refused before any episode runs, and recorded as
+    refused. Otherwise the attempt is one episode, compiled with
+    ``suite.episode`` from its injections, run through the episode context,
+    sealed and graded (:func:`run_task`); its outcome is read from that verdict
+    and the snapshot's delivery facts. An ``Exception`` from the attacker or the
+    episode is a failed attempt, not a non-break.
+
+    Attempts never share a target: when the loop runs more than one episode for
+    the pair (more than one attempt, or an adaptive attacker's replay), each
+    gets the runtime's declared reset, or the fresh target of a disposable
+    runtime; on a runtime with neither, more than one attempt is refused
+    (ValueError) and a replay isn't run. A single attempt of a static attacker
+    runs as a pair always did.
+
+    An adaptive attacker's success counts only once its injections, replayed in
+    a fresh episode from a clean start, break the agent again
+    (:meth:`AttemptOutcome.confirmed_by`). A static attacker's attempt is
+    already a clean-start run of a fixed payload: it gets no replay.
+
+    Every attempt runs: stopping at the first break belongs with the adaptive
+    attacker that hunts for one.
+    """
+    isolation = attempt_isolation(runtime)
+    if attempts > 1 and isolation is None:
+        raise ValueError(
+            f"{attempts} attempts would share the {runtime.name} runtime's target: it declares neither a reset "
+            "nor a disposable target"
+        )
+    adaptive = is_adaptive(attacker)
+    # Only a loop that runs more than one episode for the pair asks for a reset: a single static attempt runs as
+    # a pair always did.
+    reset = (attempts > 1 or adaptive) and isolation == "reset"
+    permitted = suite.get_probes_for_task(it_id) if it_id else {}
+    surface = suite.episode(ut_id, it_id, permitted).plan
+    pair_name = f"{ut_id} x {it_id}" if it_id else ut_id
+    runs: list[AttemptRun] = []
+    history: list[AttemptOutcome] = []
+
+    async def episode_of(injections: dict[str, str]) -> EpisodeRun:
+        return await _run_episode(
+            control,
+            agent_client,
+            run_id,
+            suite.episode(ut_id, it_id, injections),
+            runtime=runtime,
+            interception=interception,
+            reset=reset,
+            pair_name=pair_name,
+        )
+
+    for k in range(1, attempts + 1):
+        tag = f"[magenta]attempt {k}/{attempts}[/magenta] {label}" if attempts > 1 or adaptive else label
+        try:
+            # No objective source exists yet; an attacker that pursues a goal defines one.
+            proposal = await attacker.propose(None, tuple(history))
+        except Exception as error:
+            outcome = AttemptOutcome.unrun(k, {}, "failed", f"attacker: {type(error).__name__}: {error}")
+            _print_failed_pair(control_url, run_id, tag, PairFailure(None, outcome.failure_reason or ""))
+            runs.append(AttemptRun(outcome, None))
+            history.append(outcome)
+            continue
+        try:
+            injections = permitted_injections(proposal, permitted)
+            check_plan_within(suite.episode(ut_id, it_id, injections).plan, surface)
+        except OutOfSurfaceError as error:
+            outcome = AttemptOutcome.unrun(k, _proposed(proposal), "refused", str(error))
+            _print_refused(tag, outcome)
+            runs.append(AttemptRun(outcome, None))
+            history.append(outcome)
+            continue
+        run = await episode_of(injections)
+        _print_episode(control_url, run_id, tag, run, it_id is not None)
+        outcome = _outcome(k, injections, run)
+        replay: EpisodeRun | None = None
+        if adaptive and outcome.broke is True:
+            replay_tag = f"[magenta]replay of attempt {k}[/magenta] {label}"
+            if isolation is None:
+                replay_outcome = AttemptOutcome.unrun(
+                    k,
+                    injections,
+                    "refused",
+                    f"a clean-start replay needs a runtime that declares a reset or a disposable target; the "
+                    f"{runtime.name} runtime declares neither",
+                )
+                _print_refused(replay_tag, replay_outcome)
+            else:
+                replay = await episode_of(injections)
+                _print_episode(control_url, run_id, replay_tag, replay, it_id is not None)
+                replay_outcome = _outcome(k, injections, replay)
+            outcome = outcome.confirmed_by(replay_outcome)
+        runs.append(AttemptRun(outcome, run, replay))
+        history.append(outcome)
+    return runs
+
+
+def _pair_security(outcomes: Sequence[AttemptOutcome]) -> bool | None:
+    """A pair's security over its attempts: True when one counts as a break, else unknown when one is, else False.
+
+    A failed attempt's break is unknown, so it never counts as a non-break; a refused one never ran, and is left out.
+    """
+    ran = [o.broke for o in outcomes if o.status != "refused"]
+    if True in ran:
+        return True
+    return None if None in ran or not ran else False
+
+
+def _representative(runs: Sequence[AttemptRun]) -> EpisodeRun | None:
+    """The episode a pair reports: the first attempt that counts as a break, else the last graded one; or None."""
+    broken = next((r.counted for r in runs if r.outcome.broke is True), None)
+    if broken is not None:
+        return broken
+    return next((r.run for r in reversed(runs) if r.run is not None and r.run.result is not None), None)
+
+
+def _pair_failure(runs: Sequence[AttemptRun]) -> PairFailure:
+    """Why a pair with no graded attempt failed: its last attempt's failure or refusal."""
+    last = runs[-1]
+    if last.run is not None and last.run.failure is not None:
+        return last.run.failure
+    return PairFailure(last.outcome.eval_id, last.outcome.failure_reason or last.outcome.status)
+
+
 async def _run_benchmark(
     control: ControlClient,
     control_url: str,
@@ -459,7 +778,12 @@ async def _run_benchmark(
     logdir: Path,
     runtime: AgentRuntime,
     interception: HostInterception | None = None,
+    attempts: int = 1,
+    attacker_factory: AttackerFactory | None = None,
 ) -> BenchmarkOutcome:
+    if attempts < 1:
+        raise ValueError(f"attempts must be at least 1, not {attempts}")
+    attacker_factory = attacker_factory or _static_attacker
     user_tasks_to_run = user_task_ids or list(suite.user_tasks.keys())
     injection_tasks_to_run: list[str]
     if injection_task_ids is not None:
@@ -475,6 +799,11 @@ async def _run_benchmark(
         raise click.UsageError(
             f"--protocol {protocol} can't give the agent a tool endpoint. Host interception supports --protocol "
             "openai, ogx and pi, and the openshell runtime."
+        )
+    if attempts > 1 and attempt_isolation(runtime) is None:
+        raise click.UsageError(
+            f"--attempts {attempts} runs each pair more than once, but the {runtime.name} runtime declares neither a "
+            "reset nor a disposable target, so the attempts would share its state. Run one attempt per pair."
         )
     run_id = (await control.create_run(suite_name)).id
     _print_banner(suite_name, agent_uri, protocol, user_tasks_to_run, injection_tasks_to_run)
@@ -492,6 +821,9 @@ async def _run_benchmark(
     pairs: list[TaskPair] = []
     eval_ids: dict[TaskPair, str | None] = {}
     failures: dict[TaskPair, PairFailure] = {}
+    attempt_log: dict[TaskPair, list[AttemptOutcome]] = {}
+    # Whether any pair ran more than one attempt or an adaptive attacker: then results.json records the attempts.
+    extended = attempts > 1
 
     it_ids_to_run: list[str | None] = [*injection_tasks_to_run] if injection_tasks_to_run else [None]
     started: str | None = None
@@ -503,63 +835,48 @@ async def _run_benchmark(
 
         for ut_id in user_tasks_to_run:
             for it_id in it_ids_to_run:
-                episode = suite.episode(ut_id, it_id, suite.get_probes_for_task(it_id) if it_id else {})
                 pair = TaskPair(ut_id, it_id or "")
                 pairs.append(pair)
-                pair_name = f"{ut_id} x {it_id}" if it_id else ut_id
                 label = f"[bold]{ut_id}[/bold] x [bold]{it_id}[/bold]" if it_id else f"[bold]{ut_id}[/bold]"
-                contexts: list[EpisodeContext] = []
-                cancellations = _cancellations()
-                try:
-                    result = await run_task(
-                        control,
-                        agent_client,
-                        run_id,
-                        episode,
-                        runtime=runtime,
-                        interception=interception,
-                        on_context=contexts.append,
-                    )
-                except Exception as error:
-                    # An interrupt or a cancellation isn't an Exception, and stops the run. But the episode
-                    # context raises its own failure ahead of a cancellation that arrived while it released
-                    # the evaluation, noting the cancellation only: the task's cancellation count went up then.
-                    # Only a rise during this pair counts: one a caller suppressed earlier isn't this pair's.
-                    if _cancellations() > cancellations:
-                        raise asyncio.CancelledError(f"Cancelled while running {pair_name}") from error
-                    # The pair failed. Its evaluation, if opened, is sealed and usually ungraded, but
-                    # run_task can raise after the grade: either way the pair isn't counted.
-                    failure = PairFailure(_opened_evaluation(contexts), f"{type(error).__name__}: {error}")
-                    failures[pair] = failure
+                attacker = attacker_factory(ut_id, it_id, suite.get_probes_for_task(it_id) if it_id else {})
+                extended = extended or is_adaptive(attacker)
+                runs = await _run_pair_attempts(
+                    control,
+                    control_url,
+                    agent_client,
+                    run_id,
+                    suite,
+                    ut_id,
+                    it_id,
+                    attacker,
+                    attempts,
+                    runtime=runtime,
+                    interception=interception,
+                    label=label,
+                )
+                attempt_log[pair] = [r.outcome for r in runs]
+                representative = _representative(runs)
+                if representative is None or representative.result is None:
+                    # No attempt was graded: the pair failed, as a single failed evaluation always made it.
+                    failure = failures[pair] = _pair_failure(runs)
                     eval_ids[pair] = failure.eval_id
-                    _print_failed_pair(control_url, run_id, label, failure)
                     continue
+                result = representative.result
                 grade = result.grade
                 utility_results[pair] = grade.utility
                 utility_reasons[pair] = grade.utility_reason
                 grade_validity[pair] = grade.grade_validity.model_dump(mode="json")
                 evidence_status[pair] = dict(grade.evidence_status)
-                eval_id = eval_ids[pair] = result.eval_id
-                eval_url = f"{control_url}/runs/{run_id}/evaluations/{eval_id}"
-                console.print(f"  [dim]\\[eval: [link={eval_url}][cyan]{eval_id}[/cyan][/link]][/dim] {label}")
-                for idx, (message, reply) in enumerate(result.turns):
-                    _print_agent_text(_turn_label("agent input", idx, len(result.turns)), message)
-                    _print_agent_text(_turn_label("agent output", idx, len(result.turns)), reply)
-                console.print("    ", _utility(grade.utility))
+                eval_ids[pair] = result.eval_id
                 if it_id:
                     # Every injection evaluation counts in the attack-success rate. Its delivery and
                     # exposure are reported alongside and never filter it out.
-                    security_results[pair] = grade.security
+                    security_results[pair] = _pair_security(attempt_log[pair])
                     security_reasons[pair] = grade.security_reason
                     for name in ATTACK_OUTCOME:
                         outcome_results[name][pair] = getattr(grade, name)
-                    assert result.snapshot is not None  # run_task returns the snapshot it graded.
-                    delivery_results[pair], exposure_results[pair] = _delivery(episode, result.snapshot)
-                    detail = _exposure_detail(exposure_results[pair])
-                    if grade.security is not False and grade.security_reason:
-                        # attack succeeded, or couldn't be graded — name the criterion that decided it
-                        detail += f" · {grade.security_reason}"
-                    console.print("    ", _security(grade.security), Text(f"  ({detail})", style="dim"))
+                    assert representative.exposure is not None  # every injection episode's delivery is read
+                    delivery_results[pair], exposure_results[pair] = representative.facts, representative.exposure
     finally:
         with console.status(f"[dim]stopping the {runtime.name} runtime…[/dim]", spinner="dots"):
             await asyncio.to_thread(runtime.end_run)
@@ -608,6 +925,12 @@ async def _run_benchmark(
         results["evaluation_id"] = by_pair(eval_ids)
         aggregates["failed"] = len(failures)
     results["aggregates"] = aggregates
+    # The attempts dimension is additive: a default (single-attempt, static) run writes exactly the historical
+    # shape, so existing result consumers are unaffected.
+    if extended:
+        results["attempts"] = attempts
+        results["metrics"] = by_pair({k: _attempt_metrics(v) for k, v in attempt_log.items()})
+        results["attempt_log"] = by_pair({k: [asdict(o) for o in v] for k, v in attempt_log.items()})
     with open(results_file, "w") as f:
         json.dump(results, f, indent=2)
 
@@ -619,6 +942,8 @@ async def _run_benchmark(
         results_file,
         pairs,
         failures,
+        attempt_log,
+        attempts,
     )
     return BenchmarkOutcome(graded=len(utility_results), failed=len(failures), results_file=results_file)
 
@@ -661,6 +986,8 @@ async def run_benchmark(
     runtime: AgentRuntime | None = None,
     control: ControlClient | None = None,
     interception: HostInterception | None = None,
+    attempts: int = 1,
+    attacker_factory: AttackerFactory | None = None,
 ) -> BenchmarkOutcome:
     """Run the benchmark against the control plane at ``control_url``, and say how many task pairs failed.
 
@@ -676,6 +1003,11 @@ async def run_benchmark(
     A task pair whose evaluation fails (``run_task`` raises an ``Exception``)
     is recorded as failed and the run goes on; ``results.json`` is written
     either way. :func:`exit_status` maps the outcome to midojo-run's exit status.
+
+    ``attempts`` runs each pair that many times, the injections of each
+    attempt proposed by the pair's attacker (``attacker_factory(user_task_id,
+    injection_task_id, injections)``, by default a :class:`StaticAttacker` of
+    the suite's injections); see :func:`_run_pair_attempts` for the rules.
     """
     if runtime is None:
         runtime = suite.new_runtime()
@@ -695,6 +1027,8 @@ async def run_benchmark(
             logdir,
             runtime,
             interception,
+            attempts=attempts,
+            attacker_factory=attacker_factory,
         )
 
 
@@ -805,6 +1139,16 @@ async def run_benchmark(
     help="Host the agent connects to the interceptor at. Defaults to host.openshell.internal for OpenShell "
     "sandboxes, and to the bind address otherwise (127.0.0.1 for a wildcard bind).",
 )
+@click.option(
+    "--attempts",
+    "-k",
+    default=1,
+    type=click.IntRange(min=1),
+    help="Run each user x injection pair this many times, each a fresh episode on an isolated target (the runtime's "
+    "declared reset, or a fresh sandbox). Default 1 (single-shot, as before). With >1, the Utility and Security "
+    "cells show how many attempts completed the task and broke the agent; any attempt that breaks it counts as a "
+    "break. Refused for a runtime that declares neither (an unmanaged agent).",
+)
 def main(
     control_url: str,
     control_token: str | None,
@@ -826,6 +1170,7 @@ def main(
     interceptor_bind: str,
     interceptor_port: int,
     interceptor_advertise_host: str | None,
+    attempts: int,
 ) -> None:
     """Run a benchmark suite's task pairs against an agent, and write their results to LOGDIR/results.json.
 
@@ -933,6 +1278,7 @@ def main(
             control_token=control_token or None,
             runtime=runtime,
             interception=host_interception,
+            attempts=attempts,
         )
     )
     status = exit_status(outcome)

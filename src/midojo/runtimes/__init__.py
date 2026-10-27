@@ -22,7 +22,7 @@ in host mode, only the tool endpoint of the interceptor the host runs
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel
 
@@ -85,6 +85,39 @@ class ResettableRuntime(Protocol):
     def reset(self) -> None:
         """Return the target to its initial state, before an episode."""
         ...
+
+
+@runtime_checkable
+class DisposableRuntime(Protocol):
+    """A runtime whose every evaluation gets a fresh target: a capability it declares with ``disposable = True``.
+
+    :class:`~midojo.runtimes.openshell.OpenShellRuntime` declares it: each
+    evaluation's sandbox is created in ``setup`` and deleted in ``teardown``,
+    and the world state the agent's tools read is the control plane's, fresh
+    per evaluation. What the agent changed outside both (a remote account, say)
+    isn't undone; a runtime whose target keeps state between evaluations (an
+    unmanaged agent) doesn't declare it.
+    """
+
+    disposable: bool
+
+
+def attempt_isolation(runtime: object) -> Literal["reset", "disposable"] | None:
+    """How evaluations on ``runtime`` can be kept from sharing state: its declared reset, a fresh target each, or None.
+
+    A declared reset (:class:`ResettableRuntime`) comes first: it returns the
+    whole target to its initial state, beyond the evaluation's own sandbox.
+    """
+    if isinstance(runtime, ResettableRuntime):
+        return "reset"
+    if is_disposable(runtime):
+        return "disposable"
+    return None
+
+
+def is_disposable(runtime: object) -> bool:
+    """Whether ``runtime`` declares a fresh target for every evaluation (:class:`DisposableRuntime`)."""
+    return isinstance(runtime, DisposableRuntime) and runtime.disposable is True
 
 
 class UnmanagedRuntime:
