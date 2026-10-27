@@ -431,6 +431,8 @@ class OpenShellRuntime:
     """
 
     name = "openshell"
+    # Every evaluation gets a sandbox of its own, created in setup and deleted in teardown.
+    disposable = True
 
     def __init__(
         self,

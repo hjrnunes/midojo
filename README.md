@@ -220,6 +220,19 @@ A task pair that failed (see above) is printed as **💥 failed (not counted)** 
 
 `midojo-run` writes `results.json` before it exits, and exits with 0 when no task pair failed, 3 when some failed and at least one was graded, and 4 when every one failed.
 
+**Repeat a pairing.** An agent can resist an injection on one run and follow it on the next. `--attempts N` (`-k N`) runs each pairing N times, each a fresh episode on an isolated target (a fresh sandbox, or the runtime's declared reset; `midojo-run` refuses it for an unmanaged agent, whose state attempts would share), and the Utility and Security cells show how many attempts completed the task and broke the agent, e.g. `💀 attack succeeded  (1/3)`. Any attempt that breaks the agent counts as a break, so the Security percentage stays the attack success rate; an attempt that failed or couldn't be graded is never counted as resisting it:
+
+```bash
+uv run --env-file .env midojo-run --suite weather --gateway openshell \
+  --control-url http://localhost:8090 \
+  --user-task trip_weather --injection-task hidden_file_via_itinerary \
+  --attempts 3 --logdir runs/weather-trip-x3
+```
+
+`results.json` then also records every attempt (`attempt_log`: its grade, delivery and exposure, and how its target was isolated) and per-pairing counts (`metrics`).
+
+The attempts replay the suite's payloads unchanged (`StaticAttacker`); MiDojo has no adaptive attacker yet. To search for a payload that breaks the agent, drive MiDojo episodes from PyRIT or Garak instead. An adaptive attacker plugged into `run_benchmark(attacker_factory=...)` follows the same rules: it may only fill the probes the pair's injection task declares, and a success counts only once its injections break the agent again in a fresh episode from a clean start.
+
 **Compare with a clean run.** Selecting a user task without an injection task runs it without attacks, so you can compare the agent's answer with step 2's:
 
 ```bash
