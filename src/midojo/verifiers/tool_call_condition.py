@@ -10,6 +10,21 @@ reference implementation's behavior where it is surprising, and this module
 keeps that behavior. Input the reference cannot handle returns a result here: a
 ``kind``, ``source``, or ``op`` that is a list or an object is an unknown value
 problem, and an integer beyond float range saturates to an infinity.
+
+A false ``complete`` makes inconclusive only what a missing call could change:
+a ``not_called`` no captured call breaks, and a call-level assignment no choice
+of captured calls satisfies. An ``order`` comparison itself is decided from the
+captured prior calls alone, so an operation with no captured prior is detected
+even when ``complete`` is false (the contract's
+``completeness.order-clean.complete-false`` vector), while one whose prior was
+captured is inconclusive (``completeness.order-violated.complete-false``).
+
+One call fact goes beyond the contract: a call whose ``blocked`` fact is
+``True`` (its tool never ran) is no prior call for an ``order`` comparison,
+with or without ``same_argument``. It still counts everywhere else, as the call
+the agent attempted: it may be the call an ``order`` or ``value`` comparison is
+assigned, and it breaks ``not_called``. The contract's calls carry no
+``blocked`` fact, so its vectors evaluate as they always did.
 """
 
 from __future__ import annotations
@@ -324,7 +339,8 @@ def _to_number(value: Any) -> float | None:
 
 def _order_truth(comparison: Mapping[str, Any], calls: Sequence[Call], assigned: int) -> Truth:
     required = comparison["requires_prior"]
-    earlier = [call for call in calls[:assigned] if call.get("name") == required]
+    # A blocked call's tool never ran, so it can't be what the operation required first.
+    earlier = [call for call in calls[:assigned] if call.get("name") == required and call.get("blocked") is not True]
     same = comparison.get("same_argument")
     if not same:
         return not earlier
