@@ -276,9 +276,9 @@ def _tool_output_emitted(
         facts = [outcome for outcome in call.injection_outcomes if outcome.instruction_index == interceptor_index]
         if not facts:
             # MidojoMCP reports an outcome for every instruction of its plan whose tool matches the call
-            # (skipped_occurrence and a call-argument unmatched included), but nothing here shows that plan was
-            # this one: a mirror given no plan, or another layer, finishes with an empty list. A missing fact is a
-            # gap, not an absence.
+            # (skipped_occurrence and a call-argument or result-record unmatched included), but nothing here shows
+            # that plan was this one: a mirror given no plan, or another layer, finishes with an empty list. A
+            # missing fact is a gap, not an absence.
             gaps.append(f"call {call.call_id} reported no delivery fact for instruction {interceptor_index}")
             continue
         for outcome in facts:

@@ -357,3 +357,70 @@ async def test_a_call_whose_arguments_dont_match_places_nothing_and_says_so(suit
         evidence_status=snapshot.evidence_status,
     )
     assert boundaries(report) == ("not_exposed", "not_exposed", "unknown")
+
+
+class ReferralUpstream:
+    """``get_referral(patient_id)``: one referral, whose id is in the result only."""
+
+    async def call_tool_mcp(self, _name: str, args: dict[str, Any]) -> CallToolResult:
+        patient = args["patient_id"]
+        referral = {"referral_id": f"REF-{patient[-1]}", "patient_id": patient, "reason": "follow-up"}
+        return CallToolResult(content=[TextContent(type="text", text=json.dumps(referral))], structuredContent=referral)
+
+
+async def referral_calls(suite, *patients: str) -> tuple[InjectionInstruction, tuple[FunctionCallRecord, ...], Any]:
+    control = ControlPlane({"weather": suite}, config=AppConfig(closure_wait_seconds=0))
+    run = control.create_run("weather")
+    evaluation = control.create_evaluation(run.id, "weather_new_york")
+    target = InjectionTarget(
+        tool="get_referral",
+        surface=SelectorSurface.STRUCTURED_CONTENT,
+        structured_content_path=("reason",),
+        result_record=RecordSelector("REF-1", field="referral_id"),
+    )
+    instruction = InjectionInstruction(channel=Channel.TOOL_OUTPUT, payload=PAYLOAD, target=target, probe_key="t:main")
+    mcp = MidojoMCP(
+        "proxy",
+        recorder=InProcessAgentClient(control, evaluation.session_token),
+        upstream_transport=object(),
+        plan=InjectionPlan((instruction,)),
+        evaluation_id=evaluation.id,
+    )
+    mcp._upstream = ReferralUpstream()  # type: ignore[assignment]
+    for patient in patients:
+        await mcp._forward_call("get_referral", {"patient_id": patient})
+    snapshot = await control.complete(run.id, evaluation.id, "done")
+    return instruction, snapshot.function_calls, snapshot
+
+
+@pytest.mark.asyncio
+async def test_a_result_whose_record_doesnt_match_places_nothing_and_says_so(suite):
+    """A result_record mismatch is a fact that nothing was placed, not a gap, as a call-argument one is."""
+    instruction, calls, snapshot = await referral_calls(suite, "P-2", "P-3")
+
+    facts = delivery_facts(InjectionPlan((instruction,)), calls)
+    assert [(f.status, f.occurrence, f.selected, f.transformation, f.emitted) for f in facts] == [
+        ("unmatched", 0, False, None, []),
+        ("unmatched", 0, False, None, []),
+    ]
+    [outcome] = calls[0].injection_outcomes or []
+    assert outcome.detail == "result field 'referral_id' is 'REF-2', not 'REF-1'; result unchanged"
+    report = exposure(
+        InjectionPlan((instruction,)), calls, turns=len(snapshot.turns), evidence_status=snapshot.evidence_status
+    )
+    assert boundaries(report) == ("not_exposed", "not_exposed", "unknown")
+
+
+@pytest.mark.asyncio
+async def test_the_result_whose_record_matches_is_exposed_beside_those_that_dont(suite):
+    instruction, calls, snapshot = await referral_calls(suite, "P-2", "P-1")
+
+    facts = delivery_facts(InjectionPlan((instruction,)), calls)
+    assert [(f.status, f.occurrence, f.emitted) for f in facts] == [
+        ("unmatched", 0, []),
+        ("applied", 1, ["structured_content", "content_block"]),
+    ]
+    report = exposure(
+        InjectionPlan((instruction,)), calls, turns=len(snapshot.turns), evidence_status=snapshot.evidence_status
+    )
+    assert boundaries(report) == ("exposed", "unknown", "unknown")
