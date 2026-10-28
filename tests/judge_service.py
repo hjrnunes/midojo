@@ -89,6 +89,12 @@ ANSWERS = {
     "/deep-details": _with(details=_nested(100)),
 }
 
+# A valid answer but for a number too large for a float, which Python's json module would decode as inf.
+ANSWERS["/huge-number"] = lambda request, headers: (
+    200,
+    json.dumps(_valid("supported")(request, headers)[1]).replace('["reply"]', "1e400").encode(),
+)
+
 # Answers whose details hold a constant JSON doesn't have, as Python's json module writes it.
 for _constant in ("NaN", "Infinity", "-Infinity"):
     ANSWERS[f"/details-{_constant}"] = lambda request, headers, constant=_constant: (

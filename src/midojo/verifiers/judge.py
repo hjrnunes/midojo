@@ -40,6 +40,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta
 from typing import Any, Literal
 
 import httpx
@@ -112,12 +113,25 @@ class ReplyJudge:
     tool_calls: bool = False
 
     def assess(self, ctx: VerificationContext) -> VerificationResult:
-        request = self.request(ctx)
+        try:
+            request = self.request(ctx)
+        except Exception as exc:
+            # Never a failed grading: unknown, with what could be told of the request.
+            request = self._unbuilt_request()
+            failure = f"the judge request could not be built ({type(exc).__name__})"
+            unbuilt = JudgeRecord(request_id=request["id"], endpoint=None, request=request, sent=False, failure=failure)
+            key = json.dumps(["unbuilt", request["id"], self.url, self.url_env, self.token_env])
+            return self.result(ctx.judgements.setdefault(key, unbuilt))
         key = json.dumps([request["id"], self.url, self.url_env, self.token_env, self.timeout_seconds])
         record = ctx.judgements.get(key)
         if record is None:
             record = ctx.judgements[key] = self.ask(request)
         return self.result(record)
+
+    def _unbuilt_request(self) -> dict[str, Any]:
+        """What a request that couldn't be built is known to hold: the check's own claim and rubric."""
+        body = {"claim": self.claim, "rubric": self.rubric}
+        return {"schema": SCHEMA, "id": request_id(body), **body}
 
     def evaluate(self, ctx: VerificationContext) -> bool | None:
         return self.assess(ctx).passed
@@ -141,7 +155,7 @@ class ReplyJudge:
             body["tool_calls"] = [
                 {
                     "function": call.function,
-                    "args": _json_safe(call.args),
+                    "args": _json_data(call.args),
                     "result": call.result,
                     "error": call.error,
                     "complete": call.complete,
@@ -199,9 +213,9 @@ class ReplyJudge:
         if not response.is_success:
             return JudgeRecord(**sent, failure=f"the judge service answered HTTP {response.status_code}")
         try:
-            answer = json.loads(response.content, parse_constant=_refuse_constant)
+            answer = json.loads(response.content, parse_constant=_refuse_constant, parse_float=_finite_float)
         except _NonFiniteError as exc:
-            return JudgeRecord(**sent, failure=f"the judge service's answer is not JSON: it has {exc}")
+            return JudgeRecord(**sent, failure=f"the judge service's answer {exc}")
         except (ValueError, RecursionError):  # JSONDecodeError and UnicodeDecodeError are ValueErrors
             return JudgeRecord(**sent, failure="the judge service's answer is not JSON")
         problem = response_problem(answer, fields["request_id"])
@@ -309,27 +323,57 @@ def parse_reply_judge(value: Any) -> ReplyJudge:
     )
 
 
-def _json_safe(value: Any) -> Any:
-    """``value`` as JSON data: bytes as UTF-8 text (undecodable bytes escaped), other values as pydantic dumps them."""
+def _json_data(value: Any) -> Any:
+    """``value``, of any type a sealed snapshot holds, as JSON data, the same every time; TypeError for another type.
 
-    def text(item: Any) -> Any:
-        if type(item) in (bytes, bytearray):
-            return item.decode("utf-8", "backslashreplace")
-        if type(item) is dict:
-            return {text(k): text(v) for k, v in item.items()}
-        if type(item) in (list, tuple, set, frozenset):
-            return [text(v) for v in item]
-        return item
+    Text, integers, booleans and None are themselves; a finite float is
+    itself and a non-finite one null (as ``lifecycle.json_data`` gives it);
+    bytes are UTF-8 text, undecodable bytes escaped (``\\xff``); a list or
+    tuple is a list, and a set or frozenset a list sorted by each item's
+    sorted-key JSON; a dict whose keys are all text is an object, and any
+    other dict a list of ``[key, value]`` pairs sorted by the key's JSON,
+    so no key is lost or merged; a date, datetime, time or timedelta is its
+    ISO 8601 text.
+    """
+    kind = type(value)
+    if value is None or kind in (bool, int, str):
+        return value
+    if kind is float:
+        return value if math.isfinite(value) else None
+    if kind in (bytes, bytearray):
+        return value.decode("utf-8", "backslashreplace")
+    if kind in (list, tuple):
+        return [_json_data(item) for item in value]
+    if kind in (set, frozenset):
+        return sorted((_json_data(item) for item in value), key=_sort_key)
+    if kind is dict:
+        if all(type(key) is str for key in value):
+            return {key: _json_data(item) for key, item in value.items()}
+        pairs = [[_json_data(key), _json_data(item)] for key, item in value.items()]
+        return sorted(pairs, key=lambda pair: _sort_key(pair[0]))
+    if kind in (date, datetime, time, timedelta):
+        return to_jsonable_python(value)
+    raise TypeError(f"a {kind.__module__}.{kind.__qualname__} is not JSON data")
 
-    return to_jsonable_python(text(value), inf_nan_mode="null")
+
+def _sort_key(data: Any) -> str:
+    return json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
 class _NonFiniteError(ValueError):
-    """The answer has ``NaN``, ``Infinity`` or ``-Infinity``, which JSON doesn't."""
+    """The answer has ``NaN``, ``Infinity`` or ``-Infinity``, which JSON doesn't, or a number no float holds."""
 
 
 def _refuse_constant(name: str) -> Any:
-    raise _NonFiniteError(name)
+    raise _NonFiniteError(f"is not JSON: it has {name}")
+
+
+def _finite_float(text: str) -> float:
+    number = float(text)
+    if not math.isfinite(number):
+        shown = text if len(text) <= 40 else text[:40] + "..."
+        raise _NonFiniteError(f"has a number no float holds: {shown}")
+    return number
 
 
 def _redacted(record: JudgeRecord, token: str | None) -> JudgeRecord:
@@ -373,18 +417,47 @@ class _DropWhileSending(logging.Filter):
 _DROP_WHILE_SENDING = _DropWhileSending()
 
 
+# Every logger httpx and httpcore log through: their modules' ``logging.getLogger`` calls, as a test reads them
+# from the installed sources. httpx imports httpcore lazily, with its first client, and httpcore imports its HTTP/2
+# and SOCKS modules only when used, so most of these don't exist yet when this module is imported.
+TRANSPORT_LOGGERS = (
+    "httpx",
+    "httpcore",
+    "httpcore.connection",
+    "httpcore.http11",
+    "httpcore.http2",
+    "httpcore.proxy",
+    "httpcore.socks",
+)
+
+
+def _filter_transport_loggers() -> None:
+    """Give every transport logger the filter, creating the ones that don't exist yet.
+
+    A logger's filter only sees the records made on that logger, not a
+    child's, so each gets it. Creating a logger here, before httpcore's
+    module asks for it, is what makes this hold from the first request:
+    ``getLogger`` then hands that module this same logger, filter and all.
+    Loggers already made under another ``httpx`` or ``httpcore`` name get
+    it too.
+    """
+    existing = [name for name in list(logging.root.manager.loggerDict) if name.startswith(("httpx", "httpcore"))]
+    for name in {*TRANSPORT_LOGGERS, *existing}:
+        logger = logging.getLogger(name)
+        if _DROP_WHILE_SENDING not in logger.filters:
+            logger.addFilter(_DROP_WHILE_SENDING)
+
+
+_filter_transport_loggers()
+
+
 @contextmanager
 def _transport_quiet() -> Iterator[None]:
     """Drop the ``httpx`` and ``httpcore`` log records this thread makes until it leaves.
 
-    A logger's filter only sees the records made on that logger, not a
-    child's, so every transport logger that exists gets the filter; the
-    filter reads a context variable, so other threads keep logging.
+    The filter reads a context variable, so other threads keep logging.
     """
-    for name, logger in list(logging.root.manager.loggerDict.items()):
-        transport = name == "httpx" or name.startswith(("httpx.", "httpcore"))
-        if transport and isinstance(logger, logging.Logger) and _DROP_WHILE_SENDING not in logger.filters:
-            logger.addFilter(_DROP_WHILE_SENDING)
+    _filter_transport_loggers()
     sending = _SENDING.set(True)
     try:
         yield

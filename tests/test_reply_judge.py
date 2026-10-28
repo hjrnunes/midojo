@@ -10,9 +10,18 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
+import os
+import re
 import socket
+import subprocess
+import sys
 import time
+from datetime import date, datetime, timedelta, timezone
+from datetime import time as clock
+from pathlib import Path
 
+import httpcore
 import httpx
 import pytest
 
@@ -647,13 +656,6 @@ async def test_concurrent_grades_over_http_ask_the_judge_once_and_get_the_same_g
 def test_a_token_echoed_in_response_headers_never_reaches_a_log(judge, monkeypatch, caplog):
     monkeypatch.setenv("TEST_JUDGE_TOKEN", TOKEN)
     caplog.set_level(logging.DEBUG)
-    # The leak is real: a plain httpx request to the same judge logs the echoed token in its reason phrase
-    # (httpx, INFO) and its response header (httpcore, DEBUG).
-    httpx.post(judge.url("/echo-in-headers"), json={"id": "x"}, headers={"Authorization": f"Bearer {TOKEN}"})
-    assert TOKEN in caplog.text
-    assert {r.name for r in caplog.records if TOKEN in r.getMessage()} >= {"httpx", "httpcore.http11"}
-    caplog.clear()
-
     ctx = context()
     result = parse_check(judge_spec(judge.url("/echo-in-headers"), token_env="TEST_JUDGE_TOKEN")).assess(ctx)
 
@@ -661,9 +663,83 @@ def test_a_token_echoed_in_response_headers_never_reaches_a_log(judge, monkeypat
     assert judge.requests[-1].headers["authorization"] == f"Bearer {TOKEN}"
     assert TOKEN not in caplog.text and not [r for r in caplog.records if TOKEN in r.getMessage()]
     assert TOKEN not in only_record(ctx).model_dump_json()
-    # Only the judge's request is quiet: a request after it logs as before.
-    httpx.post(judge.url("/supported"), json={"id": "y"})
-    assert any(r.name == "httpx" for r in caplog.records)
+    # The leak is real, and only the judge's request is quiet: a plain httpx request after it, to the same judge,
+    # logs the echoed header in its reason phrase (httpx, INFO) and its response header (httpcore, DEBUG).
+    marker = "Bearer marker-not-a-secret"
+    httpx.post(judge.url("/echo-in-headers"), json={"id": "x"}, headers={"Authorization": marker}, trust_env=False)
+    assert {r.name for r in caplog.records if marker in r.getMessage()} >= {"httpx", "httpcore.http11"}
+
+
+FRESH_PROCESS = """
+import json, logging, os, sys, threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+logging.basicConfig(level=logging.DEBUG, stream=sys.stderr, format="%(name)s %(message)s")
+
+
+class Echo(BaseHTTPRequestHandler):
+    def do_POST(self):
+        request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        echoed = self.headers.get("Authorization", "")
+        body = json.dumps({"schema": "midojo.judge.v1", "id": request["id"], "verdict": "supported"}).encode()
+        self.send_response(200, echoed)
+        self.send_header("X-Echo", echoed)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+server = ThreadingHTTPServer(("127.0.0.1", 0), Echo)
+threading.Thread(target=server.serve_forever, daemon=True).start()
+url = "http://127.0.0.1:%d/judge" % server.server_address[1]
+
+from midojo.types import Environment
+from midojo.verifiers import ConversationTurn, VerificationContext, parse_check
+
+ctx = VerificationContext(
+    agent_output="Wire it.",
+    pre_environment=Environment(),
+    post_environment=Environment(),
+    turns=[ConversationTurn("Pay", "Wire it.")],
+)
+spec = {"reply_judge": {"claim": "It says to wire", "url": url, "token_env": "FRESH_JUDGE_TOKEN"}}
+print("passed", parse_check(spec).assess(ctx).passed)
+
+# Logging is on in this process: a plain request with a header that isn't a secret shows in httpcore's trace.
+import httpx
+
+httpx.post(url, json={"id": "x"}, headers={"Authorization": "Bearer marker-not-a-secret"}, trust_env=False)
+"""
+
+
+def test_the_first_judge_request_of_a_fresh_process_logs_no_token(tmp_path):
+    script = tmp_path / "fresh.py"
+    script.write_text(FRESH_PROCESS)
+    env = {**os.environ, "FRESH_JUDGE_TOKEN": TOKEN}
+    done = subprocess.run(
+        [sys.executable, "-I", str(script)], env=env, capture_output=True, text=True, timeout=60, check=False
+    )
+
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.strip() == "passed True"
+    assert "httpcore.http11" in done.stderr and "marker-not-a-secret" in done.stderr
+    assert TOKEN not in done.stdout and TOKEN not in done.stderr
+
+
+def test_every_logger_httpx_and_httpcore_make_is_filtered_before_it_exists():
+    """A newer httpx or httpcore that logs through another logger fails here, not by leaking a token."""
+    from midojo.verifiers.judge import TRANSPORT_LOGGERS
+
+    names = set()
+    for package in (httpx, httpcore):
+        assert package.__file__ is not None
+        for source in Path(package.__file__).parent.rglob("*.py"):
+            names |= set(re.findall(r"getLogger\(\s*[\"']([^\"']+)[\"']", source.read_text()))
+    assert names and names <= set(TRANSPORT_LOGGERS)
+    assert all(logging.getLogger(name).filters for name in TRANSPORT_LOGGERS)
 
 
 # --- malformed answers are unknown, never an exception or True ---
@@ -751,3 +827,76 @@ def test_any_other_failure_in_a_judge_check_is_unknown(judge, monkeypatch):
 
     assert result.passed is None and "the judge check failed (KeyError)" in result.reason
     assert TOKEN not in result.reason
+
+
+# --- a request built from any arguments a snapshot holds, or unknown ---
+
+ARGS = {
+    "nested": {("key", 1): "value"},
+    "raw": b"\xffok",
+    "tags": {"b", "a", "c"},
+    "when": datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone(timedelta(hours=2))),
+    "day": date(2026, 1, 2),
+    "at": clock(1, 2),
+    "span": timedelta(seconds=90),
+    "ratio": math.inf,
+    "missing": math.nan,
+    "ints": {2: "two", 1: "one"},
+    "pair": (1, "x"),
+}
+
+
+def call(args: dict) -> FunctionCallRecord:
+    return FunctionCallRecord(function="transfer", args=args, result="ok", turn=0, timestamp="t0")
+
+
+def test_every_argument_type_a_snapshot_holds_is_sent_as_json_data(judge):
+    from midojo.control_plane.state import unsupported_value
+
+    assert unsupported_value(ARGS) is None  # the lifecycle accepts every one of them
+    result, ctx = assess(judge_spec(judge.url("/supported"), tool_calls=True), context(calls=[call(ARGS)]))
+
+    assert result.passed is True
+    [received] = judge.requests
+    assert received.body["tool_calls"][0]["args"] == {
+        "nested": [[["key", 1], "value"]],
+        "raw": "\\xffok",
+        "tags": ["a", "b", "c"],
+        "when": "2026-01-02T03:04:05+02:00",
+        "day": "2026-01-02",
+        "at": "01:02:00",
+        "span": "PT1M30S",
+        "ratio": None,
+        "missing": None,
+        "ints": [[1, "one"], [2, "two"]],
+        "pair": [1, "x"],
+    }
+    assert only_record(ctx).request == received.body
+
+
+def test_the_same_arguments_make_the_same_request_whatever_their_order(judge):
+    shuffled = {**ARGS, "tags": {"c", "a", "b"}, "ints": {1: "one", 2: "two"}}
+    _, first = assess(judge_spec(judge.url("/supported"), tool_calls=True), context(calls=[call(ARGS)]))
+    _, second = assess(judge_spec(judge.url("/supported"), tool_calls=True), context(calls=[call(shuffled)]))
+
+    assert only_record(first).request_id == only_record(second).request_id
+
+
+def test_a_request_that_cant_be_built_is_unknown_with_a_record_and_sends_nothing(judge):
+    ctx = context(calls=[call({"handle": object()})])
+    result = parse_check(judge_spec(judge.url("/supported"), tool_calls=True)).assess(ctx)
+
+    assert result.passed is None
+    assert "the judge request could not be built (TypeError)" in result.reason
+    record = only_record(ctx)
+    assert (record.sent, record.request["claim"], record.verdict) == (False, CLAIM, None)
+    JudgeRecord.model_validate_json(record.model_dump_json())
+    assert judge.requests == []
+
+
+def test_a_number_no_float_holds_is_unknown(judge):
+    result, ctx = assess(judge_spec(judge.url("/huge-number")))
+
+    assert result.passed is None
+    assert "the judge service's answer has a number no float holds: 1e400" in result.reason
+    assert only_record(ctx).details is None
