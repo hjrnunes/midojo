@@ -15,13 +15,13 @@ Version 2 is `tool-call-condition-v1` with three changes to evaluation:
 The condition structure and its validation do not change: a condition is valid
 under v2 exactly when it is valid under v1, and `schema.json` accepts the same
 conditions. A condition does not name its version; an evaluator states the
-version it implements. The validate vectors were computed by Garak's
-`garak/detectors/toolcall.py` `validate_condition` at revision
-`877932916b7b3e1148171a49b97eeb75a44c9b39`, as for v1. Garak at that revision
-evaluates v1, so the evaluate vectors were computed by `evaluate_condition_v2`
-in the producer's `scripts/gen_tool_call_condition_vectors.py`, which states
-these rules in code. Any implementation must produce the same results on every
-vector.
+version it implements. The vectors were computed by running Garak's
+`garak/detectors/toolcall.py` (`validate_condition`, `evaluate_condition`) at
+revision `4f4917d666feea947731ec1588739d8427bc15d9`, where Garak evaluates v2.
+`evaluate_condition_v2` in the producer's
+`scripts/gen_tool_call_condition_vectors.py` states these rules in code a
+second time and gives the same result on every evaluate vector. Any
+implementation must produce the same results on every vector.
 
 Every v1 evaluate vector is also a v2 evaluate vector with the same id. The v2
 result differs from the v1 result on three of them:
@@ -102,9 +102,11 @@ vectors give the exact text. Reading the text is not part of validation:
 (`anyOf` on `left` and `right`). Only the vectors check:
 
 - the problem text and which problem comes first when a condition has several;
-- that Garak raises `TypeError`, instead of returning a problem, when `kind` or
-  `source` is a list or an object (the schema rejects these conditions; the
-  vectors do not include them, because a crash is not a result).
+- the result when `kind` or `source` is a list or an object. The schema
+  rejects these conditions. Garak at the revision above returns a problem for
+  them (for example `comparisons[0] has unknown kind []`); Garak at the v1
+  revision raised `TypeError`. The vectors do not include them, so that the
+  validate vectors stay those of v1.
 
 Names are not constrained to be non-empty in `schema.json`, because Garak does
 not. The scenario-handoff `tool_call_condition` schema is stricter: it requires
@@ -279,16 +281,22 @@ is not covered by the vectors. A v2 wrapper keeps its behavior:
 - Normalising captured calls (Responses API and chat-completions shapes) into
   the call shape above, and deciding which calls are blocked, are outside this
   contract.
-- Garak raises `OverflowError` when an equality or numeric comparison converts
-  an integer too large for a float (for example `10**400`). The vectors do not
-  include such values, because a crash is not a result.
+- Garak does not raise for an integer too large for a float (for example
+  `10**400`). When two numbers are compared directly, such an integer counts
+  as an infinity of its sign: in `eq`, `ne`, `gt`, `ge`, `lt`, `le`, each
+  element test of `in` and `not_in`, `where` items, and `same_argument`. So
+  `10**400` equals `10**400 + 1`, and a float that JSON parses as an infinity
+  (`1e400`). Inside lists and objects, integers are compared exactly:
+  `[10**400]` does not equal `[10**400 + 1]`. The vectors do not include such
+  values, because JSON parsers do not agree on them: a parser that reads
+  every number as a float turns both integers into an infinity, or rejects
+  them, so a vector could not give one result to every implementation.
 
 ## Vector files
 
-Each file has `contract`, `version`, `implementation` (the repository, module,
-and function that produced the results, with the revision for Garak), and
-`vectors`. A vector has a unique
-`id`.
+Each file has `contract`, `version`, `implementation` (the repository,
+revision, module, and function that produced the results), and `vectors`. A
+vector has a unique `id`.
 
 - `validate.json`: `condition`, `valid`, `error` (`null` when valid).
 - `evaluate.json`: `condition`, `calls`, `complete`, `outcome`, `reason`,
@@ -305,6 +313,6 @@ The ids group vectors: `compare.*` (value comparisons), `unresolved.*`,
 `validate.json`, `valid.*` and `invalid.*`.
 
 Never edit expected values by hand. Recompute them with
-`scripts/gen_tool_call_condition_vectors.py`, which takes the validate results
-from Garak's functions at the revision above and the evaluate results from
-`evaluate_condition_v2`, and change the implementation fields with them.
+`scripts/gen_tool_call_condition_vectors.py`, which takes every result from
+Garak's functions at the revision above and stops when `evaluate_condition_v2`
+disagrees, and change the implementation fields with them.

@@ -1,7 +1,7 @@
 {
   "contract": "tool-call-condition",
   "version": "tool-call-condition-v2",
-  "implementation": {"repository": "garak", "revision": "877932916b7b3e1148171a49b97eeb75a44c9b39", "module": "garak/detectors/toolcall.py", "function": "validate_condition"},
+  "implementation": {"repository": "garak", "revision": "4f4917d666feea947731ec1588739d8427bc15d9", "module": "garak/detectors/toolcall.py", "function": "validate_condition"},
   "vectors": [
     {"id": "valid.value-op-eq", "condition": {"comparisons": [{"kind": "value", "left": {"source": "argument", "operation": "a", "argument": "x"}, "op": "eq", "right": {"source": "literal", "value": 1}}]}, "valid": true, "error": null},
     {"id": "valid.value-op-ne", "condition": {"comparisons": [{"kind": "value", "left": {"source": "argument", "operation": "a", "argument": "x"}, "op": "ne", "right": {"source": "literal", "value": 1}}]}, "valid": true, "error": null},

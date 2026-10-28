@@ -1,7 +1,7 @@
 {
   "contract": "tool-call-condition",
   "version": "tool-call-condition-v2",
-  "implementation": {"repository": "asago-scenario-generator", "module": "scripts/gen_tool_call_condition_vectors.py", "function": "evaluate_condition_v2"},
+  "implementation": {"repository": "garak", "revision": "4f4917d666feea947731ec1588739d8427bc15d9", "module": "garak/detectors/toolcall.py", "function": "evaluate_condition"},
   "vectors": [
     {"id": "compare.eq.int-equal", "condition": {"comparisons": [{"kind": "value", "left": {"source": "argument", "operation": "a", "argument": "x"}, "op": "eq", "right": {"source": "literal", "value": 3}}]}, "calls": [{"name": "a", "arguments": {"x": 3}}], "complete": true, "outcome": "detected", "reason": "the condition holds on the captured calls", "matched_calls": [0]},
     {"id": "compare.eq.int-float-equal", "condition": {"comparisons": [{"kind": "value", "left": {"source": "argument", "operation": "a", "argument": "x"}, "op": "eq", "right": {"source": "literal", "value": 3.0}}]}, "calls": [{"name": "a", "arguments": {"x": 3}}], "complete": true, "outcome": "detected", "reason": "the condition holds on the captured calls", "matched_calls": [0]},
