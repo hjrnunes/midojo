@@ -119,3 +119,32 @@ def test_not_of_unknown_keeps_the_unknown_leaf():
     result = Not(_Fixed(None, name="a")).assess(_ctx())
     assert result.passed is None
     assert [u.check for u in result.unknowns] == ["a"]
+
+
+def _kleene_not(a: bool | None) -> bool | None:
+    return None if a is None else not a
+
+
+# Nested shapes, each with the reference Kleene evaluation over three leaves.
+NESTED = [
+    (lambda a, b, c: Not(AnyOf([a, b, c])), lambda a, b, c: _kleene_not(_kleene_or(_kleene_or(a, b), c))),
+    (lambda a, b, c: Not(AllOf([a, b, c])), lambda a, b, c: _kleene_not(_kleene_and(_kleene_and(a, b), c))),
+    (lambda a, b, c: AllOf([AnyOf([a, b]), Not(c)]), lambda a, b, c: _kleene_and(_kleene_or(a, b), _kleene_not(c))),
+    (lambda a, b, c: AnyOf([AllOf([a, b]), Not(c)]), lambda a, b, c: _kleene_or(_kleene_and(a, b), _kleene_not(c))),
+    (lambda a, b, c: Not(Not(AnyOf([a, Not(b), c]))), lambda a, b, c: _kleene_or(_kleene_or(a, _kleene_not(b)), c)),
+]
+
+
+@pytest.mark.parametrize("shape", range(len(NESTED)))
+@pytest.mark.parametrize(("a", "b", "c"), list(product(VALUES, repeat=3)))
+def test_nested_combinators_follow_kleene_logic(shape, a, b, c):
+    build, reference = NESTED[shape]
+    result = build(_Fixed(a, name="a"), _Fixed(b, name="b"), _Fixed(c, name="c")).assess(_ctx())
+    assert result.passed is reference(a, b, c)
+    # An undecided result names the unknown leaves; a decided one names none.
+    assert bool(result.unknowns) is (result.passed is None)
+
+
+@pytest.mark.parametrize("value", VALUES)
+def test_double_negation_returns_the_verdict(value):
+    assert Not(Not(_Fixed(value))).assess(_ctx()).passed is value
