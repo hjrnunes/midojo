@@ -33,7 +33,8 @@ Evidence status:
   ``observe()`` reports how completely it collected each part, as
   ``evidence_status.ocsf`` and ``evidence_status.workdir`` (see
   :data:`midojo.observations.EvidenceStatus`). A log read that raises is
-  ``failed``; a log sync whose marker never arrives is ``incomplete``. A failed
+  ``failed``; a log sync whose marker never arrives (its exec failed, say) is
+  ``incomplete`` and keeps the events it read. A failed
   ``find`` is ``failed`` (both listings) or ``incomplete`` (one listing, a new
   file whose contents couldn't be read, or a failed check of the seeded files
   outside the workdir). Predicates that need a part that isn't
@@ -739,10 +740,17 @@ class OpenShellRuntime:
         Returns the messages and whether the marker arrived. Without it, the
         messages are the last successful read and may miss the agent's last
         events. A read that raises before any read has succeeded propagates; a
-        later one ends the wait with the last successful read.
+        later one ends the wait with the last successful read. An exec of the
+        marker that raises doesn't end the wait: the logs are still read, and
+        only the marker's arrival makes them complete.
         """
         marker = f"sync-{uuid.uuid4().hex[:12]}{_SYNC_MARKER_SUFFIX}"
-        self._exec(["sh", "-c", _SYNC_MARKER_SCRIPT.format(host=marker)], timeout_seconds=30)
+        try:
+            self._exec(["sh", "-c", _SYNC_MARKER_SCRIPT.format(host=marker)], timeout_seconds=30)
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "OpenShell log sync marker exec failed; reading the logs without it: %s", exc
+            )
 
         deadline = time.time() + _LOG_SYNC_BUDGET_SECONDS
         messages: list[str] | None = None

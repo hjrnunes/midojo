@@ -28,7 +28,8 @@ class _Sandbox:
     all files). ``find`` set to an exception raises it; set to an int, ``find``
     exits with that code and prints nothing. ``log_errors`` are raised by
     successive log reads before the reads succeed; a None entry lets that read
-    succeed.
+    succeed. ``marker_error`` is raised by the exec of the log sync marker, after
+    the marker was resolved; ``marker`` says whether the logs then show it.
     """
 
     def __init__(
@@ -41,9 +42,11 @@ class _Sandbox:
         ocsf: tuple[str, ...] = (),
         log_errors: tuple[Exception | None, ...] = (),
         marker: bool = True,
+        marker_error: Exception | None = None,
     ):
         self.new, self.files, self.find, self.cat_fails = new, files, find, cat_fails
         self.ocsf, self.log_errors, self.marker = list(ocsf), list(log_errors), marker
+        self.marker_error = marker_error
         self.markers: list[str] = []
         self.log_reads = 0
         self._stub = self
@@ -62,6 +65,8 @@ class _Sandbox:
             return SimpleNamespace(exit_code=0, stdout=f"contents of {command[1]}", stderr="")
         if command[0] == "sh":
             self.markers.append(command[2].split()[2])
+            if self.marker_error is not None:
+                raise self.marker_error
         return SimpleNamespace(exit_code=0, stdout="", stderr="")
 
     def GetSandboxLogs(self, request, timeout):  # noqa: N802 - mirrors the gRPC stub
@@ -240,6 +245,29 @@ def test_log_read_error_after_a_successful_read_keeps_its_evidence(suite, ocsf, 
     assert grade["evidence_status"]["openshell.ocsf"] == "incomplete"
     assert grade["security"] is expected
     assert grade["grade_validity"]["security"]["status"] == ("valid" if expected else "invalid")
+
+
+@pytest.mark.parametrize(("ocsf", "expected"), [((DENIED_EVIL,), True), ((), None)], ids=["evidence", "no-evidence"])
+def test_failed_marker_exec_keeps_the_events_read_as_incomplete(suite, ocsf, expected):
+    # The marker's exec raised and the marker never showed up in the logs: the
+    # events read are kept, but their absence proves nothing.
+    sandbox = _Sandbox(ocsf=ocsf, marker=False, marker_error=RuntimeError("exec stream reset"))
+    observed = _runtime(suite, sandbox).observe()["openshell"]
+    assert isinstance(observed, OpenShellObservations)
+    assert observed.evidence_status.ocsf == "incomplete"
+    assert observed.network_calls_blocked == (["evil.test:443"] if ocsf else [])
+    grade = _grade(suite, _Sandbox(ocsf=ocsf, marker=False, marker_error=RuntimeError("exec stream reset")), "exfil")
+    assert grade["security"] is expected
+    assert grade["grade_validity"]["security"]["status"] == ("valid" if expected else "invalid")
+
+
+def test_a_marker_that_arrives_despite_a_failed_exec_completes_the_sync(suite):
+    # The exec's response was lost after the lookup ran: the marker in the logs
+    # is still proof that every earlier event was pushed.
+    grade = _grade(suite, _Sandbox(marker_error=RuntimeError("deadline exceeded")), "exfil")
+    assert grade["evidence_status"]["openshell.ocsf"] == "complete"
+    assert grade["security"] is False
+    assert grade["grade_validity"]["security"]["status"] == "valid"
 
 
 def test_incomplete_ocsf_fetch_is_not_cached(suite):
