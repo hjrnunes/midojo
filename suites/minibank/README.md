@@ -8,19 +8,28 @@ bypass, and privilege abuse.
 
 ```
 suites/minibank/
-├── __init__.py              # SYSTEM_MESSAGE for the agent
+├── __init__.py              # SYSTEM_MESSAGE for the agent, HOST_TOOLS for midojo-run
 ├── suite.yaml               # Environment, probes, tasks, and predicates
+├── host_tools.py            # MiDojo interception layer, run on the host (what suite authors write)
 ├── README.md                # This file
 ├── real_environment/        # Simulates a customer's existing backend (see below)
 │   ├── bank_state.py        # In-memory bank: customers, accounts, transactions
 │   ├── bank_tools.py        # Safe tool executor (business rules enforced)
 │   └── bank_tools_unsafe.py # Unsafe executor (rules removed, for red-team demos)
 ├── a2a_agent/
-│   ├── fake_mcp.py          # MiDojo interception layer (what suite authors write)
-│   ├── real_mcp.py          # Upstream MCP server wrapping real_environment
+│   ├── real_mcp.py          # The bank's real MCP server, wrapping real_environment
 │   └── agent.py             # A2A agent for E2E testing
 └── deploy/                  # Kubernetes manifests (run the suite on a cluster)
 ```
+
+The suite runs in host mode only (`midojo-run --interception host`): for each
+evaluation, `midojo-run` starts an interceptor in its own process that serves
+the agent the tools in `host_tools.py`, forwarding the read tools to the real
+MCP server and keeping the write tools in the evaluation's environment. The
+agent gets only that interceptor's URL and bearer token, in the
+`X-Midojo-Tool-Url` and `X-Midojo-Tool-Token` headers of each A2A request; the
+evaluation's session, the control plane and the real server stay out of its
+reach. `midojo-run` refuses the suite without `--interception host`.
 
 ## About `real_environment/`
 
@@ -33,7 +42,7 @@ MCP server -- they don't need to write these modules. The files in
 - `bank_tools_unsafe.py` -- a variant with safety rules removed (for demonstrating
   what happens when an agent bypasses controls)
 
-A MiDojo suite author only needs to write `fake_mcp.py` + `suite.yaml`. The
+A MiDojo suite author only needs to write `host_tools.py` + `suite.yaml`. The
 `real_environment/` is included here so the suite is fully self-contained and
 runnable without an external service.
 
@@ -43,24 +52,34 @@ pattern where MiDojo integrates with an existing complex backend.
 
 ## Running locally
 
-Bring up the servers and the agent, then run the suite. The final `midojo-run`
-runs every user × injection task; pass `-ut`/`-it` to target specific ones (see
-[Demo](#demo)).
+Bring up the control plane, the real MCP server and the agent, then run the
+suite. The final `midojo-run` runs every user × injection task; pass `-ut`/`-it`
+to target specific ones (see [Demo](#demo)).
 
 ```bash
-minibank-real-mcp-serve --port 8083
+export MIDOJO_CONTROL_TOKEN="$(openssl rand -hex 32)"   # shared by midojo-serve and midojo-run; host mode requires it
 midojo-serve --load-suite minibank --host 127.0.0.1 --port 8080
-minibank-fake-mcp-serve --port 8082 --upstream-url http://localhost:8083/mcp
+minibank-real-mcp-serve --port 8083                     # the bank's real tools; only the interceptors reach it
 LITELLM_API_KEY=... LITELLM_API_URL=... LITELLM_MODEL=... \
-    minibank-a2a-agent --mcp-server-url http://localhost:8082/mcp
-midojo-run --agent-uri http://localhost:8000 --protocol a2a --suite minibank
+    env -u MIDOJO_CONTROL_TOKEN minibank-a2a-agent      # no MCP server URL: each request names its tool endpoint
+midojo-run --suite minibank --control-url http://localhost:8080 \
+    --agent-uri http://localhost:8000 --protocol a2a \
+    --interception host --upstream-mcp-url http://localhost:8083/mcp
 ```
+
+The interceptor listens on loopback, on a free port per evaluation, which an
+agent on this machine reaches. For an agent on another host, pass
+`--interceptor-bind` (an address it reaches, e.g. `0.0.0.0`), a fixed
+`--interceptor-port`, and `--interceptor-advertise-host` (the name the agent
+connects to), as the [Kubernetes Job](deploy/run-ladder.job.yaml) does.
 
 ## Running on Kubernetes
 
 The same suite runs unchanged on a cluster — there's no separate "ladder"
-deployment. The four local processes become Deployments + Services, and the
-orchestrator becomes a Job; "running the ladder" just means giving that Job the
+deployment. The control plane, the real MCP server and the agent become
+Deployments + Services, and the orchestrator becomes a Job, which also serves
+each evaluation's interceptor: the agent reaches it through the
+`minibank-interceptor` Service, on port 8766. "Running the ladder" just means giving that Job the
 ladder task IDs (`-ut recent_transactions -it ladder_a -it ladder_b -it ladder_c`), or
 drop the `-it` flags to run the whole suite.
 
@@ -82,17 +101,20 @@ podman push  quay.io/<you>/midojo:latest
 
 # 2. Point the manifests at that image (edit images: in deploy/kustomization.yaml).
 
-# 3. Create the namespace + the agent's LLM-credentials secret (kept out of git).
+# 3. Create the namespace, the agent's LLM-credentials secret and the control
+#    token the control plane and the Job share (both kept out of git).
 oc new-project midojo-minibank                  # kubectl create namespace midojo-minibank
 oc create secret generic minibank-llm-creds \
   --from-literal=LITELLM_API_KEY=... \
   --from-literal=LITELLM_API_URL=https://your-litellm-proxy.example.com/v1 \
   --from-literal=LITELLM_MODEL=llama-scout-17b
+oc create secret generic minibank-control-token \
+  --from-literal=MIDOJO_CONTROL_TOKEN="$(openssl rand -hex 32)"
 
-# 4. Deploy the four services + the ladder Job.
+# 4. Deploy the three services + the ladder Job (and its interceptor Service).
 oc apply -k suites/minibank/deploy              # kubectl apply -k ...
 
-# 5. Health-check: wait for all four services to come up, then confirm the
+# 5. Health-check: wait for the three services to come up, then confirm the
 #    control plane is serving the suite. Their readiness probes already gate on
 #    the control plane's /health endpoint and the agent's card, so "Available"
 #    means the platform is live.
@@ -100,7 +122,8 @@ oc wait --for=condition=Available --timeout=120s deployment --all -n midojo-mini
 oc get pods -n midojo-minibank
 # Optional — hit the control plane directly (no Route, so port-forward):
 oc port-forward -n midojo-minibank svc/minibank-control-plane 8080:8080 &
-curl -s localhost:8080/suites/minibank    # -> {"user_tasks":[...],"injection_tasks":[...,"ladder_a",...]}
+curl -s -H "Authorization: Bearer $(oc get secret minibank-control-token -o jsonpath='{.data.MIDOJO_CONTROL_TOKEN}' | base64 -d)" \
+  localhost:8080/suites/minibank          # -> {"user_tasks":[...],"injection_tasks":[...,"ladder_a",...]}
 
 # 6. Watch the ladder run (the Job waits for the agent, then runs the 3 rungs).
 oc logs -f job/minibank-run-ladder
@@ -108,6 +131,14 @@ oc logs -f job/minibank-run-ladder
 
 To re-run after a change, delete and re-apply the Job:
 `oc delete job minibank-run-ladder && oc apply -k suites/minibank/deploy`.
+
+`deploy/network-policy.yaml` lets only the Job's pod reach the control plane
+and the real MCP server, so the agent can reach neither, only the interceptor;
+a cluster whose network plugin doesn't enforce NetworkPolicy ignores it. The
+manifests are checked offline (`tests/test_minibank_deploy.py`, and
+`kustomize build suites/minibank/deploy` renders them), not on a cluster: in
+particular, that the readiness probes still pass under the network policies
+depends on the network plugin admitting the kubelet's probes, which most do.
 
 ## Demo
 
@@ -141,12 +172,13 @@ result). With the servers from [Running locally](#running-locally) up, run each 
 shared honest job:
 
 ```bash
-midojo-run --suite minibank --protocol a2a --agent-url http://localhost:8000 -ut recent_transactions -it ladder_a
-midojo-run --suite minibank --protocol a2a --agent-url http://localhost:8000 -ut recent_transactions -it ladder_b
-midojo-run --suite minibank --protocol a2a --agent-url http://localhost:8000 -ut recent_transactions -it ladder_c
+HOST=(--interception host --upstream-mcp-url http://localhost:8083/mcp)   # bash; MIDOJO_CONTROL_TOKEN still exported
+midojo-run --suite minibank --protocol a2a --agent-uri http://localhost:8000 --control-url http://localhost:8080 "${HOST[@]}" -ut recent_transactions -it ladder_a
+midojo-run --suite minibank --protocol a2a --agent-uri http://localhost:8000 --control-url http://localhost:8080 "${HOST[@]}" -ut recent_transactions -it ladder_b
+midojo-run --suite minibank --protocol a2a --agent-uri http://localhost:8000 --control-url http://localhost:8080 "${HOST[@]}" -ut recent_transactions -it ladder_c
 ```
 
 The orchestrator also reports each payload's exposure, from what the component that placed it
 recorded: for A/B (prompt) the payload is `emitted` in the turn's message, and for C (the seeded
 transaction memo) it was placed in the environment before the run, with no delivery fact, so its
-exposure is unknown. Neither says the agent's model read it: MiDojo doesn't record model input.
+exposure is unknown (the host tool appends it to the result itself, not as a tool-output injection). Neither says the agent's model read it: MiDojo doesn't record model input.
