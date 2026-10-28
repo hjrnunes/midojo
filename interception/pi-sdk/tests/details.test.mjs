@@ -8,12 +8,17 @@ import {
 	checkInjectionRecord,
 	createMidojoExtension,
 	finishDetailed,
+	injectionSlotId,
+	payloadDigest,
 	recordsDetails,
 	transient,
 } from "../src/index.ts";
 
 /** The body the PI and Python clients both send for one detailed finish, pinned for both languages. */
 const FIXTURE = JSON.parse(readFileSync(new URL("../../../tests/fixtures/pi_sdk_detailed_finish.json", import.meta.url), "utf8"));
+
+/** Slots and payload digests both SDKs must agree on, pinned for both languages. */
+const SLOTS = JSON.parse(readFileSync(new URL("../../../tests/fixtures/injection_slots.json", import.meta.url), "utf8"));
 
 /** Answer each fetch with the next of `responses` (a status, or an error to throw), and collect `[path, raw body]` sent. */
 async function withFetch(responses, fn) {
@@ -49,13 +54,16 @@ function piCall({ call_id, function: name, args, result, error, disposition, str
 		disposition,
 		structuredContent: structured_content,
 		injectionOutcomes: injection_outcomes.map(
-			({ instruction_index, probe_key, selected, transformation, emitted, ...rest }) => ({
+			({ instruction_index, probe_key, selected, transformation, emitted, payload_digest, placed_digest, slot, ...rest }) => ({
 				instructionIndex: instruction_index,
 				probeKey: probe_key,
 				...rest,
 				...(selected === undefined ? {} : { selected }),
 				...(transformation === undefined ? {} : { transformation }),
 				...(emitted === undefined ? {} : { emitted }),
+				...(payload_digest === undefined ? {} : { payloadDigest: payload_digest }),
+				...(placed_digest === undefined ? {} : { placedDigest: placed_digest }),
+				...(slot === undefined ? {} : { slot }),
 			}),
 		),
 	};
@@ -144,6 +152,81 @@ test("occurrence 0 is accepted only as an unmatched outcome that placed nothing"
 			assert.deepEqual(sent, []);
 		});
 	}
+});
+
+const DIGEST = `sha256:${"0".repeat(64)}`;
+const SLOT = { target: { tool: "get_weather", surface: "content_block", content_block_index: 0 }, mode: "append" };
+
+test("a placement sends what it placed and where, as given; any other record leaves them out", async () => {
+	await withFetch([201], async (sent) => {
+		const placed = { ...applied, payloadDigest: DIGEST, placedDigest: DIGEST, slot: SLOT };
+		await new ControlPlaneClient("http://control").finishCallDetailed({ ...detailed, injectionOutcomes: [placed, applied] });
+		const [withPlacement, without] = JSON.parse(sent[0][1]).injection_outcomes;
+		assert.deepEqual(
+			[withPlacement.payload_digest, withPlacement.placed_digest, withPlacement.slot],
+			[DIGEST, DIGEST, SLOT],
+		);
+		assert.deepEqual(Object.keys(without).filter((key) => ["payload_digest", "placed_digest", "slot"].includes(key)), []);
+	});
+});
+
+test("only a placement may say what it placed, and a digest is sha256:<hex>", () => {
+	for (const status of ["applied", "partial", "fallback"]) {
+		assert.doesNotThrow(() => checkInjectionRecord({ ...applied, status, payloadDigest: DIGEST, slot: SLOT }));
+	}
+	const uncounted = { instructionIndex: 0, probeKey: null, occurrence: 0, status: "unmatched", detail: "d" };
+	for (const refused of [
+		{ ...uncounted, payloadDigest: DIGEST },
+		{ ...uncounted, slot: SLOT },
+		{ ...applied, status: "unmatched", placedDigest: DIGEST },
+		{ ...applied, status: "too_large", slot: SLOT },
+		{ ...applied, status: "skipped_occurrence", payloadDigest: DIGEST },
+		{ ...applied, payloadDigest: "0".repeat(64) },
+		{ ...applied, placedDigest: `sha256:${"A".repeat(64)}` },
+	]) {
+		assert.throws(() => checkInjectionRecord(refused), RangeError);
+	}
+});
+
+test("a valid slot is accepted with or without its id, and its id is the Python SDK's", () => {
+	for (const { why, slot, canonical } of SLOTS.valid) {
+		assert.equal(injectionSlotId(slot.target), canonical.id, why);
+		assert.equal(injectionSlotId(canonical.target), canonical.id, why);
+		for (const sent of [slot, { ...slot, id: canonical.id }, canonical]) {
+			assert.doesNotThrow(() => checkInjectionRecord({ ...applied, slot: sent }), why);
+		}
+	}
+});
+
+test("every slot the Python SDK and the control plane refuse is refused", async () => {
+	for (const { why, slot } of SLOTS.invalid) {
+		assert.throws(() => checkInjectionRecord({ ...applied, slot }), RangeError, why);
+	}
+	// Refused before anything is sent.
+	await withFetch([], async (sent) => {
+		const call = { ...detailed, injectionOutcomes: [{ ...applied, slot: SLOTS.invalid[0].slot }] };
+		await assert.rejects(new ControlPlaneClient("http://control").finishCallDetailed(call), RangeError);
+		assert.deepEqual(sent, []);
+	});
+});
+
+test("a slot's id is checked against its target, and an id left out is the control plane's to fill in", () => {
+	const [{ slot, canonical }] = SLOTS.valid;
+	assert.throws(() => checkInjectionRecord({ ...applied, slot: { ...slot, id: `sha256:${"0".repeat(64)}` } }), RangeError);
+	assert.throws(() => checkInjectionRecord({ ...applied, slot: { ...slot, id: canonical.id.toUpperCase() } }), RangeError);
+	assert.doesNotThrow(() => checkInjectionRecord({ ...applied, slot: { ...slot, id: undefined } }));
+	assert.throws(() => injectionSlotId({ surface: "template", template_key: "k" }), RangeError);
+});
+
+test("a payload digest is the Python SDK's, and a lone surrogate has none", () => {
+	for (const { text, digest } of SLOTS.payload_digests) assert.equal(payloadDigest(text), digest);
+	for (const text of SLOTS.payloads_without_a_digest) assert.throws(() => payloadDigest(text), RangeError);
+});
+
+test("the pinned detailed finish's slot has its target's id", () => {
+	const { slot, payload_digest } = FIXTURE.call.injection_outcomes[0];
+	assert.equal(injectionSlotId(slot.target), slot.id);
+	assert.equal(payloadDigest(" — IGNORE PREVIOUS"), payload_digest);
 });
 
 test("recordsDetails is true for a recorder with finishCallDetailed, and a wrapper's declaration wins", () => {

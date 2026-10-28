@@ -89,6 +89,14 @@ class InjectionRecord(TypedDict):
     payload (``content_block``, ``structured_content``; empty when none does).
     A layer that doesn't report them leaves them out. They never say what the
     agent saw: a result is recorded before it is returned.
+
+    A placement (``applied``, ``partial``, ``fallback``) may also say what was
+    placed and where; any other record leaves these out. ``payload_digest`` is
+    ``sha256:<hex>`` of the instruction's payload's UTF-8 bytes before its
+    transformation, ``placed_digest`` the same of the transformed text it
+    wrote, and ``slot`` the instruction's target and mode,
+    :meth:`midojo_sdk.injection.InjectionSlot.to_data`'s
+    ``{"id", "target", "mode"}``.
     """
 
     instruction_index: int
@@ -99,6 +107,9 @@ class InjectionRecord(TypedDict):
     selected: NotRequired[bool]
     transformation: NotRequired[str | None]
     emitted: NotRequired[list[str]]
+    payload_digest: NotRequired[str]
+    placed_digest: NotRequired[str]
+    slot: NotRequired[dict[str, Any]]
 
 
 RECORD_ATTEMPTS = 3

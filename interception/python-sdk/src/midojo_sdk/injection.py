@@ -8,8 +8,10 @@ never guess another field.
 from __future__ import annotations
 
 import enum
+import hashlib
 import json
 import math
+import re
 from collections.abc import Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -97,6 +99,10 @@ class OutcomeStatus(enum.StrEnum):
     NO_RESULT = "no_result"
     TOO_LARGE = "too_large"
     SKIPPED_OCCURRENCE = "skipped_occurrence"
+
+
+PLACED: frozenset[OutcomeStatus] = frozenset({OutcomeStatus.APPLIED, OutcomeStatus.PARTIAL, OutcomeStatus.FALLBACK})
+"""The outcomes that wrote the payload into the result: only these record what was placed and where."""
 
 
 @dataclass(frozen=True, init=False)
@@ -294,6 +300,67 @@ class InjectionInstruction:
             raise ValueError(f"{self.channel.value} needs a template selector and template_key, without a tool")
 
 
+DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
+"""The form of a payload digest: ``sha256:`` and the SHA-256 in lowercase hex."""
+
+
+def payload_digest(text: str) -> str:
+    """``sha256:<hex>`` of ``text``'s UTF-8 bytes: how an outcome names a payload it placed."""
+    return f"sha256:{hashlib.sha256(_str(text, 'payload').encode()).hexdigest()}"
+
+
+@dataclass(frozen=True)
+class InjectionSlot:
+    """Where a tool-output instruction places its payload: its target and its mode.
+
+    A call's outcome records the slot of the instruction it placed, so the
+    sealed record says where a payload went without the plan (a generated
+    payload's included). :meth:`to_data` gives ``{"id", "target", "mode"}``:
+    ``target`` in the plan codec's form (the instruction's ``target`` in
+    :meth:`InjectionPlan.to_data`, record selectors as
+    ``{"field": ..., "equals": ...}``), ``mode`` the mode's value, and ``id``
+    the target's :attr:`id`. The same instruction of a fixed plan gives
+    the same data, so a consumer compares a recorded slot with a plan's.
+    """
+
+    target: InjectionTarget
+    mode: InjectionMode = InjectionMode.APPEND
+
+    def __post_init__(self) -> None:
+        # A tool-output instruction with this target and mode validates the slot.
+        InjectionInstruction(Channel.TOOL_OUTPUT, "", self.target, mode=self.mode)
+
+    @classmethod
+    def of(cls, instruction: InjectionInstruction) -> InjectionSlot:
+        """The slot of a tool-output ``instruction``."""
+        return cls(instruction.target, instruction.mode)
+
+    @property
+    def id(self) -> str:
+        """``sha256:<hex>`` of the target's plan-codec JSON (sorted keys, compact, UTF-8): one ID per place, any mode."""
+        encoded = json.dumps(_target_to_data(self.target), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        return f"sha256:{hashlib.sha256(encoded.encode()).hexdigest()}"
+
+    def to_data(self) -> dict[str, Any]:
+        """The slot as fresh JSON data: ``{"id": ..., "target": ..., "mode": ...}``."""
+        return {"id": self.id, "target": _target_to_data(self.target), "mode": self.mode.value}
+
+    @classmethod
+    def from_data(cls, data: Mapping[str, Any]) -> InjectionSlot:
+        """Decode :meth:`to_data`'s form; ``id`` may be left out, but one given must be the target's."""
+        try:
+            value = _object(data, "slot")
+            _only_fields(value, {"id", "target", "mode"}, "slot")
+            if "target" not in value or "mode" not in value:
+                raise ValueError("slot must contain target and mode")
+            slot = cls(_target_from_data(value["target"]), InjectionMode(value["mode"]))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"invalid injection slot data: {exc}") from None
+        if "id" in value and value["id"] != slot.id:
+            raise ValueError(f"invalid injection slot data: id {value['id']!r} is not its target's {slot.id!r}")
+        return slot
+
+
 @dataclass(frozen=True)
 class GeneratorPermissions:
     """Tools, structured fields, and modes generator output may name."""
@@ -464,6 +531,15 @@ class InjectionOutcome:
     that placed nothing, so
     building any other at occurrence 0 raises ValueError. ``unmatched`` is
     also counted (a strict selector that didn't match is occurrence 1 or more).
+
+    What was placed, and where, is set only for a placement (``applied``,
+    ``partial``, ``fallback``; building any other with one raises
+    ValueError): ``payload_digest`` is :func:`payload_digest` of the
+    instruction's payload before its transformation, ``placed_digest`` of the
+    transformed text the instruction wrote (the same for ``identity``; the
+    text a JSON mirror re-serialises around it isn't digested), and ``slot``
+    the instruction's :class:`InjectionSlot`, its target and mode as planned
+    (a ``fallback`` wrote a new text block instead, as ``detail`` says).
     """
 
     instruction_index: int
@@ -478,12 +554,27 @@ class InjectionOutcome:
     selected: bool = False
     transformation: Transformation | None = None
     emitted: tuple[SelectorSurface, ...] = ()
+    payload_digest: str | None = None
+    placed_digest: str | None = None
+    slot: InjectionSlot | None = None
 
     def __post_init__(self) -> None:
+        for digest in (self.payload_digest, self.placed_digest):
+            if digest is not None and (type(digest) is not str or not DIGEST_PATTERN.fullmatch(digest)):
+                raise ValueError(f"a payload digest is 'sha256:' and 64 lowercase hex digits, not {digest!r}")
+        if self.slot is not None and type(self.slot) is not InjectionSlot:
+            raise TypeError("slot must be an InjectionSlot or None")
+        placement = (self.payload_digest, self.placed_digest, self.slot)
         if self.occurrence == 0 and (
-            self.status != OutcomeStatus.UNMATCHED or self.selected or self.transformation is not None or self.emitted
+            self.status != OutcomeStatus.UNMATCHED
+            or self.selected
+            or self.transformation is not None
+            or self.emitted
+            or placement != (None, None, None)
         ):
             raise ValueError("only an unmatched outcome that placed nothing has occurrence 0")
+        if self.status not in PLACED and placement != (None, None, None):
+            raise ValueError(f"a {self.status.value} outcome placed nothing: it has no payload digest or slot")
 
 
 def capability_gaps(
@@ -651,27 +742,11 @@ def _selector_from_data(value: dict[str, Any]) -> RecordSelector:
 def _plan_to_data(plan: InjectionPlan) -> dict[str, Any]:
     instructions = []
     for item in plan.instructions:
-        target = item.target
         instructions.append(
             {
                 "channel": item.channel.value,
                 "payload": item.payload,
-                "target": {
-                    "tool": target.tool,
-                    "surface": target.surface.value,
-                    "content_block_index": target.content_block_index,
-                    "content_block_type": target.content_block_type,
-                    "structured_content_path": _path_to_data(target.structured_content_path),
-                    "template_path": _path_to_data(target.template_path),
-                    "template_key": target.template_key,
-                }
-                # Each left out when empty, so a plan without them encodes as before.
-                | ({"call_arguments": dict(target.call_arguments)} if target.call_arguments else {})
-                | (
-                    {"result_record": _selector_to_data(target.result_record)}
-                    if target.result_record is not None
-                    else {}
-                ),
+                "target": _target_to_data(item.target),
                 "occurrence": {"kind": item.occurrence.kind.value, "nth": item.occurrence.nth},
                 "transformation": item.transformation.value,
                 "size_limit": item.size_limit,
@@ -747,39 +822,7 @@ def _instruction_from_data(value: Any) -> InjectionInstruction:
     )
     if "channel" not in data or "payload" not in data:
         raise ValueError("instruction must contain channel and payload")
-    target_data = _object(data.get("target", {}), "target")
-    _only_fields(
-        target_data,
-        {
-            "tool",
-            "surface",
-            "content_block_index",
-            "content_block_type",
-            "structured_content_path",
-            "template_path",
-            "template_key",
-            "call_arguments",
-            "result_record",
-        },
-        "target",
-    )
-    target = InjectionTarget(
-        tool=target_data.get("tool"),
-        surface=SelectorSurface(target_data.get("surface", SelectorSurface.CONTENT_BLOCK.value)),
-        content_block_index=target_data.get("content_block_index"),
-        content_block_type=target_data.get("content_block_type"),
-        structured_content_path=_path_from_data(
-            target_data.get("structured_content_path", []), "structured content path"
-        ),
-        template_path=_path_from_data(target_data.get("template_path", []), "template path", record_selectors=False),
-        template_key=target_data.get("template_key"),
-        call_arguments=_object(target_data.get("call_arguments", {}), "call_arguments"),
-        result_record=(
-            _selector_from_data(_object(target_data["result_record"], "result_record"))
-            if "result_record" in target_data
-            else None
-        ),
-    )
+    target = _target_from_data(data.get("target", {}))
     occurrence_data = _object(data.get("occurrence", {}), "occurrence")
     _only_fields(occurrence_data, {"kind", "nth"}, "occurrence")
     occurrence = OccurrenceRule(
@@ -795,6 +838,60 @@ def _instruction_from_data(value: Any) -> InjectionInstruction:
         mismatch_policy=MismatchPolicy(data.get("mismatch_policy", MismatchPolicy.STRICT.value)),
         mode=InjectionMode(data.get("mode", InjectionMode.APPEND.value)),
         probe_key=data.get("probe_key"),
+    )
+
+
+def _target_to_data(target: InjectionTarget) -> dict[str, Any]:
+    data: dict[str, Any] = {
+        "tool": target.tool,
+        "surface": target.surface.value,
+        "content_block_index": target.content_block_index,
+        "content_block_type": target.content_block_type,
+        "structured_content_path": _path_to_data(target.structured_content_path),
+        "template_path": _path_to_data(target.template_path),
+        "template_key": target.template_key,
+    }
+    # Each left out when empty, so a target without them encodes as before.
+    if target.call_arguments:
+        data["call_arguments"] = dict(target.call_arguments)
+    if target.result_record is not None:
+        data["result_record"] = _selector_to_data(target.result_record)
+    return data
+
+
+def _target_from_data(value: Any) -> InjectionTarget:
+    target_data = _object(value, "target")
+    _only_fields(
+        target_data,
+        {
+            "tool",
+            "surface",
+            "content_block_index",
+            "content_block_type",
+            "structured_content_path",
+            "template_path",
+            "template_key",
+            "call_arguments",
+            "result_record",
+        },
+        "target",
+    )
+    return InjectionTarget(
+        tool=target_data.get("tool"),
+        surface=SelectorSurface(target_data.get("surface", SelectorSurface.CONTENT_BLOCK.value)),
+        content_block_index=target_data.get("content_block_index"),
+        content_block_type=target_data.get("content_block_type"),
+        structured_content_path=_path_from_data(
+            target_data.get("structured_content_path", []), "structured content path"
+        ),
+        template_path=_path_from_data(target_data.get("template_path", []), "template path", record_selectors=False),
+        template_key=target_data.get("template_key"),
+        call_arguments=_object(target_data.get("call_arguments", {}), "call_arguments"),
+        result_record=(
+            _selector_from_data(_object(target_data["result_record"], "result_record"))
+            if "result_record" in target_data
+            else None
+        ),
     )
 
 

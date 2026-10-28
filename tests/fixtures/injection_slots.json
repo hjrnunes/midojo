@@ -1,0 +1,876 @@
+{
+  "_about": "Injection slots and payload digests both SDKs must agree on: each valid slot as sent and its canonical form (InjectionSlot.to_data()), each invalid slot both refuse, each payload's digest, and payloads with no digest. Numbers are as JavaScript sends them: no integer-valued float under 1e21, no int beyond 2**53.",
+  "valid": [
+    {
+      "why": "content-block target with its defaults left out",
+      "slot": {
+        "target": {
+          "tool": "get_weather"
+        },
+        "mode": "append"
+      },
+      "canonical": {
+        "id": "sha256:65fd6e539fd87f15483e0b1fee11fb133ddc5db0f30c3a264d7d4f5690f486cf",
+        "target": {
+          "tool": "get_weather",
+          "surface": "content_block",
+          "content_block_index": null,
+          "content_block_type": null,
+          "structured_content_path": [],
+          "template_path": [],
+          "template_key": null
+        },
+        "mode": "append"
+      }
+    },
+    {
+      "why": "selected text block, replaced",
+      "slot": {
+        "target": {
+          "tool": "get_weather",
+          "surface": "content_block",
+          "content_block_index": 0,
+          "content_block_type": "text"
+        },
+        "mode": "replace"
+      },
+      "canonical": {
+        "id": "sha256:06fae0f639f2c76185ea2d895c507f9aebb560296cfd8ce495915f06ec694434",
+        "target": {
+          "tool": "get_weather",
+          "surface": "content_block",
+          "content_block_index": 0,
+          "content_block_type": "text",
+          "structured_content_path": [],
+          "template_path": [],
+          "template_key": null
+        },
+        "mode": "replace"
+      }
+    },
+    {
+      "why": "record selector without its field, and every kind of call argument; keys that sort apart by code point and by UTF-16 unit",
+      "slot": {
+        "target": {
+          "surface": "structured_content",
+          "tool": "lookup_order",
+          "structured_content_path": [
+            "notes",
+            {
+              "equals": "NOTE-1"
+            },
+            "body"
+          ],
+          "call_arguments": {
+            "order_id": "ORD-102",
+            "count": 3,
+            "offset": -7,
+            "ratio": 0.1,
+            "tiny": 1e-07,
+            "small": 1e-05,
+            "edge": 0.0001,
+            "decimal": 123.456,
+            "huge": 1.5e+300,
+            "big": 1e+21,
+            "exact": 9007199254740991,
+            "flag": true,
+            "missing": null,
+            "\u00e7idade": "Z\u00fcrich",
+            "\uffff": "bmp",
+            "\ud834\udd1e": "astral"
+          }
+        },
+        "mode": "append"
+      },
+      "canonical": {
+        "id": "sha256:13daa012ddc06bf468c223b935bd4bfa949e19f19c531f99e0f27ed6a2b0da34",
+        "target": {
+          "tool": "lookup_order",
+          "surface": "structured_content",
+          "content_block_index": null,
+          "content_block_type": null,
+          "structured_content_path": [
+            "notes",
+            {
+              "field": "id",
+              "equals": "NOTE-1"
+            },
+            "body"
+          ],
+          "template_path": [],
+          "template_key": null,
+          "call_arguments": {
+            "big": 1e+21,
+            "count": 3,
+            "decimal": 123.456,
+            "edge": 0.0001,
+            "exact": 9007199254740991,
+            "flag": true,
+            "huge": 1.5e+300,
+            "missing": null,
+            "offset": -7,
+            "order_id": "ORD-102",
+            "ratio": 0.1,
+            "small": 1e-05,
+            "tiny": 1e-07,
+            "\u00e7idade": "Z\u00fcrich",
+            "\uffff": "bmp",
+            "\ud834\udd1e": "astral"
+          }
+        },
+        "mode": "append"
+      }
+    },
+    {
+      "why": "result record with another field and an int value, an int index in the path",
+      "slot": {
+        "target": {
+          "tool": "get_referral",
+          "surface": "structured_content",
+          "structured_content_path": [
+            "items",
+            0,
+            {
+              "field": "sku",
+              "equals": 7
+            },
+            "note"
+          ],
+          "result_record": {
+            "field": "referral_id",
+            "equals": "REF-1"
+          }
+        },
+        "mode": "replace"
+      },
+      "canonical": {
+        "id": "sha256:2f78d9eb45555fd9fd6f4d46ffe0ec1a0a4ec4e1493de5412d3e97e58b96da38",
+        "target": {
+          "tool": "get_referral",
+          "surface": "structured_content",
+          "content_block_index": null,
+          "content_block_type": null,
+          "structured_content_path": [
+            "items",
+            0,
+            {
+              "field": "sku",
+              "equals": 7
+            },
+            "note"
+          ],
+          "template_path": [],
+          "template_key": null,
+          "result_record": {
+            "field": "referral_id",
+            "equals": "REF-1"
+          }
+        },
+        "mode": "replace"
+      }
+    },
+    {
+      "why": "strings with quotes, control characters, non-ASCII and an empty path key",
+      "slot": {
+        "target": {
+          "tool": "look\"up\n\t\u0001\u007f",
+          "surface": "structured_content",
+          "structured_content_path": [
+            "",
+            "\u00e9 \u00fc \u2028 \ud83d\ude00"
+          ]
+        },
+        "mode": "append"
+      },
+      "canonical": {
+        "id": "sha256:1dcb3cb32d470f5e1c78d11a335cfbab159b51782cfd03f265827b70290800de",
+        "target": {
+          "tool": "look\"up\n\t\u0001\u007f",
+          "surface": "structured_content",
+          "content_block_index": null,
+          "content_block_type": null,
+          "structured_content_path": [
+            "",
+            "\u00e9 \u00fc \u2028 \ud83d\ude00"
+          ],
+          "template_path": [],
+          "template_key": null
+        },
+        "mode": "append"
+      }
+    },
+    {
+      "why": "explicit nulls and empty lists, keys in another order",
+      "slot": {
+        "mode": "append",
+        "target": {
+          "template_key": null,
+          "template_path": [],
+          "result_record": {
+            "equals": -2
+          },
+          "content_block_type": null,
+          "structured_content_path": [
+            "a"
+          ],
+          "content_block_index": null,
+          "surface": "structured_content",
+          "tool": "t"
+        }
+      },
+      "canonical": {
+        "id": "sha256:51088c787c91054bd462eb10577f6001e17c3374a30023996aafba411bd0cfb9",
+        "target": {
+          "tool": "t",
+          "surface": "structured_content",
+          "content_block_index": null,
+          "content_block_type": null,
+          "structured_content_path": [
+            "a"
+          ],
+          "template_path": [],
+          "template_key": null,
+          "result_record": {
+            "field": "id",
+            "equals": -2
+          }
+        },
+        "mode": "append"
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "why": "not an object",
+      "slot": [
+        "target",
+        "mode"
+      ]
+    },
+    {
+      "why": "no mode",
+      "slot": {
+        "target": {
+          "tool": "lookup",
+          "surface": "structured_content",
+          "structured_content_path": [
+            "item"
+          ]
+        }
+      }
+    },
+    {
+      "why": "no target",
+      "slot": {
+        "mode": "append"
+      }
+    },
+    {
+      "why": "unknown slot field",
+      "slot": {
+        "target": {
+          "tool": "lookup",
+          "surface": "structured_content",
+          "structured_content_path": [
+            "item"
+          ]
+        },
+        "mode": "append",
+        "where": "here"
+      }
+    },
+    {
+      "why": "unknown mode",
+      "slot": {
+        "target": {
+          "tool": "lookup",
+          "surface": "structured_content",
+          "structured_content_path": [
+            "item"
+          ]
+        },
+        "mode": "insert"
+      }
+    },
+    {
+      "why": "mode not a string",
+      "slot": {
+        "target": {
+          "tool": "lookup",
+          "surface": "structured_content",
+          "structured_content_path": [
+            "item"
+          ]
+        },
+        "mode": 1
+      }
+    },
+    {
+      "why": "another target's id",
+      "slot": {
+        "target": {
+          "tool": "lookup",
+          "surface": "structured_content",
+          "structured_content_path": [
+            "item"
+          ]
+        },
+        "mode": "append",
+        "id": "sha256:8dd70e90f0e5dd328a7f8ed019352aa11160214af72a0ff662254ba1220f745b"
+      }
+    },
+    {
+      "why": "malformed id",
+      "slot": {
+        "target": {
+          "tool": "lookup",
+          "surface": "structured_content",
+          "structured_content_path": [
+            "item"
+          ]
+        },
+        "mode": "append",
+        "id": "abc"
+      }
+    },
+    {
+      "why": "null id",
+      "slot": {
+        "target": {
+          "tool": "lookup",
+          "surface": "structured_content",
+          "structured_content_path": [
+            "item"
+          ]
+        },
+        "mode": "append",
+        "id": null
+      }
+    },
+    {
+      "why": "target not an object",
+      "slot": {
+        "target": "lookup.item",
+        "mode": "append"
+      }
+    },
+    {
+      "why": "unknown target field",
+      "slot": {
+        "target": {
+          "tool": "lookup",
+          "surface": "structured_content",
+          "structured_content_path": [
+            "item"
+          ],
+          "selector": "x"
+        },
+        "mode": "append"
+      }
+    },
+    {
+      "why": "template surface",
+      "slot": {
+        "target": {
+          "surface": "template",
+          "template_key": "t:main"
+        },
+        "mode": "append"
+      }
+    },
+    {
+      "why": "description surface",
+      "slot": {
+        "target": {
+          "tool": "lookup",
+          "surface": "description"
+        },
+        "mode": "append"
+      }
+    },
+    {
+      "why": "unknown surface",
+      "slot": {
+        "target": {
+          "tool": "lookup",
+          "surface": "header"
+        },
+        "mode": "append"
+      }
+    },
+    {
+      "why": "null surface",
+      "slot": {
+        "target": {
+          "tool": "lookup",
+          "surface": null
+        },
+        "mode": "append"
+      }
+    },
+    {
+      "why": "structured content without a path",
+      "slot": {
+        "target": {
+          "tool": "lookup",
+          "surface": "structured_content",
+          "structured_content_path": []
+        },
+        "mode": "append"
+      }
+    },
+    {
+      "why": "structured content with a null path",
+      "slot": {
+        "target": {
+          "tool": "lookup",
+          "surface": "structured_content",
+          "structured_content_path": null
+        },
+        "mode": "append"
+      }
+    },
+    {
+      "why": "path not a list",
+      "slot": {
+        "target": {
+          "tool": "lookup",
+          "surface": "structured_content",
+          "structured_content_path": "item"
+        },
+        "mode": "append"
+      }
+    },
+    {
+      "why": "structured content with a block index",
+      "slot": {
+        "target": {
+          "tool": "lookup",
+          "surface": "structured_content",
+          "structured_content_path": [
+            "item"
+          ],
+          "content_block_index": 0
+        },
+        "mode": "append"
+      }
+    },
+    {
+      "why": "structured content with a block type",
+      "slot": {
+        "target": {
+          "tool": "lookup",
+          "surface": "structured_content",
+          "structured_content_path": [
+            "item"
+          ],
+          "content_block_type": "text"
+        },
+        "mode": "append"
+      }
+    },
+    {
+      "why": "structured content with a template key",
+      "slot": {
+        "target": {
+          "tool": "lookup",
+          "surface": "structured_content",
+          "structured_content_path": [
+            "item"
+          ],
+          "template_key": "k"
+        },
+        "mode": "append"
+      }
+    },
+    {
+      "why": "content block with a structured path",
+      "slot": {
+        "target": {
+          "tool": "lookup",
+          "structured_content_path": [
+            "item"
+          ]
+        },
+        "mode": "append"
+      }
+    },
+    {
+      "why": "content block with a template path",
+      "slot": {
+        "target": {
+          "tool": "lookup",
+          "template_path": [
+            "a"
+          ]
+        },
+        "mode": "append"
+      }
+    },
+    {
+      "why": "negative block index",
+      "slot": {
+        "target": {
+          "tool": "lookup",
+          "content_block_index": -1
+        },
+        "mode": "append"
+      }
+    },
+    {
+      "why": "boolean block index",
+      "slot": {
+        "target": {
+          "tool": "lookup",
+          "content_block_index": true
+        },
+        "mode": "append"
+      }
+    },
+    {
+      "why": "fractional block index",
+      "slot": {
+        "target": {
+          "tool": "lookup",
+          "content_block_index": 0.5
+        },
+        "mode": "append"
+      }
+    },
+    {
+      "why": "tool not a string",
+      "slot": {
+        "target": {
+          "tool": 7,
+          "surface": "structured_content",
+          "structured_content_path": [
+            "item"
+          ]
+        },
+        "mode": "append"
+      }
+    },
+    {
+      "why": "block type not a string",
+      "slot": {
+        "target": {
+          "tool": "lookup",
+          "content_block_type": 1
+        },
+        "mode": "append"
+      }
+    },
+    {
+      "why": "negative path index",
+      "slot": {
+        "target": {
+          "tool": "lookup",
+          "surface": "structured_content",
+          "structured_content_path": [
+            "items",
+            -1
+          ]
+        },
+        "mode": "append"
+      }
+    },
+    {
+      "why": "fractional path index",
+      "slot": {
+        "target": {
+          "tool": "lookup",
+          "surface": "structured_content",
+          "structured_content_path": [
+            "items",
+            1.5
+          ]
+        },
+        "mode": "append"
+      }
+    },
+    {
+      "why": "boolean path part",
+      "slot": {
+        "target": {
+          "tool": "lookup",
+          "surface": "structured_content",
+          "structured_content_path": [
+            true
+          ]
+        },
+        "mode": "append"
+      }
+    },
+    {
+      "why": "record selector without equals",
+      "slot": {
+        "target": {
+          "tool": "lookup",
+          "surface": "structured_content",
+          "structured_content_path": [
+            {
+              "field": "id"
+            }
+          ]
+        },
+        "mode": "append"
+      }
+    },
+    {
+      "why": "record selector with an unknown field",
+      "slot": {
+        "target": {
+          "tool": "lookup",
+          "surface": "structured_content",
+          "structured_content_path": [
+            {
+              "equals": "A",
+              "where": 1
+            }
+          ]
+        },
+        "mode": "append"
+      }
+    },
+    {
+      "why": "record selector with an empty field",
+      "slot": {
+        "target": {
+          "tool": "lookup",
+          "surface": "structured_content",
+          "structured_content_path": [
+            {
+              "field": "",
+              "equals": "A"
+            }
+          ]
+        },
+        "mode": "append"
+      }
+    },
+    {
+      "why": "record selector matching a boolean",
+      "slot": {
+        "target": {
+          "tool": "lookup",
+          "surface": "structured_content",
+          "structured_content_path": [
+            {
+              "equals": true
+            }
+          ]
+        },
+        "mode": "append"
+      }
+    },
+    {
+      "why": "record selector matching a float",
+      "slot": {
+        "target": {
+          "tool": "lookup",
+          "surface": "structured_content",
+          "structured_content_path": [
+            {
+              "equals": 1.5
+            }
+          ]
+        },
+        "mode": "append"
+      }
+    },
+    {
+      "why": "record selector in a template path",
+      "slot": {
+        "target": {
+          "tool": "lookup",
+          "template_path": [
+            {
+              "equals": "A"
+            }
+          ]
+        },
+        "mode": "append"
+      }
+    },
+    {
+      "why": "call arguments without a tool",
+      "slot": {
+        "target": {
+          "surface": "structured_content",
+          "structured_content_path": [
+            "item"
+          ],
+          "call_arguments": {
+            "id": 1
+          }
+        },
+        "mode": "append"
+      }
+    },
+    {
+      "why": "call arguments null",
+      "slot": {
+        "target": {
+          "tool": "lookup",
+          "surface": "structured_content",
+          "structured_content_path": [
+            "item"
+          ],
+          "call_arguments": null
+        },
+        "mode": "append"
+      }
+    },
+    {
+      "why": "call arguments a list",
+      "slot": {
+        "target": {
+          "tool": "lookup",
+          "surface": "structured_content",
+          "structured_content_path": [
+            "item"
+          ],
+          "call_arguments": [
+            [
+              "id",
+              1
+            ]
+          ]
+        },
+        "mode": "append"
+      }
+    },
+    {
+      "why": "call argument with an empty name",
+      "slot": {
+        "target": {
+          "tool": "lookup",
+          "surface": "structured_content",
+          "structured_content_path": [
+            "item"
+          ],
+          "call_arguments": {
+            "": 1
+          }
+        },
+        "mode": "append"
+      }
+    },
+    {
+      "why": "call argument that is an object",
+      "slot": {
+        "target": {
+          "tool": "lookup",
+          "surface": "structured_content",
+          "structured_content_path": [
+            "item"
+          ],
+          "call_arguments": {
+            "id": {
+              "a": 1
+            }
+          }
+        },
+        "mode": "append"
+      }
+    },
+    {
+      "why": "call argument that is a list",
+      "slot": {
+        "target": {
+          "tool": "lookup",
+          "surface": "structured_content",
+          "structured_content_path": [
+            "item"
+          ],
+          "call_arguments": {
+            "id": [
+              1
+            ]
+          }
+        },
+        "mode": "append"
+      }
+    },
+    {
+      "why": "result record without a tool",
+      "slot": {
+        "target": {
+          "surface": "structured_content",
+          "structured_content_path": [
+            "item"
+          ],
+          "result_record": {
+            "equals": "R"
+          }
+        },
+        "mode": "append"
+      }
+    },
+    {
+      "why": "result record null",
+      "slot": {
+        "target": {
+          "tool": "lookup",
+          "surface": "structured_content",
+          "structured_content_path": [
+            "item"
+          ],
+          "result_record": null
+        },
+        "mode": "append"
+      }
+    },
+    {
+      "why": "result record matching a boolean",
+      "slot": {
+        "target": {
+          "tool": "lookup",
+          "surface": "structured_content",
+          "structured_content_path": [
+            "item"
+          ],
+          "result_record": {
+            "equals": false
+          }
+        },
+        "mode": "append"
+      }
+    },
+    {
+      "why": "lone surrogate in a path key",
+      "slot": {
+        "target": {
+          "tool": "lookup",
+          "surface": "structured_content",
+          "structured_content_path": [
+            "\ud800"
+          ]
+        },
+        "mode": "append"
+      }
+    }
+  ],
+  "payload_digests": [
+    {
+      "text": "",
+      "digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "text": "caf\u00e9",
+      "digest": "sha256:850f7dc43910ff890f8879c0ed26fe697c93a067ad93a7d50f466a7028a9bf4e"
+    },
+    {
+      "text": " \u2014 IGNORE PREVIOUS",
+      "digest": "sha256:ac5e5b44eb4e32b2c7f1bf4dbe46e2a7d6a20a536187c290048d21224de1a7b4"
+    },
+    {
+      "text": "\ud834\udd1e\n\"\u2028",
+      "digest": "sha256:7ef5ece3baf7575c272d9173e3f1b9772fb262928b343f04ac4503f507b0fb91"
+    }
+  ],
+  "payloads_without_a_digest": [
+    "\ud800",
+    "a\udfffb"
+  ]
+}
