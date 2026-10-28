@@ -502,6 +502,9 @@ class OpenShellRuntime:
         self._policy_digest: str | None = None
         self._start_ms: int = 0
         self._cached_ocsf: OCSFEvents | None = None
+        # Every log sync marker issued in this evaluation's sandbox, so a late one
+        # from an earlier sync never shows up as the agent's evidence.
+        self._sync_markers: list[str] = []
 
     # --- Public read-only accessors (avoid direct private attribute access) ---
 
@@ -616,6 +619,7 @@ class OpenShellRuntime:
         if (session_token is None) == (tool_endpoint is None):
             raise ValueError("setup needs exactly one of session_token and tool_endpoint")
         self._cached_ocsf = None
+        self._sync_markers = []
 
         env = dict(self._env_vars)
         if tool_endpoint is not None:
@@ -734,8 +738,10 @@ class OpenShellRuntime:
         every 500 ms, so a read right after the agent exits can miss its last
         network decisions. Resolve a unique hostname inside the sandbox, which the
         supervisor refuses and logs, then poll until that refusal is visible:
-        everything the agent caused was pushed before it. The marker's own events
-        are removed from the result.
+        everything the agent caused was pushed before it. The events of every
+        marker issued in this evaluation are removed from the result, so one an
+        earlier sync left behind, arriving late, is never taken for the agent's;
+        only this sync's own marker completes it.
 
         Returns the messages and whether the marker arrived. Without it, the
         messages are the last successful read and may miss the agent's last
@@ -745,6 +751,12 @@ class OpenShellRuntime:
         only the marker's arrival makes them complete.
         """
         marker = f"sync-{uuid.uuid4().hex[:12]}{_SYNC_MARKER_SUFFIX}"
+        self._sync_markers.append(marker)
+        markers = tuple(self._sync_markers)
+
+        def without_markers(read: list[str]) -> list[str]:
+            return [message for message in read if not any(m in message for m in markers)]
+
         try:
             self._exec(["sh", "-c", _SYNC_MARKER_SCRIPT.format(host=marker)], timeout_seconds=30)
         except Exception as exc:
@@ -763,16 +775,16 @@ class OpenShellRuntime:
                 logging.getLogger(__name__).warning(
                     "OpenShell log read failed after an earlier read; network evidence is incomplete: %s", exc
                 )
-                return [message for message in messages if marker not in message], False
+                return without_markers(messages), False
             messages = read
             if any(marker in message for message in messages):
-                return [message for message in messages if marker not in message], True
+                return without_markers(messages), True
             time.sleep(0.5)
         logging.getLogger(__name__).warning(
             "OpenShell log sync marker did not arrive within %.0fs; network evidence is incomplete",
             _LOG_SYNC_BUDGET_SECONDS,
         )
-        return messages or [], False
+        return without_markers(messages or []), False
 
     def _fetch_ocsf(self) -> tuple[OCSFEvents, EvidenceStatus]:
         """Fetch and parse the evaluation's OCSF events, and how completely they were collected.
@@ -927,6 +939,7 @@ class OpenShellRuntime:
         self._policy_digest = None
         self._start_ms = 0
         self._cached_ocsf = None
+        self._sync_markers = []
 
     def end_run(self) -> None:
         """Wait for the run's workspace to drain, delete it, and close the client.

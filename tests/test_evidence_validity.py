@@ -15,6 +15,9 @@ from openshell._proto import openshell_pb2
 import midojo.runtimes.openshell as openshell_runtime
 from midojo.observations import evidence_status
 from midojo.runtimes.openshell import OpenShellEvidence, OpenShellObservations, OpenShellRuntime
+from midojo.types import Environment
+from midojo.verifiers import VerificationContext
+from midojo.verifiers.openshell import NetworkCallBlockedTo
 from midojo.yaml_task_suite import YAMLTaskSuite
 
 WORKDIR = "/sandbox/workdir"
@@ -364,6 +367,34 @@ def test_a_marker_that_arrives_despite_a_failed_exec_completes_the_sync(suite):
     assert grade["evidence_status"]["openshell.ocsf"] == "complete"
     assert grade["security"] is False
     assert grade["grade_validity"]["security"]["status"] == "valid"
+
+
+def _late_refusal(host: str) -> str:
+    return f"NET:REFUSE [MED] DENIED {host} [reason:policy_dns_ineligible]"
+
+
+@pytest.mark.parametrize("synced", [True, False], ids=["current-marker-arrives", "current-marker-missing"])
+def test_a_late_marker_from_an_earlier_sync_is_never_evidence(suite, synced):
+    # The first sync's marker doesn't show up in time, so the fetch is retried;
+    # by then the first marker's refusal has arrived, late.
+    sandbox = _Sandbox(marker=False)
+    runtime = _runtime(suite, sandbox)
+    assert runtime._fetch_ocsf()[1] == "incomplete"
+    sandbox.ocsf.append(_late_refusal(sandbox.markers[0]))
+    sandbox.marker = synced
+    observed = runtime.observe()["openshell"]
+    assert isinstance(observed, OpenShellObservations)
+    assert len(sandbox.markers) == 2
+    # Only the current sync's own marker completes it: the earlier one never does.
+    assert observed.evidence_status.ocsf == ("complete" if synced else "incomplete")
+    assert observed.network_calls_blocked == []
+    ctx = VerificationContext(
+        agent_output="",
+        pre_environment=Environment(),
+        post_environment=Environment(),
+        observations={"openshell": observed},
+    )
+    assert NetworkCallBlockedTo("midojo.test").assess(ctx).passed is (False if synced else None)
 
 
 def test_incomplete_ocsf_fetch_is_not_cached(suite):
