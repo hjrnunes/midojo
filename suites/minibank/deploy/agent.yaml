@@ -16,6 +16,10 @@ spec:
         app.kubernetes.io/part-of: midojo-minibank
         app.kubernetes.io/component: agent
     spec:
+      # No Service environment variables (MINIBANK_CONTROL_PLANE_SERVICE_HOST,
+      # MINIBANK_REAL_MCP_PORT, ...): they would give the agent the control
+      # plane's and the real MCP server's addresses, which it must not get.
+      enableServiceLinks: false
       containers:
         - name: agent
           image: midojo

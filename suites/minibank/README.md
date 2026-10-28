@@ -27,9 +27,14 @@ evaluation, `midojo-run` starts an interceptor in its own process that serves
 the agent the tools in `host_tools.py`, forwarding the read tools to the real
 MCP server and keeping the write tools in the evaluation's environment. The
 agent gets only that interceptor's URL and bearer token, in the
-`X-Midojo-Tool-Url` and `X-Midojo-Tool-Token` headers of each A2A request; the
-evaluation's session, the control plane and the real server stay out of its
-reach. `midojo-run` refuses the suite without `--interception host`.
+`X-Midojo-Tool-Url` and `X-Midojo-Tool-Token` headers of each A2A request: no
+session, no control token, and neither the control plane's nor the real
+server's address. That isn't network isolation. An agent that can connect to
+the control plane still holds no credential for it, but the real server takes
+none, so a call the agent makes there directly goes unrecorded; keeping the
+agent from connecting to either takes network isolation, such as the
+[Kubernetes network policies](deploy/network-policy.yaml). `midojo-run` refuses
+the suite without `--interception host`.
 
 ## About `real_environment/`
 
@@ -59,7 +64,7 @@ to target specific ones (see [Demo](#demo)).
 ```bash
 export MIDOJO_CONTROL_TOKEN="$(openssl rand -hex 32)"   # shared by midojo-serve and midojo-run; host mode requires it
 midojo-serve --load-suite minibank --host 127.0.0.1 --port 8080
-minibank-real-mcp-serve --port 8083                     # the bank's real tools; only the interceptors reach it
+minibank-real-mcp-serve --port 8083                     # the bank's real tools; the agent isn't told where (see below)
 LITELLM_API_KEY=... LITELLM_API_URL=... LITELLM_MODEL=... \
     env -u MIDOJO_CONTROL_TOKEN minibank-a2a-agent      # no MCP server URL: each request names its tool endpoint
 midojo-run --suite minibank --control-url http://localhost:8080 \
@@ -72,6 +77,15 @@ agent on this machine reaches. For an agent on another host, pass
 `--interceptor-bind` (an address it reaches, e.g. `0.0.0.0`), a fixed
 `--interceptor-port`, and `--interceptor-advertise-host` (the name the agent
 connects to), as the [Kubernetes Job](deploy/run-ladder.job.yaml) does.
+
+This local run isolates nothing on the network: the agent runs on the same
+host as the control plane and the real MCP server, and could connect to either
+on loopback. Its requests carry no session or control credentials, so the
+control plane answers it nothing but `/health`, but the
+real server needs no credential, and a call made there directly is never
+recorded. To rule that out, run the agent where it can reach only the
+interceptor (another host, a container network, or the Kubernetes deployment
+below).
 
 ## Running on Kubernetes
 
@@ -134,7 +148,11 @@ To re-run after a change, delete and re-apply the Job:
 
 `deploy/network-policy.yaml` lets only the Job's pod reach the control plane
 and the real MCP server, so the agent can reach neither, only the interceptor;
-a cluster whose network plugin doesn't enforce NetworkPolicy ignores it. The
+a cluster whose network plugin doesn't enforce NetworkPolicy ignores it, and
+the agent could then connect to both. The agent's pod has
+`enableServiceLinks: false`, so Kubernetes doesn't put the other Services'
+addresses in its environment either (their names still resolve in the
+namespace's DNS: the network policies are what keep the agent out). The
 manifests are checked offline (`tests/test_minibank_deploy.py`, and
 `kustomize build suites/minibank/deploy` renders them), not on a cluster: in
 particular, that the readiness probes still pass under the network policies

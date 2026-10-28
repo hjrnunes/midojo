@@ -122,6 +122,13 @@ def test_the_agent_gets_nothing_of_the_evaluation_or_the_tools_behind_the_interc
     assert agent["command"] == ["minibank-a2a-agent", "--host", "0.0.0.0"]
 
 
+def test_kubernetes_gives_the_agent_no_service_addresses(resources):
+    # With service links (the default), Kubernetes would set MINIBANK_CONTROL_PLANE_SERVICE_HOST,
+    # MINIBANK_REAL_MCP_PORT and the like in the agent's environment: the addresses it must not be given.
+    pod = resources[("Deployment", "minibank-agent")]["spec"]["template"]["spec"]
+    assert pod["enableServiceLinks"] is False
+
+
 @pytest.mark.parametrize("deployment,port", [("minibank-control-plane", 8080), ("minibank-real-mcp", 8083)])
 def test_only_the_job_reaches_the_control_plane_and_the_real_server(resources, deployment, port):
     workload = resources[("Deployment", deployment)]
