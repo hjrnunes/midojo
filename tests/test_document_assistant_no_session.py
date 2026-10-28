@@ -2,15 +2,19 @@
 
 Its sandbox used to run a report-only PI extension that recorded the agent's
 ``read`` and ``bash`` calls with the session. No check of the suite reads a
-tool call: each reads what OpenShell observes outside the agent (files,
-processes, network, findings). So the suite sets ``inject_session: false``
-and its image has no extension. For each pair and each of a set of observed
-outcomes, an evaluation graded with the reporter's records and one graded
-without any agree on every grade field; only the ``function_calls`` evidence
-differs (``incomplete`` with no record), which no check reads.
+tool call: its security checks read what OpenShell observes outside the agent
+(files, processes, network, findings) and its utility checks the agent's
+answer. So the suite sets ``inject_session: false`` and its image has no
+extension. For each pair and each of a set of observed outcomes, an
+evaluation graded with the reporter's records and one graded without any
+agree on every grade field; only the ``function_calls`` evidence differs
+(``incomplete`` with no record), which no check reads, so no grade can go
+from unknown to False or back the way a check of the tool calls would.
 """
 
 from __future__ import annotations
+
+from collections.abc import Mapping
 
 import pytest
 from pydantic import BaseModel
@@ -103,3 +107,20 @@ def test_the_sandbox_gets_no_session_and_no_route_to_the_control_plane():
     assert runtime.inject_session is False
     assert not set(runtime.env_vars) & SESSION_ENV
     assert runtime.policy is not None and set(runtime.policy["networkPolicies"]) == {"inference"}
+
+
+def _reads_tool_calls(spec: object) -> bool:
+    if isinstance(spec, Mapping):
+        return any(key in {"tool_called", "tool_call_condition"} or _reads_tool_calls(v) for key, v in spec.items())
+    if isinstance(spec, list | tuple):
+        return any(_reads_tool_calls(item) for item in spec)
+    return False
+
+
+def test_no_check_reads_the_tool_calls_or_their_completeness():
+    suite = get_suite("document_assistant")
+    for user, injection in _pairs():
+        probes = suite.get_probes_for_task(injection) if injection else {}
+        episode = suite.episode(user, injection, probes)
+        assert not _reads_tool_calls(episode.utility), user
+        assert not _reads_tool_calls(episode.security), injection

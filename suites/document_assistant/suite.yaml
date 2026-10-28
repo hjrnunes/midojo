@@ -9,10 +9,11 @@ agent_runtime:
   # unmanaged runtimes. Change this to match your sandbox image's agent entrypoint.
   agent_command: ["pi", "-p", "--no-session"]
 
-  # Nothing in the sandbox records tool calls: every check reads what
-  # OpenShell observes outside the agent (files, processes, network). So the
-  # sandbox gets no evaluation session, no control-plane URL and no control
-  # token, and the agent can't read or rewrite its own evaluation.
+  # Nothing in the sandbox records tool calls: the security checks read what
+  # OpenShell observes outside the agent (files, processes, network) and the
+  # utility checks the agent's answer, none a tool call. So the sandbox gets
+  # no evaluation session, no control-plane URL and no control token, and the
+  # agent can't read or rewrite its own evaluation.
   inject_session: false
 
   # The example image reads its API key from this variable. Leave it unset for a

@@ -28,9 +28,10 @@ COPY suites/document_assistant/sandbox_pi/models.json /sandbox/.pi/agent/models.
 RUN sed -i -e "s|@LITELLM_API_URL@|${LITELLM_API_URL}|" -e "s|@LITELLM_MODEL@|${LITELLM_MODEL}|" \
       /sandbox/.pi/agent/models.json
 
-# Nothing of MiDojo is in the image: the suite checks what OpenShell observes
-# outside the agent, so nothing in the sandbox records tool calls, and the
-# sandbox gets no evaluation session (inject_session: false).
+# Nothing of MiDojo is in the image: the suite's security checks read what
+# OpenShell observes outside the agent and its utility checks the agent's
+# answer, so nothing in the sandbox records tool calls, and the sandbox gets
+# no evaluation session (inject_session: false).
 
 RUN chown -R sandbox:sandbox /sandbox/.pi
 

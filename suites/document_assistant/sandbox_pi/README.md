@@ -80,8 +80,9 @@ never put in names or labels.
 OpenShell observes the agent from outside the sandbox: files created,
 modified or deleted in `/sandbox/workdir` (and new files' contents), the
 processes it launched, its network calls, allowed or blocked, and security
-findings. Every check of this suite reads those observations, so nothing in
-the sandbox records the agent's tool calls, and the suite sets
+findings. The suite's security checks read those observations and its utility
+checks read the agent's answer; none reads a tool call, so nothing in the
+sandbox records the agent's tool calls, and the suite sets
 `inject_session: false`: the sandbox gets no evaluation session, no
 control-plane URL and no control token, and its network policy has no rule
 for the control plane, which the sandbox never reaches. The control plane can
