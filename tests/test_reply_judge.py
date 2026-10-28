@@ -1039,3 +1039,102 @@ def test_equal_dicts_make_the_same_request_whatever_their_insertion_order(judge,
 
     assert ids[0] == ids[1]
     assert judge.requests[0].body == judge.requests[1].body
+
+
+# --- a URL or token that can't be used, and the backstop: unknown, recorded, never raised ---
+
+needs_environb = pytest.mark.skipif(not hasattr(os, "environb"), reason="no bytes environment on this platform")
+
+
+def no_token_in(grade: GradeResponse, secret: str = TOKEN) -> bool:
+    return secret not in grade.model_dump_json() and secret not in json.dumps(grade.model_dump(mode="json"))
+
+
+@needs_environb
+@pytest.mark.asyncio
+async def test_a_url_with_bytes_that_arent_utf8_grades_unknown_with_nothing_sent(judge, monkeypatch):
+    monkeypatch.setitem(os.environb, b"TEST_JUDGE_URL", judge.url("/supported").encode() + b"/\xff")
+    monkeypatch.setenv("TEST_JUDGE_TOKEN", TOKEN)
+    grade = await graded_in_process(judged_episode(), REPLY)
+
+    assert grade.security is None
+    why = "the judge service URL in TEST_JUDGE_URL is not UTF-8 text"
+    assert grade.security_reason is not None and why in grade.security_reason
+    [record] = grade.judgements
+    assert (record.sent, record.endpoint, record.failure) == (False, None, why)
+    assert judge.requests == [] and no_token_in(grade)
+
+
+@needs_environb
+@pytest.mark.asyncio
+async def test_a_token_with_bytes_that_arent_utf8_grades_unknown_without_the_token(judge, monkeypatch):
+    monkeypatch.setenv("TEST_JUDGE_URL", judge.url("/supported"))
+    monkeypatch.setitem(os.environb, b"TEST_JUDGE_TOKEN", b"secret-part-7c1e\xffsecret-tail-9a2b")
+    grade = await graded_in_process(judged_episode(), REPLY)
+
+    assert grade.security is None
+    why = "the judge service token in TEST_JUDGE_TOKEN can't be sent: it isn't printable ASCII"
+    assert grade.security_reason is not None and why in grade.security_reason
+    [record] = grade.judgements
+    assert (record.sent, record.failure) == (False, why)
+    assert judge.requests == []
+    assert no_token_in(grade, "secret-part-7c1e") and no_token_in(grade, "secret-tail-9a2b")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("token", ["tökén-5f3a9c0e", "line\nbreak-5f3a9c0e", "tab\tinside-5f3a9c0e"])
+async def test_a_token_a_header_cant_carry_grades_unknown_without_it(judge, monkeypatch, token):
+    monkeypatch.setenv("TEST_JUDGE_URL", judge.url("/supported"))
+    monkeypatch.setenv("TEST_JUDGE_TOKEN", token)
+    grade = await graded_in_process(judged_episode(), REPLY)
+
+    assert grade.security is None and "it isn't printable ASCII" in (grade.security_reason or "")
+    assert judge.requests == [] and no_token_in(grade, "5f3a9c0e")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("step", "sent", "status"),
+    [
+        ("_transport_quiet", False, None),  # before the request goes out
+        ("response_problem", True, 200),  # after the answer came back
+        ("_redacted", True, 200),  # while recording it
+    ],
+)
+async def test_any_exception_in_the_judge_path_is_unknown_recorded_and_never_shows_the_token(
+    judge, monkeypatch, step, sent, status
+):
+    from midojo.verifiers import judge as judge_module
+
+    def broken(*args, **kwargs):
+        raise RuntimeError(f"boom with Authorization: Bearer {TOKEN} and {TOKEN}")
+
+    monkeypatch.setattr(judge_module, step, broken)
+    monkeypatch.setenv("TEST_JUDGE_URL", judge.url("/supported"))
+    monkeypatch.setenv("TEST_JUDGE_TOKEN", TOKEN)
+    grade = await graded_in_process(judged_episode(), REPLY)
+
+    assert grade.security is None
+    assert grade.security_reason is not None and "the judge check failed (RuntimeError)" in grade.security_reason
+    [record] = grade.judgements
+    assert (record.sent, record.http_status, record.verdict) == (sent, status, None)
+    assert record.failure == "the judge check failed (RuntimeError)"
+    assert record.request["claim"] == CLAIM and record.endpoint == judge.url("/supported")
+    assert no_token_in(grade)
+    assert len(judge.requests) == (1 if sent else 0)
+
+
+def test_the_backstop_record_holds_even_when_the_request_is_unknown(monkeypatch):
+    from midojo.verifiers import judge as judge_module
+
+    def broken(*args, **kwargs):
+        raise RuntimeError(TOKEN)
+
+    monkeypatch.setattr(judge_module.ReplyJudge, "_judgement", broken)
+    monkeypatch.setattr(judge_module.ReplyJudge, "_unbuilt_request", broken)
+    result, ctx = assess(judge_spec("http://127.0.0.1:9/judge"))
+
+    assert result.passed is None and "the judge check failed (RuntimeError)" in result.reason
+    record = only_record(ctx)
+    assert (record.request, record.sent) == ({}, False)
+    assert TOKEN not in result.reason and TOKEN not in record.model_dump_json()

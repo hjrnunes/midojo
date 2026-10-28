@@ -113,21 +113,39 @@ class ReplyJudge:
     tool_calls: bool = False
 
     def assess(self, ctx: VerificationContext) -> VerificationResult:
+        """Ask the service once per request, and give its verdict, or unknown with why: never an exception.
+
+        The known failures have their own reasons. Any other exception on the
+        way (resolving the configuration, building, sending, decoding,
+        validating or recording) is caught here, as a backstop: unknown, with
+        the exception's type only (its message may hold the token or a
+        header), and a record of how far the request got.
+        """
+        progress = _Progress()
+        try:
+            record = self._judgement(ctx, progress)
+        except Exception as exc:
+            record = progress.failed(self, exc)
+            ctx.judgements.setdefault(progress.key or json.dumps(["failed", record.request_id]), record)
+        return self.result(record)
+
+    def _judgement(self, ctx: VerificationContext, progress: _Progress) -> JudgeRecord:
         try:
             request = self.request(ctx)
         except Exception as exc:
-            # Never a failed grading: unknown, with what could be told of the request.
+            # Unknown, with what could be told of the request.
             request = self._unbuilt_request()
             why = str(exc) if isinstance(exc, _UnbuildableError) else type(exc).__name__
             failure = f"the judge request could not be built ({why})"
             unbuilt = JudgeRecord(request_id=request["id"], endpoint=None, request=request, sent=False, failure=failure)
             key = json.dumps(["unbuilt", request["id"], self.url, self.url_env, self.token_env])
-            return self.result(ctx.judgements.setdefault(key, unbuilt))
-        key = json.dumps([request["id"], self.url, self.url_env, self.token_env, self.timeout_seconds])
-        record = ctx.judgements.get(key)
+            return ctx.judgements.setdefault(key, unbuilt)
+        progress.request = request
+        progress.key = json.dumps([request["id"], self.url, self.url_env, self.token_env, self.timeout_seconds])
+        record = ctx.judgements.get(progress.key)
         if record is None:
-            record = ctx.judgements[key] = self.ask(request)
-        return self.result(record)
+            record = ctx.judgements[progress.key] = self.ask(request, progress)
+        return record
 
     def _unbuilt_request(self) -> dict[str, Any]:
         """What a request that couldn't be built is known to hold: the check's own claim and rubric, escaped.
@@ -186,33 +204,47 @@ class ReplyJudge:
         body = _json_data(body)
         return {"schema": SCHEMA, "id": request_id(body), **body}
 
-    def ask(self, request: dict[str, Any]) -> JudgeRecord:
-        """Send ``request`` to the service and keep what it answered, or why there is no answer."""
+    def ask(self, request: dict[str, Any], progress: _Progress | None = None) -> JudgeRecord:
+        """Send ``request`` to the service and keep what it answered, or why there is no answer.
+
+        A URL or token that can't be used is a failure before anything is
+        sent: its reason names where it came from, never the token, and
+        shows no URL text. ``progress`` notes how far it got, for the
+        backstop in :meth:`assess`.
+        """
+        progress = progress or _Progress()
+        progress.request = request
         fields: dict[str, Any] = {"request_id": request["id"], "request": request, "endpoint": None, "sent": False}
+        source = "the check's url" if self.url is not None else _text(str(self.url_env))
         url = self.url if self.url is not None else os.environ.get(self.url_env or "")
         if not url:
-            return JudgeRecord(**fields, failure=f"no judge service URL: {self.url_env} is not set")
+            return JudgeRecord(**fields, failure=f"no judge service URL: {source} is not set")
+        if _not_utf8(url):  # an environment value with bytes that aren't UTF-8 decodes to lone surrogates
+            return JudgeRecord(**fields, failure=f"the judge service URL in {source} is not UTF-8 text")
         try:
             endpoint = httpx.URL(url)
-        except httpx.InvalidURL:
+            cleaned = endpoint.copy_with(username=None, password=None, query=None, fragment=None)
+            progress.endpoint = fields["endpoint"] = _text(str(cleaned))
+        except Exception:
             return JudgeRecord(**fields, failure="the judge service URL is not a valid URL")
-        fields["endpoint"] = str(endpoint.copy_with(username=None, password=None, query=None, fragment=None))
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         token = None
         if self.token_env is not None:
+            name = _text(str(self.token_env))
             token = os.environ.get(self.token_env)
             if not token:
-                return JudgeRecord(**fields, failure=f"no judge service token: {self.token_env} is not set")
+                return JudgeRecord(**fields, failure=f"no judge service token: {name} is not set")
+            if not _header_safe(token):
+                failure = f"the judge service token in {name} can't be sent: it isn't printable ASCII"
+                return JudgeRecord(**fields, failure=failure)
             headers["Authorization"] = f"Bearer {token}"
-        try:
-            record = _redacted(self._exchange(endpoint, headers, fields), token)
-            record.model_dump_json()  # the grade dumps it: one that can't be dumped is a failure here
-            return record
-        except Exception as exc:
-            # A judge's failure is an unknown check, never a failed grading. The request may have gone out.
-            return JudgeRecord(**{**fields, "sent": True}, failure=f"the judge check failed ({type(exc).__name__})")
+        record = _redacted(self._exchange(endpoint, headers, fields, progress), token)
+        record.model_dump_json()  # the grade dumps it: one that can't be dumped is a failure (the backstop's)
+        return record
 
-    def _exchange(self, endpoint: httpx.URL, headers: dict[str, str], fields: dict[str, Any]) -> JudgeRecord:
+    def _exchange(
+        self, endpoint: httpx.URL, headers: dict[str, str], fields: dict[str, Any], progress: _Progress
+    ) -> JudgeRecord:
         content = json.dumps(fields["request"], ensure_ascii=False).encode("utf-8")
         fields = {**fields, "sent": True}
         try:
@@ -221,6 +253,7 @@ class ReplyJudge:
                 _transport_quiet(),
                 httpx.Client(timeout=self.timeout_seconds, trust_env=False, follow_redirects=False) as http,
             ):
+                progress.sent = True  # from here on, the request may have gone out
                 response = http.post(endpoint, content=content, headers=headers)
         except httpx.TimeoutException as exc:
             failure = f"the judge service timed out after {self.timeout_seconds:g}s ({type(exc).__name__})"
@@ -228,6 +261,7 @@ class ReplyJudge:
         except (httpx.HTTPError, httpx.InvalidURL, ValueError) as exc:
             # The exception's message may hold the URL; its type says enough.
             return JudgeRecord(**fields, failure=f"the judge service request failed ({type(exc).__name__})")
+        progress.http_status = response.status_code
         sent = {**fields, "http_status": response.status_code}
         if not response.is_success:
             return JudgeRecord(**sent, failure=f"the judge service answered HTTP {response.status_code}")
@@ -400,6 +434,34 @@ def _not_utf8(value: Any) -> bool:
     if type(value) in (list, tuple):
         return any(_not_utf8(item) for item in value)
     return False
+
+
+def _header_safe(token: str) -> bool:
+    """Whether ``token`` can go in an Authorization header as it is: printable ASCII, no control character."""
+    return all(" " <= character <= "~" for character in token)
+
+
+@dataclass
+class _Progress:
+    """How far one judge request got: what the backstop's record says when a step fails unexpectedly."""
+
+    request: dict[str, Any] | None = None
+    key: str | None = None
+    endpoint: str | None = None
+    sent: bool = False
+    http_status: int | None = None
+
+    def failed(self, check: ReplyJudge, exc: Exception) -> JudgeRecord:
+        """The record of a request stopped by ``exc``: its type only, nothing the service answered, no token."""
+        failure = f"the judge check failed ({type(exc).__name__})"
+        try:
+            request = self.request if self.request is not None else check._unbuilt_request()
+            fields = {"request_id": request["id"], "request": request, "endpoint": self.endpoint, "sent": self.sent}
+            record = JudgeRecord(**fields, http_status=self.http_status, failure=failure)
+            record.model_dump_json()
+            return record
+        except Exception:
+            return JudgeRecord(request_id="", endpoint=None, request={}, sent=self.sent, failure=failure)
 
 
 class _UnbuildableError(ValueError):
