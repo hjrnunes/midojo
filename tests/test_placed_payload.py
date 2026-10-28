@@ -14,6 +14,7 @@ import dataclasses
 import hashlib
 import json
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -40,7 +41,7 @@ from midojo_sdk.injection import (
 )
 from midojo_sdk.mcp import MidojoMCP
 from midojo_sdk.recorder import InjectionRecord
-from pydantic import Field
+from pydantic import Field, ValidationError
 
 from midojo.agent_client import AgentClient
 from midojo.attacks import AttackAttempt, AttemptOutcome
@@ -346,6 +347,50 @@ def test_a_slot_round_trips_through_its_data_and_names_the_place_whatever_the_mo
 def test_a_slot_that_is_not_a_tool_output_place_is_refused(data):
     with pytest.raises(ValueError):
         InjectionSlot.from_data(data)
+
+
+# Slots and payload digests both SDKs must agree on: the PI SDK's tests read the same file.
+SLOTS = json.loads((Path(__file__).parent / "fixtures" / "injection_slots.json").read_text(encoding="utf-8"))
+
+
+def _numbers(value: Any) -> list[int | float]:
+    if isinstance(value, dict):
+        return [n for item in value.values() for n in _numbers(item)]
+    if isinstance(value, list):
+        return [n for item in value for n in _numbers(item)]
+    return [value] if type(value) in (int, float) else []
+
+
+def test_the_shared_slots_are_as_javascript_sends_them():
+    # JavaScript has no integer-valued float under 1e21 and no exact int beyond 2**53: such a vector can't be shared.
+    for vector in [*SLOTS["valid"], *SLOTS["invalid"]]:
+        for number in _numbers(vector["slot"]):
+            assert (type(number) is int and abs(number) <= 2**53) or not number.is_integer() or abs(number) >= 1e21
+
+
+@pytest.mark.parametrize("vector", SLOTS["valid"], ids=[v["why"] for v in SLOTS["valid"]])
+def test_a_shared_valid_slot_has_the_pinned_canonical_form(vector):
+    slot, canonical = vector["slot"], vector["canonical"]
+    assert InjectionSlot.from_data(slot).to_data() == canonical
+    assert InjectionSlot.from_data({**slot, "id": canonical["id"]}).to_data() == canonical
+    assert CallInjectionSlot.model_validate(slot).model_dump() == canonical
+    assert CallInjectionSlot.model_validate(canonical).model_dump() == canonical
+
+
+@pytest.mark.parametrize("vector", SLOTS["invalid"], ids=[v["why"] for v in SLOTS["invalid"]])
+def test_a_shared_invalid_slot_is_refused_by_the_sdk_and_the_control_plane(vector):
+    with pytest.raises(ValueError):
+        InjectionSlot.from_data(vector["slot"]).to_data()
+    with pytest.raises(ValidationError):
+        CallInjectionOutcome(instruction_index=0, occurrence=1, status="applied", detail="d", slot=vector["slot"])
+
+
+def test_the_shared_payload_digests():
+    for vector in SLOTS["payload_digests"]:
+        assert payload_digest(vector["text"]) == vector["digest"]
+    for text in SLOTS["payloads_without_a_digest"]:
+        with pytest.raises(ValueError):
+            payload_digest(text)
 
 
 # --- the snapshot digest ---

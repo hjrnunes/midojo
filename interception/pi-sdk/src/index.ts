@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { TSchema } from "typebox";
 
@@ -110,13 +110,249 @@ const DIGEST = /^sha256:[0-9a-f]{64}$/;
  * `InjectionSlot.to_data()`, sent as given. `target` is the instruction's
  * tool-output target in the plan codec's form (`InjectionPlan.to_data`'s
  * instruction `target`), `mode` its mode, and `id` `sha256:<hex>` of the
- * target's JSON with sorted keys, compact, UTF-8; left out, the control plane
- * fills it in, and one given must be the target's.
+ * target's JSON with sorted keys, compact, UTF-8 (`injectionSlotId`); left
+ * out, the control plane fills it in, and one given must be the target's.
  */
 export interface InjectionSlot {
 	id?: string;
 	target: Record<string, unknown>;
 	mode: InjectionMode;
+}
+
+/** `sha256:<hex>` of `text`'s UTF-8 bytes: the Python SDK's `payload_digest`. Throws a `RangeError` for a lone surrogate, which has no UTF-8. */
+export function payloadDigest(text: string): string {
+	return `sha256:${createHash("sha256").update(utf8(text)).digest("hex")}`;
+}
+
+/**
+ * The ID of a slot's `target`: `sha256:<hex>` of the target in the plan codec's
+ * form, as the Python SDK's `InjectionSlot.id` computes it (its JSON with keys
+ * sorted by code point, compact, non-ASCII unescaped, floats as Python writes
+ * them, as UTF-8). The target is read as the JSON it is sent as, and throws a
+ * `RangeError` when it isn't a tool-output target the Python SDK accepts.
+ */
+export function injectionSlotId(target: unknown): string {
+	return slotIdOf(canonicalTarget(asJson(target, "a slot's target")));
+}
+
+function slotIdOf(target: Record<string, unknown>): string {
+	return payloadDigest(pythonJson(target));
+}
+
+const SLOT_FIELDS = new Set(["id", "target", "mode"]);
+const TARGET_FIELDS = new Set([
+	"tool",
+	"surface",
+	"content_block_index",
+	"content_block_type",
+	"structured_content_path",
+	"template_path",
+	"template_key",
+	"call_arguments",
+	"result_record",
+]);
+const TOOL_OUTPUT_SURFACES = new Set(["content_block", "structured_content"]);
+const MODES = new Set(["append", "replace"]);
+
+/**
+ * Throw a `RangeError` for a slot the Python SDK (`InjectionSlot.from_data`) and
+ * the control plane refuse: not `{target, mode}` with an optional `id`; a target
+ * that isn't a tool-output target, by the same field rules; a mode other than
+ * `append` or `replace`; or an `id` that isn't its target's. It reads the slot as
+ * the JSON it is sent as (a field left undefined is left out).
+ */
+function checkSlot(slot: unknown): void {
+	const data = asJson(slot, "a slot");
+	if (!isObject(data)) throw new RangeError("a slot must be a JSON object");
+	onlyFields(data, SLOT_FIELDS, "slot");
+	if (!("target" in data) || !("mode" in data)) throw new RangeError("a slot must contain target and mode");
+	const target = canonicalTarget(data.target);
+	if (typeof data.mode !== "string" || !MODES.has(data.mode)) {
+		throw new RangeError(`a slot's mode is append or replace, not ${JSON.stringify(data.mode)}`);
+	}
+	// Computed even when the id is left out, as the control plane fills it in: a target with no UTF-8 has none.
+	const id = slotIdOf(target);
+	if ("id" in data && data.id !== id) {
+		throw new RangeError(`a slot's id ${JSON.stringify(data.id)} is not its target's ${id}`);
+	}
+}
+
+/** `value` as the JSON it is sent as. */
+function asJson(value: unknown, what: string): unknown {
+	try {
+		const text = JSON.stringify(value);
+		if (text === undefined) throw new RangeError(`${what} is not JSON`);
+		return JSON.parse(text);
+	} catch (error) {
+		throw error instanceof RangeError ? error : new RangeError(`${what} is not JSON: ${String(error)}`);
+	}
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/** Whether a JSON number is one Python reads as an `int`: written without a fraction or an exponent. */
+function isPythonInt(value: unknown): value is number {
+	return typeof value === "number" && /^-?\d+$/.test(JSON.stringify(value));
+}
+
+function onlyFields(value: Record<string, unknown>, allowed: ReadonlySet<string>, what: string): void {
+	const unknown = Object.keys(value).filter((key) => !allowed.has(key));
+	if (unknown.length > 0) throw new RangeError(`${what} has unknown fields: ${JSON.stringify(unknown.sort())}`);
+}
+
+function optionalString(value: unknown, what: string): string | null {
+	if (value !== null && typeof value !== "string") throw new RangeError(`${what} must be a string or null`);
+	return value;
+}
+
+/**
+ * A slot's target in the plan codec's form, as the Python SDK decodes and
+ * encodes it again; a `RangeError` for any target it refuses as a tool-output
+ * target. Absent fields take their defaults, a record selector its `field`
+ * (`id`), and `call_arguments` and `result_record` are left out when empty.
+ */
+function canonicalTarget(value: unknown): Record<string, unknown> {
+	if (!isObject(value)) throw new RangeError("a slot's target must be a JSON object");
+	onlyFields(value, TARGET_FIELDS, "target");
+	const tool = optionalString(value.tool ?? null, "target tool");
+	const surface = "surface" in value ? value.surface : "content_block";
+	if (typeof surface !== "string" || !TOOL_OUTPUT_SURFACES.has(surface)) {
+		throw new RangeError(`tool_output needs a content_block or structured_content selector, not ${JSON.stringify(surface)}`);
+	}
+	const index = value.content_block_index ?? null;
+	if (index !== null && !(isPythonInt(index) && index >= 0)) {
+		throw new RangeError("content_block_index must be a non-negative int");
+	}
+	const blockType = optionalString(value.content_block_type ?? null, "content block type");
+	// A path left out is empty; null isn't a path.
+	const structuredPath = path(
+		"structured_content_path" in value ? value.structured_content_path : [],
+		"structured content path",
+		true,
+	);
+	const templatePath = path("template_path" in value ? value.template_path : [], "template path", false);
+	const templateKey = optionalString(value.template_key ?? null, "template key");
+	const callArguments = "call_arguments" in value ? argumentsOf(value.call_arguments) : {};
+	const resultRecord = "result_record" in value ? selector(value.result_record, "result_record") : null;
+	if ((Object.keys(callArguments).length > 0 || resultRecord !== null) && tool === null) {
+		throw new RangeError("call_arguments and result_record need a target tool");
+	}
+	const template = templatePath.length > 0 || templateKey !== null;
+	if (surface === "content_block" && (structuredPath.length > 0 || template)) {
+		throw new RangeError("content_block selectors cannot include structured-content or template fields");
+	}
+	if (surface === "structured_content") {
+		if (index !== null || blockType !== null || template) {
+			throw new RangeError("structured_content selectors cannot include content-block or template fields");
+		}
+		if (structuredPath.length === 0) throw new RangeError("structured_content needs a non-empty field path");
+	}
+	const target: Record<string, unknown> = {
+		tool,
+		surface,
+		content_block_index: index,
+		content_block_type: blockType,
+		structured_content_path: structuredPath,
+		template_path: templatePath,
+		template_key: templateKey,
+	};
+	if (Object.keys(callArguments).length > 0) target.call_arguments = callArguments;
+	if (resultRecord !== null) target.result_record = resultRecord;
+	return target;
+}
+
+function path(value: unknown, what: string, recordSelectors: boolean): unknown[] {
+	if (!Array.isArray(value)) throw new RangeError(`${what} must be a JSON array`);
+	return value.map((part) => {
+		if (isObject(part)) {
+			if (!recordSelectors) throw new RangeError(`${what} cannot contain a record selector`);
+			return selector(part, "record selector");
+		}
+		if (typeof part === "string" || (isPythonInt(part) && part >= 0)) return part;
+		throw new RangeError(`${what} parts must be strings, non-negative ints${recordSelectors ? " or record selectors" : ""}`);
+	});
+}
+
+function selector(value: unknown, what: string): { field: string; equals: string | number } {
+	if (!isObject(value)) throw new RangeError(`${what} must be a JSON object`);
+	onlyFields(value, new Set(["field", "equals"]), what);
+	if (!("equals" in value)) throw new RangeError(`${what} must contain equals`);
+	const field = "field" in value ? value.field : "id";
+	if (typeof field !== "string" || field === "") throw new RangeError(`${what}'s field must be a non-empty string`);
+	const equals = value.equals;
+	if (typeof equals !== "string" && !isPythonInt(equals)) throw new RangeError(`${what}'s value must be a string or an int`);
+	return { field, equals };
+}
+
+function argumentsOf(value: unknown): Record<string, unknown> {
+	if (!isObject(value)) throw new RangeError("call_arguments must be a JSON object");
+	for (const [name, argument] of Object.entries(value)) {
+		if (name === "") throw new RangeError("call argument names must be non-empty");
+		if (argument !== null && !["string", "number", "boolean"].includes(typeof argument)) {
+			throw new RangeError(`call argument ${JSON.stringify(name)} must be a string, number, boolean or null`);
+		}
+	}
+	return value;
+}
+
+/** `value` (JSON data) as Python's `json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)` writes it. */
+function pythonJson(value: unknown): string {
+	if (value === null || typeof value === "boolean") return JSON.stringify(value);
+	if (typeof value === "number") return pythonNumber(value);
+	if (typeof value === "string") return pythonString(value);
+	if (Array.isArray(value)) return `[${value.map(pythonJson).join(",")}]`;
+	const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) => byCodePoint(a, b));
+	return `{${entries.map(([key, item]) => `${pythonString(key)}:${pythonJson(item)}`).join(",")}}`;
+}
+
+/** A string as Python's JSON writes it without ASCII escapes: the same escapes as JSON.stringify, with no lone surrogate to escape. */
+function pythonString(text: string): string {
+	utf8(text);
+	return JSON.stringify(text);
+}
+
+/**
+ * A number as Python writes the value it reads from this number's JSON: an int
+ * as its digits, a float as `repr` does (the shortest digits that read back,
+ * fixed for exponents -4 to 15, else scientific with a signed exponent of at
+ * least two digits).
+ */
+function pythonNumber(value: number): string {
+	const text = JSON.stringify(value);
+	if (!/[.e]/.test(text)) return text;
+	const [mantissa, power] = value.toExponential().split("e");
+	const exponent = Number(power);
+	const sign = mantissa.startsWith("-") ? "-" : "";
+	const digits = mantissa.replace(/[-.]/g, "");
+	if (exponent >= -4 && exponent < 16) {
+		if (exponent < 0) return `${sign}0.${"0".repeat(-exponent - 1)}${digits}`;
+		const whole = digits.slice(0, exponent + 1).padEnd(exponent + 1, "0");
+		return `${sign}${whole}.${digits.slice(exponent + 1) || "0"}`;
+	}
+	const fraction = digits.length > 1 ? `.${digits.slice(1)}` : "";
+	return `${sign}${digits[0]}${fraction}e${exponent < 0 ? "-" : "+"}${String(Math.abs(exponent)).padStart(2, "0")}`;
+}
+
+/** Order two strings by code point, as Python sorts them (not by UTF-16 code unit). */
+function byCodePoint(a: string, b: string): number {
+	const x = Array.from(a);
+	const y = Array.from(b);
+	for (let i = 0; i < Math.min(x.length, y.length); i++) {
+		const difference = (x[i].codePointAt(0) ?? 0) - (y[i].codePointAt(0) ?? 0);
+		if (difference !== 0) return difference;
+	}
+	return x.length - y.length;
+}
+
+/** `text`'s UTF-8 bytes; a `RangeError` for a lone surrogate, which Python can't encode either. */
+function utf8(text: string): Buffer {
+	for (const character of text) {
+		const point = character.codePointAt(0) ?? 0;
+		if (point >= 0xd800 && point <= 0xdfff) throw new RangeError("a string with a lone surrogate has no UTF-8");
+	}
+	return Buffer.from(text, "utf8");
 }
 
 /**
@@ -216,8 +452,10 @@ export function recordsDetails(recorder: unknown): recorder is DetailedRecorder 
  * (`selected` true, a `transformation`, a non-empty `emitted`) or a placement
  * (a digest or a slot). Unreported facts are allowed, and so is `unmatched` at
  * occurrence 1 or more (a strict selector that didn't match a counted call).
- * It also throws for a digest or slot on any record but a placement, and for
- * a digest not in the `sha256:<hex>` form.
+ * It also throws for a digest or slot on any record but a placement, for a
+ * digest not in the `sha256:<hex>` form, and for a slot the Python SDK and the
+ * control plane refuse (`checkSlot`: its shape, a target that isn't a
+ * tool-output target, its mode, or an `id` that isn't its target's).
  */
 export function checkInjectionRecord(record: InjectionRecord): void {
 	const placement = record.payloadDigest !== undefined || record.placedDigest !== undefined || record.slot !== undefined;
@@ -239,6 +477,7 @@ export function checkInjectionRecord(record: InjectionRecord): void {
 			throw new RangeError(`a payload digest is 'sha256:' and 64 lowercase hex digits, not ${JSON.stringify(digest)}`);
 		}
 	}
+	if (record.slot !== undefined) checkSlot(record.slot);
 }
 
 /**
