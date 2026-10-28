@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
+from starlette.concurrency import run_in_threadpool
 
 from midojo.types import FunctionCallRecord, SuiteName
 from midojo.yaml_task_suite import YAMLTaskSuite
@@ -218,8 +219,11 @@ async def grade_evaluation(
     run: Annotated[Run, Depends(get_run)],
     control: Annotated[ControlPlane, Depends(get_control)],
 ):
-    """Grade the sealed snapshot. The first grade is kept: grading again returns it."""
-    return control.grade(run.id, eval_id)
+    """Grade the sealed snapshot. The first grade is kept: grading again returns it.
+
+    It grades in a worker thread: a check that asks a judge service waits for it there, not on the event loop.
+    """
+    return await run_in_threadpool(control.grade, run.id, eval_id)
 
 
 @router.get("/{run_id}/evaluations/{eval_id}/snapshot", response_model=SnapshotResponse, status_code=status.HTTP_200_OK)

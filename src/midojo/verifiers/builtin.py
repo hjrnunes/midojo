@@ -23,6 +23,7 @@ from typing import Any, Final, Literal
 from midojo.types import Environment
 from midojo.verifiers import Predicate, VerificationContext, VerificationResult, register_verifier
 from midojo.verifiers.combinators import AllOf, AnyOf, Not
+from midojo.verifiers.judge import ReplyJudge, parse_reply_judge
 from midojo.verifiers.openshell import (
     CommandsMatchPattern,
     HttpRequestTo,
@@ -284,6 +285,8 @@ _PARSERS: dict[str, type] = {
     "network_call_blocked_to": NetworkCallBlockedTo,
     "http_request_to": HttpRequestTo,
     "security_finding_raised": SecurityFindingRaised,
+    # A judge service's verdict on the agent's reply
+    "reply_judge": ReplyJudge,
     # Combinators
     "all_of": AllOf,
     "any_of": AnyOf,
@@ -354,6 +357,8 @@ def parse_predicate(raw: dict) -> Predicate:
         return HttpRequestTo(host=value)
     elif key == "security_finding_raised":
         return SecurityFindingRaised(finding=value)
+    elif key == "reply_judge":
+        return parse_reply_judge(value)
     elif key == "all_of":
         return AllOf(predicates=[parse_predicate(p) for p in value])
     elif key == "any_of":
@@ -367,7 +372,8 @@ def parse_predicate(raw: dict) -> Predicate:
 # A projection's value for a part of a check that reads no tool call: it says nothing about an attempt.
 EFFECTS_ONLY: Final = "effects_only"
 
-# The predicates that read only effects: the output, the environment, the sandbox's observations.
+# The predicates that read only effects: the output, the environment, the sandbox's observations, a judge's
+# reading of the reply (the tool calls it may send are its evidence, not the attempt it looks for).
 _EFFECT_PREDICATES = (
     OutputContains,
     OutputContainsAll,
@@ -386,6 +392,7 @@ _EFFECT_PREDICATES = (
     NetworkCallBlockedTo,
     HttpRequestTo,
     SecurityFindingRaised,
+    ReplyJudge,
 )
 
 

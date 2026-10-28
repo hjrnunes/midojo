@@ -2,7 +2,15 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializeAsAny,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+)
 
 from midojo.observations import EvidenceStatus, require_evidence_keys
 from midojo.types import (
@@ -14,6 +22,7 @@ from midojo.types import (
     InterceptionMode,
     SuiteName,
 )
+from midojo.verifiers.judge import JudgeRecord
 
 # --- Run / Evaluation request/response models ---
 
@@ -423,6 +432,22 @@ class GradeResponse(BaseModel):
             "even without a security check."
         ),
     )
+    judgements: list[JudgeRecord] = Field(
+        default_factory=list,
+        description=(
+            "What each reply_judge check asked its judge service and was answered: the request body (never a "
+            "token), the HTTP status, the verdict, rationale and model, or why the check is unknown. Empty when no "
+            "check asked a judge."
+        ),
+    )
+
+    @model_serializer(mode="wrap")
+    def _without_empty_judgements(self, dump: SerializerFunctionWrapHandler):
+        # A grade no judge took part in dumps as it always did.
+        data = dump(self)
+        if not self.judgements:
+            data.pop("judgements", None)
+        return data
 
 
 class EvaluationSummary(BaseModel):
