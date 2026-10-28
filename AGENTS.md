@@ -78,6 +78,8 @@ for additional examples refer to [README.md](./README.md).
 
 ## Patterns for Common Changes
 
+**Work on the PyRIT route** (`src/midojo/pyrit/`, optional `pyrit` extra) — read [docs/pyrit.md](docs/pyrit.md). PyRIT owns the campaign; one target send runs one episode on one declared instruction, checked with the attempt loop's surface guards. Scorers resolve sealed verdicts by response identity, return native undetermined scores for invalid/missing evidence, and replay successes once from a clean start before counting them (replay identities live in score metadata). A runtime must declare reset or disposal. Run `uv sync --frozen --extra dev --extra pyrit` for the offline tests; without the extra `tests/test_pyrit_route.py` skips. Keep model calls out of tests.
+
 **Add a new suite (bundled)** — follow `suites/weather/` as the minimal example:
 1. create `suites/<name>/suite.yaml` with `agent_runtime`, `environment`, `user_tasks`, `injection_tasks`
 2. create `suites/<name>/__init__.py` exporting `task_suite` (see below)
