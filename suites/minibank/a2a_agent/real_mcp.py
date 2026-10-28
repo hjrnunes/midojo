@@ -1,7 +1,9 @@
 """Standalone MCP server providing real MiniBank tools.
 
-Start this server and pass its URL as --upstream-url to minibank-fake-mcp-serve
-so the fake MCP server forwards read calls here.
+In a MiDojo run it stays on the host, and the agent never reaches it: pass
+its URL as ``midojo-run --interception host --upstream-mcp-url``, and each
+evaluation's host-side interceptor forwards the suite's read calls here (see
+``suites/minibank/host_tools.py``). It needs no model settings.
 
 Usage:
     minibank-real-mcp-serve                  # safe mode (business rules enforced)
@@ -27,6 +29,7 @@ def _get_executor():
     global _executor
     if _executor is None:
         from suites.minibank.real_environment.bank_tools import BankToolExecutor
+
         _executor = BankToolExecutor(_state)
     return _executor
 
@@ -48,9 +51,13 @@ def get_transaction_history(account_id: str, limit: int = 5) -> str:
     :param account_id: Account identifier, e.g. ACC001
     :param limit: Max number of transactions to return (1-20, default 5)
     """
-    result = _get_executor().execute("get_transaction_history", {
-        "account_id": account_id, "limit": limit,
-    })
+    result = _get_executor().execute(
+        "get_transaction_history",
+        {
+            "account_id": account_id,
+            "limit": limit,
+        },
+    )
     return json.dumps(result)
 
 
@@ -60,9 +67,12 @@ def get_all_accounts_for_customer(customer_id: str) -> str:
 
     :param customer_id: Customer identifier, e.g. CUST001
     """
-    result = _get_executor().execute("get_all_accounts_for_customer", {
-        "customer_id": customer_id,
-    })
+    result = _get_executor().execute(
+        "get_all_accounts_for_customer",
+        {
+            "customer_id": customer_id,
+        },
+    )
     return json.dumps(result)
 
 
@@ -73,9 +83,13 @@ def get_customer_info(customer_id: str, fields: list[str]) -> str:
     :param customer_id: Customer identifier, e.g. CUST001
     :param fields: List of field names to retrieve
     """
-    result = _get_executor().execute("get_customer_info", {
-        "customer_id": customer_id, "fields": fields,
-    })
+    result = _get_executor().execute(
+        "get_customer_info",
+        {
+            "customer_id": customer_id,
+            "fields": fields,
+        },
+    )
     return json.dumps(result)
 
 
@@ -186,9 +200,13 @@ def freeze_account(account_id: str, reason: str) -> str:
     :param account_id: Account to freeze
     :param reason: Reason for the freeze
     """
-    result = _get_executor().execute("freeze_account", {
-        "account_id": account_id, "reason": reason,
-    })
+    result = _get_executor().execute(
+        "freeze_account",
+        {
+            "account_id": account_id,
+            "reason": reason,
+        },
+    )
     return json.dumps(result)
 
 

@@ -17,7 +17,7 @@ from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
 from midojo import orchestrator
-from midojo.agent_client import AgentClient, SimpleHTTPAgentClient
+from midojo.agent_client import A2AAgentClient, AgentClient, SimpleHTTPAgentClient
 from midojo.control_plane.config import CONTROL_TOKEN_ENV, AppConfig
 from midojo.control_plane.inprocess_control import InProcessControlClient
 from midojo.control_plane.service import ControlPlane
@@ -180,7 +180,7 @@ async def test_host_mode_is_refused_before_a_run_for_a_client_that_cant_pass_an_
 
 
 @pytest.fixture
-def cli_benchmark(monkeypatch):
+def cli_benchmark(monkeypatch, plain_suite):
     for name in ("MODEL_NAME", "MCP_SERVER_URL", "OPENAI_API_KEY", "UPSTREAM_MCP_URL"):
         monkeypatch.delenv(name, raising=False)
     # Host mode needs the control plane's token; agent mode passes it through as it always did.
@@ -191,7 +191,7 @@ def cli_benchmark(monkeypatch):
 
 
 CONTROL_TOKEN = "control-secret"
-PI = ["--suite", "minibank", "--agent-uri", "/agent", "--protocol", "pi"]
+PI = ["--suite", "plain", "--agent-uri", "/agent", "--protocol", "pi"]
 OPENSHELL = ["--suite", "document_assistant", "--gateway", "g"]
 UPSTREAM = ["--upstream-mcp-url", "http://localhost:9000/mcp"]
 
@@ -251,7 +251,7 @@ def test_the_cli_gives_an_openshell_sandbox_an_ipv6_interceptor_in_brackets_once
 
 
 def test_a_responses_protocol_needs_no_mcp_server_url_in_host_mode(cli_benchmark):
-    args = ["--suite", "minibank", "--agent-uri", "http://agent", "--protocol", "openai", "--model-name", "m"]
+    args = ["--suite", "plain", "--agent-uri", "http://agent", "--protocol", "openai", "--model-name", "m"]
     result = CliRunner().invoke(
         orchestrator.main, [*args, "--interception", "host", *UPSTREAM], env={"OPENAI_API_KEY": "k"}
     )
@@ -332,6 +332,29 @@ def test_the_cli_refuses_a_suite_with_host_tools_in_agent_mode(cli_benchmark):
     assert result.exit_code == 2
     assert "serves its tools on the host-side interceptor (HOST_TOOLS)" in result.output
     assert "--interception host" in result.output
+    cli_benchmark.assert_not_called()
+
+
+MINIBANK = ["--suite", "minibank", "--agent-uri", "http://agent", "--protocol", "a2a"]
+
+
+def test_the_cli_runs_the_minibank_a2a_agent_in_host_mode_with_its_host_tools(cli_benchmark):
+    from suites.minibank import host_tools
+
+    result = CliRunner().invoke(orchestrator.main, [*MINIBANK, "--interception", "host", *UPSTREAM])
+    assert result.exit_code == 0, result.output
+    kwargs = cli_benchmark.call_args.kwargs
+    assert kwargs["interception"] == HostInterception(upstream="http://localhost:9000/mcp", tools=host_tools.register)
+    assert isinstance(kwargs["agent_client"], A2AAgentClient)
+    assert kwargs["agent_client"].supports_host_interception
+
+
+@pytest.mark.parametrize("protocol", ["a2a", "http", "openai"])
+def test_the_cli_refuses_minibank_in_agent_mode(cli_benchmark, protocol):
+    args = ["--suite", "minibank", "--agent-uri", "http://agent", "--protocol", protocol, "--model-name", "m"]
+    result = CliRunner().invoke(orchestrator.main, args, env={"OPENAI_API_KEY": "k", "MCP_SERVER_URL": "http://t/mcp"})
+    assert result.exit_code == 2
+    assert "Suite 'minibank' serves its tools on the host-side interceptor (HOST_TOOLS)" in result.output
     cli_benchmark.assert_not_called()
 
 

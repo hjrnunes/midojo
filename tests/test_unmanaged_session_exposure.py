@@ -1,7 +1,8 @@
 """What an unmanaged agent with a shell can read of its evaluation's session.
 
-An unmanaged agent (the minibank suite's A2A agent) gets the session in the
-``X-Midojo-Session`` header of every request MiDojo sends it.
+An unmanaged agent in agent mode (an A2A or HTTP agent recording through a
+fake MCP server of its own) gets the session in the ``X-Midojo-Session``
+header of every request MiDojo sends it.
 ``MidojoSessionMiddleware`` binds the header's value to the request's task
 (a context variable), and the agent forwards it to its fake MCP server with
 ``session_headers()``, which records the calls with it. The token is never
@@ -50,7 +51,7 @@ async def task(_request: Request) -> JSONResponse:
 
 
 def agent() -> Starlette:
-    """An agent as the minibank A2A agent installs the middleware: the header bound to each request's task."""
+    """An agent-mode agent that installs the middleware: the header bound to each request's task."""
     app = Starlette(routes=[Route("/", task, methods=["POST"])])
     app.add_middleware(MidojoSessionMiddleware)
     return app
