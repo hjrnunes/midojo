@@ -25,7 +25,7 @@ A report that compares two runs should carry a row like these for its own pairin
 
 ## The independent checks
 
-Each check below has an oracle MiDojo doesn't compute. They run offline, with no model or target, as part of `uv run pytest`.
+Each check below has an oracle that today's MiDojo code doesn't compute. They run offline, with no model or target, as part of `uv run pytest`.
 
 | Check | What it covers | Oracle |
 | --- | --- | --- |
@@ -38,7 +38,7 @@ What each check has in common with MiDojo:
 
 - **Delivery against the upstream's log.** The MCP SDK serialises both the upstream's log and the client's responses, so a bug in the SDK's wire format would go unseen. The check stops where MiDojo's own evidence stops, at what the interceptor returned: nothing here observes the agent reading the result or the model's input.
 - **The mutation suites.** They share the rules as the contract and the docs state them; a rule stated wrongly would be tested wrongly. The mutants are a fixed list of plausible edits, not a mutation score: a bug no listed mutant resembles can survive. `tests/mutation_harness.py` compiles a module, or one function, with one exact source edit, apart from the real one, and fails if the snippet it edits has moved, so the list can't quietly test the original code.
-- **The re-grade.** It shares the recordings, so it checks grading on fixed evidence and nothing upstream of it. Only `tool_call_condition` checks are re-graded: the recorded runs' other checks were LLM judges, which can't be run offline.
+- **The re-grade.** It shares the recordings, so it checks grading on fixed evidence and nothing upstream of it. Its oracle is still MiDojo, an earlier version of it: the recorded verdicts were graded by b0fb457, so the re-grade catches drift between the two versions but not a bug both of them have. Only `tool_call_condition` checks are re-graded: the recorded runs' other checks were LLM judges, which can't be run offline.
 
 ## The re-grade at b0fb457
 
