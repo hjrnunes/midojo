@@ -1,0 +1,10 @@
+{
+  "include": [
+    "src/midojo/pyrit",
+    "examples/pyrit_weather.py",
+    "tests/test_pyrit_route.py",
+    "tests/test_pyrit_optional.py"
+  ],
+  "pythonVersion": "3.12",
+  "typeCheckingMode": "basic"
+}
