@@ -24,6 +24,7 @@ from midojo.runtimes import AgentRuntime, attempt_isolation
 from midojo.yaml_task_suite import YAMLTaskSuite
 
 METADATA_PREFIX = "midojo."
+UNDETERMINED_REPLY = "MiDojo could not evaluate this candidate."
 
 
 @dataclass(frozen=True)
@@ -52,7 +53,7 @@ class MidojoVerdict:
         if self.status != "graded" or grade is None:
             return None
         validity = grade.grade_validity
-        if validity.security.status != "valid" or validity.utility.status == "invalid":
+        if validity.security.status != "valid":
             return None
         return grade.security
 
@@ -125,9 +126,14 @@ class MidojoEpisodeTarget(PromptTarget):
         self._runtime = runtime
         self._reset = isolation == "reset"
         self._interception = interception
-        self._control = control
+        self._control = control if control is not None else ControlPlane({})
         self._attempts: dict[str, _Attempt] = {}
         self._lock = asyncio.Lock()
+
+    @property
+    def control(self) -> ControlPlane:
+        """The target's control plane, retaining evaluations and snapshots after sends."""
+        return self._control
 
     @classmethod
     def from_suite(
@@ -160,32 +166,42 @@ class MidojoEpisodeTarget(PromptTarget):
             control=control,
         )
 
+    def _validate_request(self, *, normalized_conversation: list[Message]) -> None:
+        # Defer target capability validation to the send hook, where a refusal
+        # becomes a receipt. PyRIT still validates the Message model itself.
+        pass
+
     async def _send_prompt_to_target_async(self, *, normalized_conversation: list[Message]) -> list[Message]:
         request = normalized_conversation[-1]
-        if len(request.message_pieces) != 1 or request.message_pieces[0].converted_value_data_type != "text":
-            raise OutOfSurfaceError("a candidate must be one text piece for the declared surface")
         piece = request.message_pieces[0]
-        candidate = piece.converted_value
         async with self._lock:
             episode = None
             try:
-                episode = self._episode_for_payload(candidate)
-                check_plan_within(episode.plan, self._surface)
-                if len(episode.plan.instructions) != 1 or episode.plan.instructions[0].payload != candidate:
-                    raise OutOfSurfaceError("the candidate must fill exactly the declared instruction")
-            except OutOfSurfaceError as error:
-                verdict, reply = MidojoVerdict("refused", reason=str(error)), str(error)
-                episode = None
-            except Exception as error:
-                verdict, reply = MidojoVerdict("failed", reason=f"{type(error).__name__}: {error}"), str(error)
-                episode = None
+                super()._validate_request(normalized_conversation=normalized_conversation)
+                if piece.role != "user":
+                    raise ValueError("a candidate must be a user request for the declared surface")
+            except ValueError as error:
+                verdict, reply = MidojoVerdict("refused", reason=str(error)), UNDETERMINED_REPLY
             else:
-                verdict, reply = await self._run(episode)
+                candidate = piece.converted_value
+                try:
+                    episode = self._episode_for_payload(candidate)
+                    check_plan_within(episode.plan, self._surface)
+                    if len(episode.plan.instructions) != 1 or episode.plan.instructions[0].payload != candidate:
+                        raise OutOfSurfaceError("the candidate must fill exactly the declared instruction")
+                except OutOfSurfaceError as error:
+                    verdict, reply = MidojoVerdict("refused", reason=str(error)), UNDETERMINED_REPLY
+                except Exception as error:
+                    verdict = MidojoVerdict("failed", reason=f"{type(error).__name__}: {error}")
+                    reply = UNDETERMINED_REPLY
+                else:
+                    verdict, reply = await self._run(episode)
             response = construct_response_from_request(piece, [reply], prompt_metadata=verdict.metadata())
             # PyRIT's helper merges request metadata. Keep the receipt entirely
             # host-authored; a candidate's metadata is not evidence.
             response.message_pieces[0].prompt_metadata = verdict.metadata()
-            self._attempts[str(response.message_pieces[0].id)] = _Attempt(episode, verdict)
+            replay_episode = episode if verdict.security is True else None
+            self._attempts[str(response.message_pieces[0].id)] = _Attempt(replay_episode, verdict)
             return [response]
 
     async def _run(self, episode: Episode) -> tuple[MidojoVerdict, str]:
@@ -222,7 +238,7 @@ class MidojoEpisodeTarget(PromptTarget):
             except RuntimeError:
                 pass
             reason = f"{type(error).__name__}: {error}"
-            return MidojoVerdict("failed", evaluation_id, snapshot_id, run_id, reason=reason), reason
+            return MidojoVerdict("failed", evaluation_id, snapshot_id, run_id, reason=reason), UNDETERMINED_REPLY
 
     def verdict_of(self, message: Message) -> MidojoVerdict | None:
         """Resolve exactly one response by identity; ignore response text and metadata."""
@@ -242,5 +258,5 @@ class MidojoEpisodeTarget(PromptTarget):
             assert attempt.episode is not None
             replay, _ = await self._run(attempt.episode)
             verdict = replace(verdict, replay=replay)
-            self._attempts[key] = replace(attempt, verdict=verdict)
+            self._attempts[key] = replace(attempt, episode=None, verdict=verdict)
             return verdict

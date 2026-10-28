@@ -9,6 +9,7 @@ from pyrit.models.messages.message import Message
 from pyrit.models.messages.message_piece import MessagePiece
 from pyrit.models.score.score import Score, ScoreStatus
 from pyrit.score.float_scale.float_scale_scorer import MessageFloatScaleScorer
+from pyrit.score.scorer import Scorer
 from pyrit.score.scorer_prompt_validator import ScorerPromptValidator
 from pyrit.score.true_false.true_false_scorer import MessageTrueFalseScorer
 
@@ -20,12 +21,12 @@ def verdict_of(message: Message, *, target: MidojoEpisodeTarget) -> MidojoVerdic
     return target.verdict_of(message)
 
 
-class _VerdictScoring:
+class _VerdictScoring(Scorer):
     _target: MidojoEpisodeTarget
     _score_type: Literal["true_false", "float_scale"]
 
     def _build_identifier(self) -> ComponentIdentifier:
-        return ComponentIdentifier.of(self, params={"semantics": "sealed-security-with-clean-replay-v1"})
+        return self._create_identifier(params={"semantics": "sealed-security-with-clean-replay-v1"})
 
     def _score(self, message: Message, verdict: MidojoVerdict | None, objective: str | None) -> list[Score]:
         value = verdict.broke if verdict is not None else None
@@ -43,7 +44,7 @@ class _VerdictScoring:
                 score_type=self._score_type,
                 score_rationale=reason,
                 score_metadata=dict(verdict.metadata()) if verdict is not None else {},
-                scorer_class_identifier=self._build_identifier(),
+                scorer_class_identifier=self.get_identifier(),
                 message_piece_id=message.message_pieces[0].id,
                 objective=objective,
             )

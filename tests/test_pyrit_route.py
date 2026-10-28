@@ -30,13 +30,14 @@ with patch("appdirs.user_data_dir", side_effect=lambda name, *args: str(Path.cwd
 from fastmcp import Client, FastMCP
 from midojo_sdk.injection import Channel, InjectionInstruction, InjectionPlan, InjectionTarget
 
-from examples.pyrit_weather import IPI_BRIEF, OBJECTIVE, build_attack
+from examples.pyrit_weather import IPI_BRIEF, IPI_FIRST_MESSAGE, OBJECTIVE, build_attack
 from midojo.agent_client import AgentClient
 from midojo.attacks.attacker import OutOfSurfaceError
 from midojo.control_plane.service import ControlPlane
 from midojo.episode import Episode
 from midojo.interception_host import HostInterception
 from midojo.pyrit import MidojoEpisodeTarget, MidojoVerdictFloatScorer, MidojoVerdictScorer, verdict_of
+from midojo.pyrit.target import UNDETERMINED_REPLY
 from midojo.runtimes import UnmanagedRuntime
 from suites.weather.host_tools import register
 
@@ -78,7 +79,7 @@ class Resetting(Disposable):
         self.resets += 1
 
 
-def make_target(*, replies=("safe",), runtime=None, security=None, utility=None, compile_change=None):
+def make_target(*, replies=("safe",), runtime=None, security=None, utility=None, compile_change=None, control=None):
     runtime = runtime if runtime is not None else Disposable()
     contexts = []
     remaining = iter(replies)
@@ -109,7 +110,7 @@ def make_target(*, replies=("safe",), runtime=None, security=None, utility=None,
         surface=SURFACE,
         drive=drive,
         runtime=runtime,
-        control=ControlPlane({}),
+        control=control,
     )
     return target, runtime, contexts
 
@@ -144,6 +145,10 @@ async def test_send_runs_one_episode_and_carries_the_sealed_identity_and_grade()
     assert json.loads(metadata["midojo.grade"])["security"] is True
     assert receipt.broke is None  # send itself does not replay
     assert contexts[0].episode.plan.instructions[0].payload == "candidate"
+    assert receipt.evaluation_id is not None
+    snapshot = target.control.snapshot(receipt.run_id, receipt.evaluation_id)
+    assert snapshot.snapshot_id == receipt.snapshot_id
+    assert snapshot.agent_output == "broken"
 
 
 @pytest.mark.parametrize("change", ["extra", "tool", "size_limit", "payload", "empty", "probe"])
@@ -227,15 +232,13 @@ async def test_true_false_and_float_mapping_requires_clean_replay(replies, expec
 
 
 @pytest.mark.parametrize("scorer_class", [MidojoVerdictScorer, MidojoVerdictFloatScorer])
-@pytest.mark.parametrize("scenario", ["security_none", "invalid_utility", "failed", "failed_replay"])
+@pytest.mark.parametrize("scenario", ["security_none", "failed", "failed_replay"])
 @pytest.mark.asyncio
 async def test_insufficient_invalid_and_failed_evidence_never_scores_false(scenario, scorer_class, memory):
     kwargs = {}
     replies = ("broken",)
     if scenario == "security_none":
         kwargs["security"] = {"tool_called": {"name": "unrecorded"}}
-    elif scenario == "invalid_utility":
-        kwargs["utility"] = {"tool_called": {"name": "unrecorded"}}
     elif scenario == "failed":
         replies = (RuntimeError("scripted failure"),)
     else:
@@ -373,3 +376,85 @@ async def test_worked_red_teaming_example_offline_with_fake_attacker_and_scorer_
     assert len(judge.conversations) == 1
     assert auxiliary[0].get_value() is False and result.outcome.value == "success"
     assert target is not None
+    first_message = attacker.conversations[0][1].get_value()
+    assert "weather notes" in first_message and OBJECTIVE in first_message
+    assert "next_message" in IPI_FIRST_MESSAGE
+
+
+@pytest.mark.parametrize("provided", [False, True])
+@pytest.mark.asyncio
+async def test_reply_identities_resolve_after_multiple_sends(provided):
+    plane = ControlPlane({}) if provided else None
+    target, _, _ = make_target(replies=("safe", "safe"), control=plane)
+    responses = [await send(target), await send(target)]
+    if plane is not None:
+        assert target.control is plane
+    snapshots = []
+    for response in responses:
+        metadata = response.get_piece().prompt_metadata
+        snapshot = target.control.snapshot(None, metadata["midojo.evaluation_id"])
+        assert snapshot.snapshot_id == metadata["midojo.snapshot_id"]
+        assert snapshot.agent_output == response.get_value()
+        snapshots.append(snapshot)
+    assert snapshots[0].evaluation_id != snapshots[1].evaluation_id
+
+
+@pytest.mark.parametrize("failure", ["refused", "compile", "drive"])
+@pytest.mark.asyncio
+async def test_failure_details_stay_out_of_reply_text(failure, memory):
+    secret = "private diagnostic sentinel"
+
+    def compile_change(episode):
+        if failure == "refused":
+            raise OutOfSurfaceError(secret)
+        if failure == "compile":
+            raise RuntimeError(secret)
+        return episode
+
+    target, _, _ = make_target(replies=(RuntimeError(secret),), compile_change=compile_change)
+    response = await send(target)
+    assert response.get_value() == UNDETERMINED_REPLY
+    receipt = target.verdict_of(response)
+    assert receipt is not None and secret in (receipt.reason or "")
+    assert secret in response.get_piece().prompt_metadata["midojo.reason"]
+    result = await score(response, MidojoVerdictScorer(target=target), memory)
+    assert result.status == ScoreStatus.UNDETERMINED
+    assert secret in result.score_rationale
+
+
+@pytest.mark.parametrize("malformation", ["multiple_pieces", "nontext", "assistant"])
+@pytest.mark.asyncio
+async def test_malformed_candidate_returns_a_refused_receipt(malformation, memory):
+    target, runtime, contexts = make_target()
+    request = Message.from_prompt(prompt="candidate", role="user")
+    if malformation == "multiple_pieces":
+        request.message_pieces.append(Message.from_prompt(prompt="second", role="user").get_piece())
+    elif malformation == "nontext":
+        request.get_piece().converted_value_data_type = "url"
+    else:
+        request.get_piece().role = "assistant"
+    response = (await target.send_prompt_async(message=request))[0]
+    assert response.get_value() == UNDETERMINED_REPLY
+    receipt = target.verdict_of(response)
+    assert receipt is not None and receipt.status == "refused"
+    assert not contexts and not runtime.setups
+    result = await score(response, MidojoVerdictScorer(target=target), memory)
+    assert result.status == ScoreStatus.UNDETERMINED
+
+
+@pytest.mark.parametrize("scorer_class", [MidojoVerdictScorer, MidojoVerdictFloatScorer])
+@pytest.mark.parametrize("replies,expected", [(("safe",), False), (("broken", "broken"), True)])
+@pytest.mark.asyncio
+async def test_invalid_utility_does_not_invalidate_security(replies, expected, scorer_class, memory):
+    target, _, contexts = make_target(replies=replies, utility={"tool_called": {"name": "unrecorded"}})
+    response = await send(target)
+    receipt = target.verdict_of(response)
+    assert receipt is not None and receipt.grade is not None
+    assert receipt.grade.grade_validity.utility.status == "invalid"
+    scorer = scorer_class(target=target)
+    result = await score(response, scorer, memory)
+    assert result.status == ScoreStatus.COMPLETE and result.get_value() == expected
+    assert len(contexts) == len(replies)
+    assert scorer.get_identifier().model_dump()["scorer_type"] == result.score_type
+    # Only undispatched successful discoveries need a retained replay spec.
+    assert target._attempts[str(response.get_piece().id)].episode is None

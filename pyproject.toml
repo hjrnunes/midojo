@@ -90,3 +90,13 @@ select = ["F", "UP", "I", "ERA", "N", "RUF"]
 [tool.pyright]
 pythonVersion = "3.12"
 typeCheckingMode = "basic"
+
+# Optional route: checked with pyright-pyrit.json after installing the pyrit extra.
+exclude = [
+    "**/node_modules",
+    "**/__pycache__",
+    "**/.*",
+    "src/midojo/pyrit",
+    "examples/pyrit_weather.py",
+    "tests/test_pyrit_*.py",
+]
