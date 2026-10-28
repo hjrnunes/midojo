@@ -74,7 +74,10 @@ def test_serve_warns_once_when_control_routes_are_unauthenticated(monkeypatch, c
     assert result.exit_code == 0, result.exception
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1
-    assert "unauthenticated" in warnings[0] and "MIDOJO_CONTROL_TOKEN" in warnings[0]
+    # It names the risk, what it disables and how to close it.
+    for part in ("unauthenticated", "an agent under test included", "Host-mode evaluations are refused"):
+        assert part in warnings[0]
+    assert "MIDOJO_CONTROL_TOKEN" in warnings[0] and "--control-token" in warnings[0]
     assert TestClient(serve.call_args.args[0]).get("/suites").status_code == 200
 
 

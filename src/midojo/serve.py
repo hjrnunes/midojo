@@ -63,8 +63,12 @@ def main(
         control_token=control_token or None,
     )
     if config.control_token is None:
+        # Warned, not refused: agent mode on a local, tokenless control plane is how the examples run.
         logger.warning(
-            "The suite, task and run routes are unauthenticated; set %s to require a control token.",
+            "No control token: the suite, task and run routes are unauthenticated, so anything that reaches this "
+            "control plane, an agent under test included, can read every suite's environment and create, record, "
+            "seal and grade evaluations as the host. Host-mode evaluations are refused. Set %s (or --control-token) "
+            "to require a control token.",
             CONTROL_TOKEN_ENV,
         )
     suites = {name: get_suite(name) for name in dict.fromkeys(load_suite)}
