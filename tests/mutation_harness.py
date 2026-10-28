@@ -5,7 +5,9 @@ must occur exactly once, so a mutant whose code has moved fails loudly instead
 of silently testing the original. The mutated module is a new module object
 under another name: the real one, and everything that imported from it, are
 left as they were. A test then hands the mutant's functions to the cases it
-runs, or patches them in for the length of a test.
+runs, or patches them in for the length of a test. The same copy with no edit
+(:func:`unedited`, :func:`unedited_function`) is the control: the cases must
+all pass on it.
 """
 
 from __future__ import annotations
@@ -41,31 +43,51 @@ def mutated(module: types.ModuleType, mutant: Mutant) -> types.ModuleType:
 
     Only for a module whose import has no side effects beyond defining names.
     """
-    source = _edited(inspect.getsource(module), mutant, module.__name__)
+    return _module(module, _edited(inspect.getsource(module), mutant, module.__name__), mutant.name)
+
+
+def unedited(module: types.ModuleType) -> types.ModuleType:
+    """Return a fresh copy of ``module`` compiled the way :func:`mutated` compiles one, with no edit: the control.
+
+    A suite run on it must pass, so a failure the harness itself causes is never counted as a mutant caught.
+    """
+    return _module(module, inspect.getsource(module), "unedited")
+
+
+def _module(module: types.ModuleType, source: str, label: str) -> types.ModuleType:
     name = f"{module.__name__}__mutant"
     copy = types.ModuleType(name)
     copy.__file__ = module.__file__
     # Dataclasses look their module up while they are created.
     sys.modules[name] = copy
     try:
-        exec(compile(source, f"<{mutant.name}>", "exec"), copy.__dict__)
+        exec(compile(source, f"<{label}>", "exec"), copy.__dict__)
     finally:
         del sys.modules[name]
     return copy
 
 
-def mutated_function(function: Callable[..., Any], mutant: Mutant) -> Callable[..., Any]:
+def mutated_function(function: Callable[..., Any], mutant: Mutant) -> Any:
     """Return ``function`` compiled from its source with ``mutant``'s edit applied, over its module's globals.
 
     For a function whose module registers something on import, so the module
     can't be compiled again; a method comes back as a plain function, to set
-    on its class.
+    on its class (a property's getter, with its decorator, as a property).
     """
     source = _edited(textwrap.dedent(inspect.getsource(function)), mutant, function.__qualname__)
+    return _function(function, source, mutant.name)
+
+
+def unedited_function(function: Callable[..., Any]) -> Any:
+    """Return ``function`` compiled the way :func:`mutated_function` compiles one, with no edit: the control."""
+    return _function(function, textwrap.dedent(inspect.getsource(function)), "unedited")
+
+
+def _function(function: Callable[..., Any], source: str, label: str) -> Any:
     namespace: dict[str, Any] = {}
     flags = __future__.annotations.compiler_flag
     exec(
-        compile(source, f"<{mutant.name}>", "exec", flags=flags, dont_inherit=True),
+        compile(source, f"<{label}>", "exec", flags=flags, dont_inherit=True),
         dict(function.__globals__),
         namespace,
     )

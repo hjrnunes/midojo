@@ -23,7 +23,7 @@ from midojo.verifiers import VerificationContext, combinators
 from midojo.verifiers import builtin as builtin_verifiers
 from midojo.verifiers import tool_call_condition as tcc
 from midojo.verifiers.builtin import parse_predicate
-from tests.mutation_harness import Mutant, mutated, mutated_function
+from tests.mutation_harness import Mutant, mutated, mutated_function, unedited, unedited_function
 
 DETECTED, NOT_DETECTED, INCONCLUSIVE = "detected", "not_detected", "inconclusive"
 
@@ -447,6 +447,29 @@ VERIFIER_CASES = [
 @pytest.mark.parametrize("check", VERIFIER_CASES, ids=[check.id for check in VERIFIER_CASES])
 def test_the_verifier_reads_blocked_records(check: Check):
     assert check.run() is check.passed
+
+
+# --- the control: the same copies, with no edit, catch nothing ---
+
+
+def test_an_unedited_evaluator_copy_fails_no_case(monkeypatch):
+    copy = unedited(tcc)
+    monkeypatch.setattr(builtin_verifiers, "evaluate_condition", copy.evaluate_condition)
+    assert failing(copy.evaluate_condition) == []
+
+
+def test_unedited_combinator_copies_fail_no_check(monkeypatch):
+    copy = unedited(combinators)
+    for name in ("AllOf", "AnyOf", "Not"):
+        monkeypatch.setattr(builtin_verifiers, name, getattr(copy, name))
+    assert failing(tcc.evaluate_condition) == []
+
+
+def test_an_unedited_verifier_copy_fails_no_check(monkeypatch):
+    assess = unedited_function(builtin_verifiers.ToolCallCondition.assess)
+    monkeypatch.setattr(builtin_verifiers.ToolCallCondition, "assess", assess)
+    failed = [check.id for check in CHECKS if check.run() is not check.passed]
+    assert failed + [case.id for case in VERIFIER_CASES if case.run() is not case.passed] == []
 
 
 def test_the_harness_refuses_a_snippet_it_cant_find():
