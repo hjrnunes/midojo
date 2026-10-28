@@ -350,6 +350,17 @@ _EVIDENCE_STATUS_DESCRIPTION = (
 )
 
 
+_UTILITY_REASON_DESCRIPTION = (
+    "The criterion that decided the utility grade, whatever the outcome: passed, not passed, or the checks that "
+    "couldn't be decided when it is unknown. None only for an episode with no utility check."
+)
+_SECURITY_REASON_DESCRIPTION = (
+    "The criterion that decided the security grade, whatever the outcome: passed (e.g. the AnyOf branch that "
+    "fired), not passed (e.g. the AllOf part that failed), or the checks that couldn't be decided when it is "
+    "unknown. None only without a security check, as without an injection task."
+)
+
+
 class GradeResponse(BaseModel):
     """An evaluation's grades.
 
@@ -358,6 +369,13 @@ class GradeResponse(BaseModel):
     invalid. Without an injection task, ``security`` is False and its validity
     ``not_applicable``.
 
+    ``utility_reason`` and ``security_reason`` name the criterion that decided
+    each grade, whatever its outcome: the one that held when the grade is
+    True, the one that didn't when it is False, and the checks that couldn't
+    be decided when it is None (unknown). Each is None only when there is no
+    check to give a reason: ``security_reason`` without an injection task,
+    ``utility_reason`` for an episode with no utility check.
+
     ``attempted``, ``blocked``, ``effect_observed`` and ``injection_delivered``
     say apart what ``security`` folds together, each True, False or None
     (unknown); see :func:`midojo.episode.attack_outcome`. They never change
@@ -365,15 +383,9 @@ class GradeResponse(BaseModel):
     """
 
     utility: bool | None
-    utility_reason: str | None = Field(default=None, description="The criterion that decided the utility grade.")
+    utility_reason: str | None = Field(default=None, description=_UTILITY_REASON_DESCRIPTION)
     security: bool | None
-    security_reason: str | None = Field(
-        default=None,
-        description=(
-            "The criterion that decided the security grade, whatever the outcome "
-            "(e.g. the AnyOf branch that fired, or the unknown checks); None without an injection task."
-        ),
-    )
+    security_reason: str | None = Field(default=None, description=_SECURITY_REASON_DESCRIPTION)
     grade_validity: GradeValidity
     evidence_status: dict[str, EvidenceStatus] = Field(default_factory=dict, description=_EVIDENCE_STATUS_DESCRIPTION)
     attempted: bool | None = Field(
@@ -441,9 +453,13 @@ class EvaluationResponse(BaseModel):
     stage: str = Field(default="open", description=_STAGE_DESCRIPTION)
     graded: bool = Field(description="Whether the evaluation was graded. A graded None is unknown, not ungraded.")
     utility: bool | None
-    utility_reason: str | None = None
+    utility_reason: str | None = Field(
+        default=None, description=f"{_UTILITY_REASON_DESCRIPTION} None until the evaluation is graded."
+    )
     security: bool | None
-    security_reason: str | None = None
+    security_reason: str | None = Field(
+        default=None, description=f"{_SECURITY_REASON_DESCRIPTION} None until the evaluation is graded."
+    )
     grade_validity: GradeValidity | None = None
     evidence_status: dict[str, EvidenceStatus] = Field(default_factory=dict, description=_EVIDENCE_STATUS_DESCRIPTION)
     agent_input: str | None

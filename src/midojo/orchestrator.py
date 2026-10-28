@@ -895,6 +895,8 @@ async def _run_benchmark(
         "run_id": run_id,
         "suite_name": suite_name,
         # A failed pair is null in each of these, whatever the control plane holds for its evaluation.
+        # Each reason is the criterion that decided its grade, whatever the outcome (passed, not passed, or the
+        # checks that couldn't be decided); security_reason is null without an injection task.
         "utility": by_pair(utility_results),
         "utility_reason": by_pair(utility_reasons),
         # null without an injection task, or where the grade is invalid
