@@ -48,7 +48,7 @@ podman build -t localhost/weather-pi:latest -f suites/weather/sandbox_pi/Contain
 export LITELLM_API_HOST=... LITELLM_MODEL=... LITELLM_API_KEY=...                 # the suite needs these to load (optional: LITELLM_API_PORT, LITELLM_API_SCHEME)
 export MIDOJO_CONTROL_TOKEN=...                                                   # required for --interception host, which the weather suite needs: midojo-serve requires it on all but /agent and /health; midojo-run sends it (or --control-token)
 midojo-serve --load-suite weather --host 127.0.0.1 --port 8090                    # 2. Control Plane (must be UP before anything else talks to it; the sandbox never reaches it)
-weather-tools-serve                                                               # 3. the agent's real tools, on http://127.0.0.1:8770/mcp (the interceptors forward to them)
+weather-tools-serve                                                               # 3. the agent's real tools, on http://127.0.0.1:8770/mcp (the interceptors forward to them; needs no LITELLM_* settings)
 midojo-run --suite weather --gateway GATEWAY --control-url http://localhost:8090 \
   --interception host --upstream-mcp-url http://127.0.0.1:8770/mcp \
   --interceptor-bind 0.0.0.0 --interceptor-port 8766                             # 4. runs the benchmark (exits when done); 8766 is the port the suite's network policy allows

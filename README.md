@@ -106,7 +106,7 @@ In terminal 2, start the weather agent's real tools, the MCP server the intercep
 uv run weather-tools-serve
 ```
 
-It listens on `http://127.0.0.1:8770/mcp` (`--host` and `--port` change it). The sandbox never reaches it either: each evaluation's interceptor calls it on the agent's behalf, except for the calls MiDojo simulates (`send_weather_alert`) or blocks (`send_email`).
+It listens on `http://127.0.0.1:8770/mcp` (`--host` and `--port` change it), and needs none of the settings in `.env`. The sandbox never reaches it either: each evaluation's interceptor calls it on the agent's behalf, except for the calls MiDojo simulates (`send_weather_alert`) or blocks (`send_email`).
 
 ### 3. Run a red-team test
 

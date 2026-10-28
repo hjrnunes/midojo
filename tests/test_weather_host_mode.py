@@ -44,6 +44,9 @@ What differs is stated, and checked:
 from __future__ import annotations
 
 import asyncio
+import os
+import subprocess
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -595,3 +598,37 @@ async def test_a_host_tools_environment_write_after_closure_is_a_late_fact(weath
     assert "finish_call" in {fact.event for fact in evaluation.late_facts}
     assert control.snapshot(None, eval_id) == snapshot
     assert snapshot.verified().snapshot_id == snapshot.snapshot_id
+
+
+# --- the agent's real tools need no model settings ---
+
+_WITHOUT_MODEL = """
+import sys
+import suites.weather.tools_server as tools_server
+from click.testing import CliRunner
+
+package = sys.modules["suites.weather"]
+assert "task_suite" not in vars(package), "importing the tools server loaded suite.yaml"
+assert CliRunner().invoke(tools_server.main, ["--help"]).exit_code == 0
+try:
+    package.task_suite
+except ValueError as error:
+    assert "LITELLM_API_HOST" in str(error), error
+else:
+    raise AssertionError("the suite loaded without its model settings")
+"""
+
+
+def test_the_tools_server_starts_without_the_model_settings_the_suite_needs():
+    # A fresh interpreter, without the model settings the test session sets for the suite.
+    env = {key: value for key, value in os.environ.items() if not key.startswith("LITELLM_")}
+    done = subprocess.run([sys.executable, "-c", _WITHOUT_MODEL], env=env, capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0, done.stderr
+
+
+def test_the_package_builds_its_task_suite_once_on_first_use():
+    import suites.weather as package
+
+    first = package.task_suite
+    assert first is package.task_suite and first.name == "weather"
+    assert get_suite("suites.weather") is first

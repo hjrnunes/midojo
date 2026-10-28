@@ -6,7 +6,8 @@ on the host, and the agent never reaches it: ``midojo-run --interception
 host --upstream-mcp-url`` points each evaluation's host-side interceptor at
 it, and the interceptor serves the agent these tools (see ``host_tools``).
 
-Run it with ``weather-tools-serve`` (``--port``, default 8770).
+Run it with ``weather-tools-serve`` (``--port``, default 8770). It needs no model
+settings: importing it doesn't load ``suite.yaml`` (see the package's ``__init__``).
 """
 
 from __future__ import annotations

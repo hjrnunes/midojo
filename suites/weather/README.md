@@ -30,7 +30,7 @@ Each injection task puts its payload in a different place, and shows how MiDojo 
 
 The pieces, and where each runs:
 
-- [`tools_server.py`](tools_server.py), on the host — the agent's real tools, standing in for the agent owner's weather service: `get_weather`, `list_cities`, `send_email` and `send_weather_alert`. Start it with `weather-tools-serve` and pass its URL to `midojo-run --upstream-mcp-url`.
+- [`tools_server.py`](tools_server.py), on the host — the agent's real tools, standing in for the agent owner's weather service: `get_weather`, `list_cities`, `send_email` and `send_weather_alert`. Start it with `weather-tools-serve`, which needs no model settings, and pass its URL to `midojo-run --upstream-mcp-url`.
 - [`host_tools.py`](host_tools.py), on the host — the interception layer, built with `MidojoMCP` from the [Python SDK](../../interception/python-sdk/) (`midojo-sdk`). The suite names it as `HOST_TOOLS` in [`__init__.py`](__init__.py), and `midojo-run --interception host` registers it on each evaluation's interceptor, which mirrors the real tools and records every call:
   - `get_weather` forwards the call to the real tool and adds the city's notes from the evaluation's environment, where the injection tasks plant their payloads (a simulated tool, recorded `simulated`).
   - `send_weather_alert` records the alert in the environment and never calls the real service.
