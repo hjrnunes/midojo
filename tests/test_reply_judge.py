@@ -95,11 +95,12 @@ def test_a_verdict_maps_to_the_checks_value(judge, verdict, passed):
     assert record.details == {"evidence_refs": ["reply"]}
     assert record.failure is None
     assert record.endpoint == judge.url(f"/{verdict}")
-    assert CLAIM in result.reason and record.request_id in result.reason and MODEL in result.reason
+    assert CLAIM in result.reason and record.request_id in result.reason
+    assert MODEL not in result.reason and "makes the claim" not in result.reason  # the record keeps them
     if passed is None:
         assert "unresolved" in result.reason
         assert [u.reason for u in result.unknowns] == [
-            f"the judge service left it unresolved (model {MODEL}; request {record.request_id})"
+            f"the judge service left it unresolved (request {record.request_id})"
         ]
     else:
         assert verdict in result.reason and result.unknowns == ()
@@ -207,17 +208,17 @@ FAILURES = {
     "/404": "the judge service answered HTTP 404",
     "/redirect": "the judge service answered HTTP 302",
     "/not-json": "the judge service's answer is not JSON",
-    "/array": f"not a {SCHEMA} response: not a JSON object",
-    "/no-verdict": "verdict None is not one of ['supported', 'contradicted', 'unresolved']",
-    "/bad-verdict": "verdict 'maybe' is not one of",
-    "/verdict-type": "verdict True is not one of",
-    "/no-schema": f"not a {SCHEMA} response: no schema",
-    "/wrong-schema": "schema is 'midojo.judge.v0'",
-    "/rationale-type": "rationale is not a string",
-    "/model-type": "model is not a string",
-    "/details-type": "details is not an object",
-    "/unknown-field": "unknown fields ['confidence']",
-    "/other-id": "it answers another request id",
+    "/array": f"not a {SCHEMA} response: the answer is an array, not an object",
+    "/no-verdict": "it has no verdict",
+    "/bad-verdict": 'verdict is not one of "supported", "contradicted", "unresolved"',
+    "/verdict-type": "verdict is a boolean, not a string",
+    "/no-schema": f"not a {SCHEMA} response: it has no schema",
+    "/wrong-schema": f'schema is not "{SCHEMA}"',
+    "/rationale-type": "rationale is an array, not a string",
+    "/model-type": "model is a number, not a string",
+    "/details-type": "details is a string, not an object",
+    "/unknown-field": "it has 1 field outside the schema",
+    "/other-id": "id is not the request's id",
 }
 
 
@@ -745,12 +746,12 @@ def test_every_logger_httpx_and_httpcore_make_is_filtered_before_it_exists():
 # --- malformed answers are unknown, never an exception or True ---
 
 
-@pytest.mark.parametrize(("path", "shown"), [("/verdict-list", "[]"), ("/verdict-object", "{}")])
+@pytest.mark.parametrize(("path", "shown"), [("/verdict-list", "an array"), ("/verdict-object", "an object")])
 def test_a_verdict_of_another_type_is_unknown(judge, path, shown):
     result, ctx = assess(judge_spec(judge.url(path)))
 
     assert result.passed is None
-    assert f"verdict {shown} is not one of" in result.reason
+    assert f"verdict is {shown}, not a string" in result.reason
     assert only_record(ctx).verdict is None
 
 
@@ -898,7 +899,8 @@ def test_a_number_no_float_holds_is_unknown(judge):
     result, ctx = assess(judge_spec(judge.url("/huge-number")))
 
     assert result.passed is None
-    assert "the judge service's answer has a number no float holds: 1e400" in result.reason
+    assert "the judge service's answer has a number no float holds;" in result.reason
+    assert "1e400" not in result.reason
     assert only_record(ctx).details is None
 
 
@@ -1138,3 +1140,50 @@ def test_the_backstop_record_holds_even_when_the_request_is_unknown(monkeypatch)
     record = only_record(ctx)
     assert (record.request, record.sent) == ({}, False)
     assert TOKEN not in result.reason and TOKEN not in record.model_dump_json()
+
+
+# --- no reason holds what the service sent, in any encoding ---
+
+# A token a header carries (printable ASCII) whose repr and JSON forms differ from it: a backslash and both quotes.
+SNEAKY = "sn3aky\\tok\"en'-4be1"
+
+
+def spellings(secret: str) -> list[str]:
+    """``secret`` as it is, as repr writes it, and as JSON writes it once and twice (a reason in JSON in JSON)."""
+    once = json.dumps(secret)[1:-1]
+    return [secret, repr(secret), repr(secret)[1:-1], once, json.dumps(once)[1:-1], "sn3aky"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path", "passed", "why"),
+    [
+        ("/echo-as-schema", None, f'schema is not "{SCHEMA}"'),
+        ("/echo-as-verdict", None, 'verdict is not one of "supported", "contradicted", "unresolved"'),
+        ("/echo-as-id", None, "id is not the request's id"),
+        ("/echo-as-field-name", None, "it has 1 field outside the schema"),
+        ("/echo-in-headers", True, None),  # the reason phrase and a response header
+        ("/echo-as-record-fields", True, None),  # rationale, model, details keys and values: redacted
+    ],
+)
+async def test_a_token_the_service_echoes_back_is_in_no_reason_or_record_however_spelled(
+    judge, monkeypatch, path, passed, why
+):
+    monkeypatch.setenv("TEST_JUDGE_URL", judge.url(path))
+    monkeypatch.setenv("TEST_JUDGE_TOKEN", SNEAKY)
+    grade = await graded_in_process(judged_episode(), REPLY)
+
+    assert judge.requests[0].headers["authorization"] == f"Bearer {SNEAKY}"
+    assert grade.security is passed
+    if why is not None:
+        assert grade.security_reason is not None and why in grade.security_reason
+    results = json.dumps(
+        {
+            "security_reason": {"pay_bills,wire": grade.security_reason},
+            "grade_validity": {"pay_bills,wire": grade.grade_validity.model_dump(mode="json")},
+            "judgements": {"pay_bills,wire": [r.model_dump(mode="json") for r in grade.judgements]},
+        },
+        indent=2,
+    )
+    dumps = [grade.model_dump_json(), json.dumps(grade.model_dump(mode="json")), results, repr(grade)]
+    assert not [(form, dump) for form in spellings(SNEAKY) for dump in dumps if form in dump]

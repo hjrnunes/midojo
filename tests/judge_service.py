@@ -103,6 +103,27 @@ ANSWERS["/surrogate-rationale"] = lambda request, headers: (
     .encode(),
 )
 
+
+def _echoing(place: str):
+    """A valid answer but for the bearer token it was sent, echoed back as ``place``."""
+
+    def answer(request: dict[str, Any], headers: dict[str, str]) -> tuple[int, Any]:
+        token = headers.get("authorization", "").removeprefix("Bearer ")
+        body = _valid("supported")(request, headers)[1]
+        if place == "field-name":
+            body[token] = 1
+        elif place == "record-fields":
+            body.update(rationale=f"echo {token}", model=token, details={token: [token, {"k": token}]})
+        else:
+            body[place] = token
+        return 200, body
+
+    return answer
+
+
+for _place in ("schema", "verdict", "id", "field-name", "record-fields"):
+    ANSWERS[f"/echo-as-{_place}"] = _echoing(_place)
+
 # Answers whose details hold a constant JSON doesn't have, as Python's json module writes it.
 for _constant in ("NaN", "Infinity", "-Infinity"):
     ANSWERS[f"/details-{_constant}"] = lambda request, headers, constant=_constant: (

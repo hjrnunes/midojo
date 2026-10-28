@@ -285,14 +285,15 @@ class ReplyJudge:
 
     def result(self, record: JudgeRecord) -> VerificationResult:
         """The check's verdict and reason from what the service answered."""
+        # Nothing the service sent goes into a reason: not its model or rationale (the record keeps those), and a
+        # verdict only as the schema's own word for it. A failure's text is MiDojo's own.
         request = f"request {record.request_id}"
         if record.failure is not None:
             return VerificationResult.unknown(self.label, f"{record.failure}; {request}")
-        about = f"model {record.model}; {request}" if record.model else request
-        passed = PASSED[record.verdict or "unresolved"]
-        if passed is None:
-            return VerificationResult.unknown(self.label, f"the judge service left it unresolved ({about})")
-        return VerificationResult(passed, f"{self.label}: {record.verdict} ({about})")
+        verdict = next((name for name in PASSED if name == record.verdict), "unresolved")
+        if PASSED[verdict] is None:
+            return VerificationResult.unknown(self.label, f"the judge service left it unresolved ({request})")
+        return VerificationResult(PASSED[verdict], f"{self.label}: {verdict} ({request})")
 
 
 def request_id(body: dict[str, Any]) -> str:
@@ -303,28 +304,47 @@ def request_id(body: dict[str, Any]) -> str:
 
 
 def response_problem(answer: Any, expected_id: str) -> str | None:
-    """Why ``answer`` isn't a valid ``midojo.judge.v1`` response to the request ``expected_id``, or None."""
-    if not isinstance(answer, dict):
-        return "not a JSON object"
-    if unknown := sorted(set(answer) - _RESPONSE_KEYS):
-        return f"unknown fields {unknown}"
+    """Why ``answer`` isn't a valid ``midojo.judge.v1`` response to the request ``expected_id``, or None.
+
+    The reason never holds anything the service sent, in any encoding: it
+    names only the schema's own fields, what they must be and the JSON type
+    found, and counts the fields outside the schema rather than naming
+    them. So a token the service echoes back can't reach a reason, however
+    the redaction of the record's own fields would have to spell it.
+    """
+    if type(answer) is not dict:
+        return f"the answer is {_json_type(answer)}, not an object"
+    if outside := len(set(answer) - _RESPONSE_KEYS):
+        return f"it has {outside} field{'s' if outside > 1 else ''} outside the schema"
     if "schema" not in answer:
-        return "no schema"
+        return "it has no schema"
     if answer["schema"] != SCHEMA:
-        return f"schema is {answer['schema']!r}"
+        return f'schema is not "{SCHEMA}"'
     if "id" in answer and answer["id"] != expected_id:
-        return "it answers another request id"
-    verdict = answer.get("verdict")
-    if type(verdict) is not str or verdict not in PASSED:  # the type first: a list or an object isn't hashable
-        return f"verdict {verdict!r} is not one of {list(PASSED)}"
+        return "id is not the request's id"
+    if "verdict" not in answer:
+        return "it has no verdict"
+    verdict = answer["verdict"]
+    if type(verdict) is not str:  # the type first: a list or an object isn't hashable
+        return f"verdict is {_json_type(verdict)}, not a string"
+    if verdict not in PASSED:
+        return "verdict is not one of " + ", ".join(f'"{name}"' for name in PASSED)
     for name in ("rationale", "model"):
         if answer.get(name) is not None and type(answer[name]) is not str:
-            return f"{name} is not a string"
+            return f"{name} is {_json_type(answer[name])}, not a string"
     if answer.get("details") is not None and type(answer["details"]) is not dict:
-        return "details is not an object"
+        return f"details is {_json_type(answer['details'])}, not an object"
     if _depth(answer.get("details")) > MAX_DETAILS_DEPTH:
         return f"details nests deeper than {MAX_DETAILS_DEPTH}"
     return None
+
+
+def _json_type(value: Any) -> str:
+    """The JSON type of a decoded value, as a reason names it: never the value."""
+    if value is None:
+        return "null"
+    kinds = {dict: "an object", list: "an array", str: "a string", bool: "a boolean", int: "a number"}
+    return kinds.get(type(value), "a number")
 
 
 def _depth(value: Any) -> int:
@@ -477,14 +497,15 @@ class _NonFiniteError(ValueError):
 
 
 def _refuse_constant(name: str) -> Any:
-    raise _NonFiniteError(f"is not JSON: it has {name}")
+    # The parser only hands over these three; the reason names them in MiDojo's own words all the same.
+    known = {"NaN": "NaN", "Infinity": "Infinity", "-Infinity": "-Infinity"}
+    raise _NonFiniteError(f"is not JSON: it has {known.get(name, 'a constant JSON has no word for')}")
 
 
 def _finite_float(text: str) -> float:
     number = float(text)
     if not math.isfinite(number):
-        shown = text if len(text) <= 40 else text[:40] + "..."
-        raise _NonFiniteError(f"has a number no float holds: {shown}")
+        raise _NonFiniteError("has a number no float holds")  # not the number itself: the service wrote it
     return number
 
 
