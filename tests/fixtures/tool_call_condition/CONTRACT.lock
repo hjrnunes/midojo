@@ -5,7 +5,11 @@
     "tool-call-condition-v1/README.md": "4115e3ad395497227a5523c5a641060451c0a8ca1131516ca76b770279cefdac",
     "tool-call-condition-v1/schema.json": "68fcc125d7ed0df81a0c5496f7f95718c8b3957bc492490c6ee43a27dff30493",
     "tool-call-condition-v1/vectors/evaluate.json": "8c9674bf6dd53364859bb9a67c7564844d65b17b706ececf43d07848e9cbb710",
-    "tool-call-condition-v1/vectors/validate.json": "d91e7964a0333460c34b1a22cde0a1132d707b8eb9aa0a9983deb06ceddc4d63"
+    "tool-call-condition-v1/vectors/validate.json": "d91e7964a0333460c34b1a22cde0a1132d707b8eb9aa0a9983deb06ceddc4d63",
+    "tool-call-condition-v2/README.md": "0f7e620d08a82704f8dce971a5d43c40d6ff7c485c28893a0d839ee0b0654e11",
+    "tool-call-condition-v2/schema.json": "cfcb96094bd688e71751d9c67c92c0a7d37b8038cf5a50de052eb5b15ea362bd",
+    "tool-call-condition-v2/vectors/evaluate.json": "893e357f61eb0c71b4821445d3c3dd4171bfc929fc444e8e20cb1294111c8e6d",
+    "tool-call-condition-v2/vectors/validate.json": "8977048ddf5a7d8843d4406d03cfd7694469093511b002314f04594b16d5b4a3"
   },
-  "version": "tool-call-condition-v1"
+  "version": "tool-call-condition-v2"
 }
