@@ -7,8 +7,9 @@ that records on the control plane (the ``X-Midojo-Session`` header, or
 mode, only the :class:`~midojo.tool_endpoint.ToolEndpoint` of the interceptor
 the host runs. A client that can pass a tool endpoint has
 ``supports_host_interception``: the Responses API clients put it in their MCP
-tool block, the PI client in the subprocess's environment, and the OpenShell
-client's sandbox already has it.
+tool block, the A2A client in the ``X-Midojo-Tool-Url`` and
+``X-Midojo-Tool-Token`` headers of its requests, the PI client in the
+subprocess's environment, and the OpenShell client's sandbox already has it.
 """
 
 from __future__ import annotations
@@ -32,6 +33,10 @@ if TYPE_CHECKING:
 # Carries the evaluation session to agents reached over HTTP. midojo_sdk.session
 # reads it on the agent side.
 SESSION_HEADER = "X-Midojo-Session"
+
+# Carry the tool endpoint, in host mode, to an A2A agent: the interceptor's URL and the bearer token it accepts.
+TOOL_URL_HEADER = "X-Midojo-Tool-Url"
+TOOL_TOKEN_HEADER = "X-Midojo-Tool-Token"
 
 # What a PI subprocess must never inherit from the orchestrator's environment: the
 # control token, and the variables that give or name an evaluation's access.
@@ -95,6 +100,11 @@ class _SingleMessageConversation(Conversation):
 
 def _session_headers(session_token: str | None) -> dict[str, str]:
     return {SESSION_HEADER: session_token} if session_token is not None else {}
+
+
+def _tool_endpoint_headers(tool_endpoint: ToolEndpoint) -> dict[str, str]:
+    """The headers that give an A2A agent its tool endpoint: where its MCP client connects, and the token it sends."""
+    return {TOOL_URL_HEADER: tool_endpoint.url, TOOL_TOKEN_HEADER: tool_endpoint.token}
 
 
 def _mcp_server(
@@ -172,7 +182,15 @@ class SimpleHTTPAgentClient(AgentClient):
 
 
 class A2AAgentClient(AgentClient):
-    """Sends a task via the A2A protocol and returns the agent's text output."""
+    """Sends a task via the A2A protocol and returns the agent's text output.
+
+    Every request to the agent carries the session in ``X-Midojo-Session``; in
+    host mode, only the tool endpoint, in ``X-Midojo-Tool-Url`` (the
+    interceptor's MCP URL) and ``X-Midojo-Tool-Token`` (the bearer token it
+    accepts), which the agent's MCP client connects with for that task.
+    """
+
+    supports_host_interception = True
 
     def __init__(self, agent_url: str, timeout: float = 120.0) -> None:
         self.agent_url = agent_url
@@ -184,9 +202,11 @@ class A2AAgentClient(AgentClient):
         from a2a.client import ClientConfig, create_client
         from a2a.types import Message, Part, Role, SendMessageRequest
 
-        config = ClientConfig(
-            httpx_client=httpx.AsyncClient(timeout=self.timeout, headers=_session_headers(session_token)),
-        )
+        if tool_endpoint is not None:
+            headers = _tool_endpoint_headers(tool_endpoint)
+        else:
+            headers = _session_headers(session_token)
+        config = ClientConfig(httpx_client=httpx.AsyncClient(timeout=self.timeout, headers=headers))
         client = await create_client(self.agent_url, client_config=config)
         try:
             request = SendMessageRequest(
