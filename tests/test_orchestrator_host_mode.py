@@ -307,3 +307,51 @@ def test_the_cli_refuses_host_mode_settings_a_target_couldnt_reach(cli_benchmark
     assert result.exit_code == 2
     assert message in result.output
     cli_benchmark.assert_not_called()
+
+
+# --- a suite's host-side tools ---
+
+WEATHER = ["--suite", "weather", "--gateway", "g"]
+WEATHER_HOST = [*WEATHER, "--interception", "host", *UPSTREAM, "--interceptor-bind", "0.0.0.0"]
+
+
+def test_the_cli_gives_every_interceptor_the_suites_host_tools(cli_benchmark):
+    from suites.weather import host_tools
+
+    result = CliRunner().invoke(orchestrator.main, [*WEATHER_HOST, "--interceptor-port", "8766"])
+    assert result.exit_code == 0, result.output
+    interception = cli_benchmark.call_args.kwargs["interception"]
+    assert interception.tools is host_tools.register
+    assert (interception.port, interception.advertise_host) == (8766, "host.openshell.internal")
+
+
+def test_the_cli_refuses_a_suite_with_host_tools_in_agent_mode(cli_benchmark):
+    # Its tools live on the host-side interceptor: in agent mode the agent would have none that record.
+    result = CliRunner().invoke(orchestrator.main, WEATHER)
+    assert result.exit_code == 2
+    assert "serves its tools on the host-side interceptor (HOST_TOOLS)" in result.output
+    assert "--interception host" in result.output
+    cli_benchmark.assert_not_called()
+
+
+def test_a_suite_without_host_tools_gives_its_interceptors_none(cli_benchmark):
+    result = CliRunner().invoke(orchestrator.main, [*PI, "--interception", "host", *UPSTREAM])
+    assert result.exit_code == 0, result.output
+    assert cli_benchmark.call_args.kwargs["interception"].tools is None
+
+
+@pytest.mark.parametrize(
+    "reference,message",
+    [
+        (42, "must be a 'module:function' string"),
+        ("tests.test_orchestrator_host_mode", "must be a 'module:function' string"),
+        ("tests.test_orchestrator_host_mode:CONTROL_TOKEN", "is not a function"),
+        ("tests.test_orchestrator_host_mode:missing", "is not a function"),
+    ],
+)
+def test_a_suites_host_tools_must_name_a_function(monkeypatch, reference, message):
+    import suites.weather
+
+    monkeypatch.setattr(suites.weather, "HOST_TOOLS", reference)
+    with pytest.raises(click.UsageError, match=message):
+        orchestrator._resolve_host_tools("weather")

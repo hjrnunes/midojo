@@ -6,7 +6,12 @@ The host (the process that runs the orchestrator) builds a
 authority at setup, a ``midojo_sdk.recorder.Recorder`` for the evaluation's
 session (in process, or over HTTP with the session token), and the tool-output
 part of the episode's injection plan. It mirrors the upstream MCP server (the
-real tools), records every call through that recorder and forwards it.
+real tools), records every call through that recorder and forwards it. A
+suite whose tools read or change the simulated environment gives the run its
+``tools`` (see :class:`HostInterception`): they are registered on each
+evaluation's interceptor as simulated tools, which get the session's
+environment on the host, and replace the upstream's tools of the same name;
+the upstream's other tools are mirrored as before.
 
 The target gets only a :class:`~midojo.tool_endpoint.ToolEndpoint`: the
 interceptor's URL and a bearer token made for this interceptor alone. No
@@ -36,14 +41,14 @@ import asyncio
 import contextlib
 import secrets
 import socket
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
 import uvicorn
 from midojo_sdk.injection import InjectionOutcome, InjectionPlan
 from midojo_sdk.mcp import MidojoMCP
-from midojo_sdk.recorder import Recorder
+from midojo_sdk.recorder import Recorder, WorldState
 
 from midojo.tool_endpoint import TOOL_PATH, ToolEndpoint, bare_host, tool_url
 
@@ -52,6 +57,9 @@ _WILDCARD_HOSTS = {"0.0.0.0", "::", ""}
 
 # How long stopping waits for the target's open connections before closing them.
 _SHUTDOWN_SECONDS = 2
+
+HostTools = Callable[[MidojoMCP], None]
+"""Registers a suite's simulated tools, blocks and denials on one evaluation's interceptor (its ``MidojoMCP``)."""
 
 
 @dataclass
@@ -90,6 +98,14 @@ class HostInterceptor:
     the tool-output part of the episode's plan; ``evaluation_id`` scopes its
     occurrence counters and never leaves the host. ``observe_requests`` keeps
     each request it receives, refused ones included, in ``requests``.
+
+    ``tools`` registers simulated tools (``@mcp.tool()``), blocks and denials
+    on the interceptor before it mirrors the upstream, so they replace the
+    upstream's tools of the same name. A simulated tool reads and changes the
+    evaluation's environment through ``world``, which stays on the host with
+    the session; without ``world`` it has no environment. A simulated tool
+    takes no tool-output instruction (``CapabilityError``), as the upstream
+    never produced its result.
     """
 
     def __init__(
@@ -99,6 +115,8 @@ class HostInterceptor:
         upstream: Any,
         evaluation_id: str,
         plan: InjectionPlan = InjectionPlan(),
+        world: WorldState | None = None,
+        tools: HostTools | None = None,
         bind_host: str = "127.0.0.1",
         port: int = 0,
         advertise_host: str | None = None,
@@ -109,11 +127,14 @@ class HostInterceptor:
         self.mcp = MidojoMCP(
             name,
             recorder=recorder,
+            world=world,
             upstream_url=url,
             upstream_transport=transport,
             plan=plan,
             evaluation_id=evaluation_id,
         )
+        if tools is not None:
+            tools(self.mcp)
         self._token = secrets.token_urlsafe(32)
         # A host is kept without URL brackets, and bracketed once when the endpoint's URL is made.
         self._bind_host = bind_host = bare_host(bind_host)
@@ -237,6 +258,10 @@ class HostInterception:
     host the target connects to; by default the bind host, or ``127.0.0.1``
     for a wildcard bind. ``observe_requests`` makes each interceptor keep the
     requests it receives (see :class:`HostInterceptor`), for tests.
+
+    ``tools`` are the suite's simulated tools (a suite's ``HOST_TOOLS``),
+    registered on every evaluation's interceptor, which then gets the
+    evaluation's environment as well as its recorder.
     """
 
     upstream: Any
@@ -244,14 +269,19 @@ class HostInterception:
     port: int = 0
     advertise_host: str | None = None
     observe_requests: bool = False
+    tools: HostTools | None = None
 
-    def interceptor(self, recorder: Recorder, *, evaluation_id: str, plan: InjectionPlan) -> HostInterceptor:
-        """A new interceptor for one evaluation, recording with ``recorder``."""
+    def interceptor(
+        self, recorder: Recorder, *, evaluation_id: str, plan: InjectionPlan, world: WorldState | None = None
+    ) -> HostInterceptor:
+        """A new interceptor for one evaluation, recording with ``recorder``; its ``tools`` change ``world``."""
         return HostInterceptor(
             recorder,
             upstream=self.upstream,
             evaluation_id=evaluation_id,
             plan=plan,
+            world=world,
+            tools=self.tools,
             bind_host=self.bind_host,
             port=self.port,
             advertise_host=self.advertise_host,

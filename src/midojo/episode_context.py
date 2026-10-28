@@ -280,10 +280,14 @@ class EpisodeContext:
         assert self._session_token is not None
         if self.interception is not None:
             with self._progress("interceptor"):
+                # The environment only for the suite's simulated tools: a mirror alone records and forwards.
+                tools = self.interception.tools
+                world = self.control.world(self._session_token) if tools is not None else None
                 self._interceptor = self.interception.interceptor(
                     self.control.recorder(self._session_token),
                     evaluation_id=self.evaluation_id,
                     plan=episode.plan.for_channels(Channel.TOOL_OUTPUT),
+                    **({"world": world} if world is not None else {}),
                 )
                 self._binding = AgentBinding(tool_endpoint=await self._interceptor.start())
         else:

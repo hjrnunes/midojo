@@ -10,7 +10,7 @@ from midojo.control_plane.main import create_app
 from midojo.control_plane.service import BySession
 from midojo.suites import get_suite
 from suites.minibank.a2a_agent import fake_mcp as minibank
-from suites.weather.sandbox_pi import fake_mcp as weather
+from suites.weather import host_tools as weather
 
 
 class Interleaved(InProcessAgentClient):

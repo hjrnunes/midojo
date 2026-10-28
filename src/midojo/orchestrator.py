@@ -11,7 +11,7 @@ import sys
 from collections.abc import Callable, Sequence
 from dataclasses import asdict
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 import click
 import httpx
@@ -53,7 +53,7 @@ from midojo.tool_endpoint import bare_host, tool_url
 from midojo.yaml_task_suite import YAMLTaskSuite
 
 if TYPE_CHECKING:
-    from midojo.interception_host import HostInterception
+    from midojo.interception_host import HostInterception, HostTools
 
 console = Console()
 
@@ -69,6 +69,30 @@ def _resolve_system_message(suite_name: str) -> str:
         console.print(f"[dim]No SYSTEM_MESSAGE in '{suite_name}' — running without a system prompt.[/dim]")
         return ""
     return msg
+
+
+def _resolve_host_tools(suite_name: str) -> HostTools | None:
+    """The suite's ``HOST_TOOLS``: its simulated tools, which run on the host-side interceptor, or None.
+
+    A suite module gives them as ``"module:function"``, imported only here, so
+    loading the suite needs no ``midojo-sdk``. The function registers the
+    tools on one evaluation's interceptor (see ``HostInterception.tools``).
+    """
+    module_path = suite_name if "." in suite_name else f"suites.{suite_name}"
+    try:
+        mod = importlib.import_module(module_path)
+    except ImportError:
+        return None
+    reference = getattr(mod, "HOST_TOOLS", None)
+    if reference is None:
+        return None
+    if not isinstance(reference, str) or reference.count(":") != 1:
+        raise click.UsageError(f"{module_path}.HOST_TOOLS must be a 'module:function' string, got {reference!r}.")
+    module_name, function_name = reference.split(":")
+    tools = getattr(importlib.import_module(module_name), function_name, None)
+    if not callable(tools):
+        raise click.UsageError(f"{module_path}.HOST_TOOLS names {reference!r}, which is not a function.")
+    return cast("HostTools", tools)
 
 
 def _finite_seconds(_ctx: click.Context, param: click.Parameter, value: float | None) -> float | None:
@@ -1192,6 +1216,13 @@ def main(
     # Unmanaged clients keep their own default timeout unless --agent-timeout is given.
     timeout_kwargs = {} if agent_timeout is None else {"timeout": agent_timeout}
     host_mode = interception == "host"
+    host_tools = _resolve_host_tools(suite_name)
+    if host_tools is not None and not host_mode:
+        # Its tools live on the host-side interceptor: in agent mode the agent would have none that record.
+        raise click.UsageError(
+            f"Suite {suite_name!r} serves its tools on the host-side interceptor (HOST_TOOLS): run it with "
+            "--interception host and --upstream-mcp-url."
+        )
     if host_mode and not control_token:
         # The control plane refuses a host-mode evaluation without one: say so before the run starts.
         raise click.UsageError(
@@ -1206,6 +1237,7 @@ def main(
             port=interceptor_port,
             advertise=interceptor_advertise_host,
             openshell=isinstance(runtime, OpenShellRuntime),
+            tools=host_tools,
         )
         if host_mode
         else None
@@ -1317,7 +1349,13 @@ def _is_unspecified(host: str) -> bool:
 
 
 def _host_interception(
-    upstream_mcp_url: str | None, *, bind: str, port: int, advertise: str | None, openshell: bool
+    upstream_mcp_url: str | None,
+    *,
+    bind: str,
+    port: int,
+    advertise: str | None,
+    openshell: bool,
+    tools: HostTools | None = None,
 ) -> HostInterception:
     """The run's host-mode settings, from the CLI options, refusing what a target couldn't reach."""
     from midojo.interception_host import HostInterception  # needs midojo-sdk[mcp]
@@ -1345,7 +1383,7 @@ def _host_interception(
                 f"sandbox's own, and an unspecified address names no host. Pass --interceptor-advertise-host with "
                 f"a host the sandbox reaches, or leave it out for {SANDBOX_HOST}."
             )
-    return HostInterception(upstream=upstream_mcp_url, bind_host=bind, port=port, advertise_host=advertise)
+    return HostInterception(upstream=upstream_mcp_url, bind_host=bind, port=port, advertise_host=advertise, tools=tools)
 
 
 if __name__ == "__main__":

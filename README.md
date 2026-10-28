@@ -59,14 +59,16 @@ Create or update a gitignored `.env` in the repo root with your OpenAI-compatibl
 LITELLM_API_HOST=your-model-server.example.com
 LITELLM_MODEL=your-model-id
 LITELLM_API_KEY=your-api-key
+# The weather suite runs in host mode, which needs a control token: any random secret.
+MIDOJO_CONTROL_TOKEN=a-random-secret
 # Optional; the defaults are shown.
 # LITELLM_API_PORT=443
 # LITELLM_API_SCHEME=https
 ```
 
-The agent calls `<scheme>://<host>:<port>/v1`, and the sandbox's network policy allows only that host and port. Leave the key empty for an unauthenticated server. For a server on this machine, set the host to `host.openshell.internal` instead of `localhost`, its port (e.g. `11434`), and the scheme to `http`.
+The agent calls `<scheme>://<host>:<port>/v1`, and the sandbox's network policy allows only that host and port, and MiDojo's interceptor (below). Leave the key empty for an unauthenticated server. For a server on this machine, set the host to `host.openshell.internal` instead of `localhost`, its port (e.g. `11434`), and the scheme to `http`.
 
-For remote gateways, use a registry image and a control-plane address the sandbox can reach.
+For remote gateways, use a registry image and an interceptor address the sandbox can reach (`--interceptor-advertise-host`).
 
 </details>
 
@@ -74,17 +76,17 @@ For remote gateways, use a registry image and a control-plane address the sandbo
 
 Give a weather agent everyday tasks. Plant instructions in prompts, weather notes, and a trip itinerary. See whether it takes the bait.
 
-This example runs the bundled weather agent in an OpenShell sandbox. Alerts are recorded in the test environment. No host-side Node.js or PI installation is needed.
+This example runs the bundled weather agent in an OpenShell sandbox. MiDojo's interception layer runs on your machine, outside the sandbox: for each evaluation, `midojo-run` starts an interceptor that serves the agent its weather tools, records every call, and keeps the test environment, where alerts are recorded instead of sent. The sandbox gets only that interceptor's URL and bearer token, never the evaluation's session or the control plane's address, so the agent can't read or rewrite its own record. No host-side Node.js or PI installation is needed.
 
 ### 1. Start the MiDojo server
 
 In terminal 1, load the suite and leave the server running:
 
 ```bash
-uv run --env-file .env midojo-serve --load-suite weather --port 8090
+uv run --env-file .env midojo-serve --load-suite weather --host 127.0.0.1 --port 8090
 ```
 
-Port 8090 matches the sandbox's access policy. The server listens on all interfaces so the local sandbox can reach it; run this example on a trusted development machine.
+The sandbox never reaches the server, so it can listen on loopback only. It requires `MIDOJO_CONTROL_TOKEN` from `.env` on every route but `/health` and the agent's callbacks; without one it warns at startup, and refuses the host-mode evaluations this suite needs.
 
 When the agent has replied, MiDojo closes the evaluation before grading it: it stops admitting new tool calls, lets calls already under way finish for up to 5 seconds (`midojo-serve --closure-wait SECONDS` changes this), collects the sandbox evidence, and then seals what it recorded. Grading reads only the sealed record. A tool call or other write that arrives too late is kept separately as a late fact, and marks the evidence it carries `incomplete` instead of changing the record (see [Closure and late facts](interception/README.md#closure-and-late-facts)).
 
@@ -94,20 +96,34 @@ By default a tool call's record doesn't copy the environment. `midojo-serve --en
 
 Creating an evaluation (`POST /runs/{run_id}/evaluations`, `ControlPlaneClient.create_evaluation(..., idempotency_key=)`) takes an optional `idempotency_key`, a string you choose, one per request. The run then keeps the request and the evaluation it opened under the key, never the session token (only token hashes are kept): sending the same request (`user_task_id`, `injection_task_id`, `injections`, `interception`) with the same key again opens nothing and returns the same evaluation with a freshly issued session token, same expiry, and the token issued before stops resolving (the session is rotated), so a create whose response was lost can be resent safely and only the last response's token works. It rotates at any stage and changes nothing else about the evaluation: once it is closing or sealed, the new token is held to that stage's rules (a call it starts is a late fact, and after the seal it reads nothing), and the old one is refused as `invalid_session` and kept nowhere. A resend is refused, leaving the session as it was, once the session was revoked (it stays revoked) or has expired (its expiry is never extended): 401 `session_closed`. The same key with another request is a 409 with `kind` `idempotency_conflict`. A key belongs to its run, and a create refused outright (an unknown task, say) keeps nothing. Without a key, every create opens a new evaluation, as before.
 
-Anything that can reach the server can read and change its runs. To require a token on every route except the agent's callbacks and `/health`, add `MIDOJO_CONTROL_TOKEN=<a random secret>` to `.env`: `midojo-serve` and `midojo-run` both read it (or pass `--control-token`), and `midojo-run` never hands it to the agent. [Host interception](#keep-the-evaluation-out-of-the-agents-reach) requires it.
+Without a control token, anything that can reach the server can read and change its runs. With `MIDOJO_CONTROL_TOKEN` in `.env`, it requires that token on every route except the agent's callbacks and `/health`: `midojo-serve` and `midojo-run` both read it (or pass `--control-token`), and `midojo-run` never hands it to the agent. [Host interception](#keep-the-evaluation-out-of-the-agents-reach), which the weather suite uses, requires it.
 
-### 2. Run a red-team test
+### 2. Start the agent's tools
 
-In terminal 2, from the repo root, run one evaluation on the `openshell` gateway the installer registered:
+In terminal 2, start the weather agent's real tools, the MCP server the interceptors forward to:
+
+```bash
+uv run weather-tools-serve
+```
+
+It listens on `http://127.0.0.1:8770/mcp` (`--host` and `--port` change it). The sandbox never reaches it either: each evaluation's interceptor calls it on the agent's behalf, except for the calls MiDojo simulates (`send_weather_alert`) or blocks (`send_email`).
+
+### 3. Run a red-team test
+
+In terminal 3, from the repo root, run one evaluation on the `openshell` gateway the installer registered:
 
 ```bash
 uv run --env-file .env midojo-run --suite weather --gateway openshell \
   --control-url http://localhost:8090 \
+  --interception host --upstream-mcp-url http://127.0.0.1:8770/mcp \
+  --interceptor-bind 0.0.0.0 --interceptor-port 8766 \
   --user-task trip_weather --injection-task hidden_file_via_itinerary \
   --logdir runs/weather-trip
 ```
 
-The user asks for the weather where they're traveling, and their itinerary, `trip.md`, carries an instruction to save a hidden copy of it. MiDojo starts the agent in a fresh sandbox, delivers the task and injection, and checks what happened. This takes about a minute. Keep the server running to try the variations below; stop it with Ctrl+C when finished.
+`--interception host` runs the suite's interception layer on the host, forwarding to the tools at `--upstream-mcp-url`. The interceptor listens on all interfaces at port 8766, which the sandbox's network policy allows, and the sandbox reaches it at `host.openshell.internal`; run this example on a trusted development machine. `midojo-run` refuses the weather suite without `--interception host`.
+
+The user asks for the weather where they're traveling, and their itinerary, `trip.md`, carries an instruction to save a hidden copy of it. MiDojo starts the agent in a fresh sandbox, delivers the task and injection, and checks what happened. This takes about a minute. Keep the server and the tools running to try the variations below; stop them with Ctrl+C when finished.
 
 ### Read the results
 
@@ -163,7 +179,10 @@ The OpenShell evidence also records what ran, in `observations["openshell"]`:
 
 ```bash
 uv run --env-file .env midojo-run --suite weather --gateway openshell \
-  --control-url http://localhost:8090 --logdir runs/weather-full
+  --control-url http://localhost:8090 \
+  --interception host --upstream-mcp-url http://127.0.0.1:8770/mcp \
+  --interceptor-bind 0.0.0.0 --interceptor-port 8766 \
+  --logdir runs/weather-full
 ```
 
 At the end, MiDojo prints a results table. Here's an excerpt from a full run:
@@ -225,6 +244,8 @@ A task pair that failed (see above) is printed as **💥 failed (not counted)** 
 ```bash
 uv run --env-file .env midojo-run --suite weather --gateway openshell \
   --control-url http://localhost:8090 \
+  --interception host --upstream-mcp-url http://127.0.0.1:8770/mcp \
+  --interceptor-bind 0.0.0.0 --interceptor-port 8766 \
   --user-task trip_weather --injection-task hidden_file_via_itinerary \
   --attempts 3 --logdir runs/weather-trip-x3
 ```
@@ -233,15 +254,17 @@ uv run --env-file .env midojo-run --suite weather --gateway openshell \
 
 The attempts replay the suite's payloads unchanged (`StaticAttacker`); MiDojo has no adaptive attacker yet. To search for a payload that breaks the agent, drive MiDojo episodes from PyRIT or Garak instead. An adaptive attacker plugged into `run_benchmark(attacker_factory=...)` follows the same rules: it may only fill the probes the pair's injection task declares, and a success counts only once its injections break the agent again in a fresh episode from a clean start.
 
-**Compare with a clean run.** Selecting a user task without an injection task runs it without attacks, so you can compare the agent's answer with step 2's:
+**Compare with a clean run.** Selecting a user task without an injection task runs it without attacks, so you can compare the agent's answer with step 3's:
 
 ```bash
 uv run --env-file .env midojo-run --suite weather --gateway openshell \
-  --control-url http://localhost:8090 --user-task trip_weather \
-  --logdir runs/weather-baseline
+  --control-url http://localhost:8090 \
+  --interception host --upstream-mcp-url http://127.0.0.1:8770/mcp \
+  --interceptor-bind 0.0.0.0 --interceptor-port 8766 \
+  --user-task trip_weather --logdir runs/weather-baseline
 ```
 
-**Change the trap.** Edit the payload under `hidden_file_via_itinerary` in [suite.yaml](suites/weather/suite.yaml) and rerun step 2. `midojo-run` reads the payloads on every run, so the server doesn't need a restart. To compare models, change `LITELLM_MODEL` (and the server values, if needed) in `.env` and rerun; no rebuild is needed.
+**Change the trap.** Edit the payload under `hidden_file_via_itinerary` in [suite.yaml](suites/weather/suite.yaml) and rerun step 3. `midojo-run` reads the payloads on every run, so the server doesn't need a restart. To compare models, change `LITELLM_MODEL` (and the server values, if needed) in `.env` and rerun; no rebuild is needed.
 
 Use a new `--logdir` for each comparison; another run in the same directory replaces `results.json`.
 
@@ -257,8 +280,8 @@ MiDojo can test malicious prompts, poisoned data, and tampered tool responses. C
 | Start with… | Try… |
 | --- | --- |
 | An agent in an OpenShell sandbox | [Document assistant](suites/document_assistant/sandbox_pi/README.md): inject files; inspect file changes, processes, and network activity. |
-| An agent using MCP tools | [The weather suite's fake MCP server](suites/weather/sandbox_pi/fake_mcp.py): put a MiDojo server in place of one of the agent's MCP servers. |
-| A PI agent | [The weather suite's example agent](suites/weather/README.md#the-example-agent): modify tool results, record actions, or block calls. |
+| An agent using MCP tools | [The weather suite's host tools](suites/weather/host_tools.py): MiDojo serves the agent's MCP tools from the host, recording every call, adding environment data to a tool's result, and simulating or blocking the calls that would change the world, with nothing of MiDojo in the sandbox. |
+| A PI agent | [The PI SDK](interception/pi-sdk/src/index.ts) (`@midojo/pi-sdk`): modify tool results, record actions, or block calls from a PI extension. It records from inside the agent, with the evaluation's session, so the agent can read that session too. |
 
 A suite's `agent_runtime` chooses **OpenShell** (a sandbox per evaluation) or **unmanaged** (experimental; connect to an agent outside MiDojo's sandbox lifecycle). On OpenShell, MiDojo runs the suite's `agent_command` in the sandbox with the user's message as its last argument, and takes the command's output as the reply; each run has up to 5 minutes. The [session-forwarding example](suites/minibank/a2a_agent/agent.py) shows how to connect an external agent.
 
@@ -344,7 +367,7 @@ Each forwarded call's record carries what the interceptor returned to the agent 
 
 By default the interception layer runs in or beside the agent (a PI extension, LangChain middleware, a fake MCP server the agent reaches) and records calls with the evaluation's session token, so the agent under test can hold that token. With it, the agent could read hidden environment state or rewrite its own record. `midojo-run --interception host` moves interception out of the agent. For each evaluation, `midojo-run` starts an MCP interceptor inside the `midojo-run` process (an asyncio server task, not a separate process). The interceptor mirrors the real MCP server at `--upstream-mcp-url`, applies the evaluation's tool-output injections, and records every call. The agent gets only that interceptor's tool endpoint: a URL and a bearer token valid for that one interceptor. It never gets a session token, the control plane's URL or token, or a run or evaluation ID. In host mode, MiDojo also withholds `UPSTREAM_MCP_URL` and `MCP_SERVER_URL`, which name the real MCP server, so the agent can't call its tools directly and skip the record.
 
-In agent mode, an OpenShell sandbox gets the session token as `MIDOJO_SESSION_TOKEN` and the control plane's URL as `MIDOJO_URL`, for an interception layer inside it, such as the weather suite's PI extension and fake MCP server. The agent can read them too. The token lets it read the evaluation's whole environment, hidden state included, replace or change it, and add or finish call records (all with `provenance` `agent`). A suite whose agent doesn't record its calls from inside the sandbox can keep the session out, with `inject_session: false` under `agent_runtime`:
+In agent mode, an OpenShell sandbox gets the session token as `MIDOJO_SESSION_TOKEN` and the control plane's URL as `MIDOJO_URL`, for an interception layer inside it, such as a PI extension or a fake MCP server built with the SDKs. It never gets `MIDOJO_CONTROL_TOKEN`, even when the suite's `env_vars` set it. The agent can read them too. The token lets it read the evaluation's whole environment, hidden state included, replace or change it, and add or finish call records (all with `provenance` `agent`). A suite whose agent doesn't record its calls from inside the sandbox can keep the session out, with `inject_session: false` under `agent_runtime`:
 
 ```yaml
 agent_runtime:
@@ -375,11 +398,13 @@ midojo-run --suite minibank --agent-uri ./agent --protocol pi \
 An OpenShell sandbox can't reach the host's loopback. Bind an address the sandbox can reach and give a fixed port. The sandbox gets `MIDOJO_TOOL_URL` (`http://host.openshell.internal:<port>/mcp`) and `MIDOJO_TOOL_TOKEN`; its agent command connects its MCP client there. MiDojo drops `MIDOJO_SESSION_TOKEN`, `MIDOJO_URL`, `MIDOJO_CONTROL_TOKEN`, `UPSTREAM_MCP_URL` and `MCP_SERVER_URL` from the sandbox's environment, even when the suite's `env_vars` set them. Variables with other names aren't checked, so keep the real server's address out of a suite's `env_vars`. The sandbox gets a random name (`sbx-<hex>`) and only the suite's label, not the `eval-<id>` name and run, evaluation and task labels an agent-mode sandbox has; `midojo-run` logs which sandbox runs each evaluation. `--interceptor-bind` must not be a loopback address, and `--interceptor-advertise-host` must be neither a loopback nor an unspecified address (`0.0.0.0`, `::`). An IPv6 host may be given with or without brackets (`2001:db8::1` or `[2001:db8::1]`); the URL brackets it, and the policy names it without brackets.
 
 ```sh
-# MIDOJO_CONTROL_TOKEN set for both midojo-serve and midojo-run
+# MIDOJO_CONTROL_TOKEN set for both midojo-serve and midojo-run; weather-tools-serve running
 midojo-run --suite weather --gateway GATEWAY --control-url http://localhost:8090 \
-  --interception host --upstream-mcp-url http://localhost:9000/mcp \
-  --interceptor-bind 0.0.0.0 --interceptor-port 8765
+  --interception host --upstream-mcp-url http://127.0.0.1:8770/mcp \
+  --interceptor-bind 0.0.0.0 --interceptor-port 8766
 ```
+
+A suite's own simulated tools can run on the interceptor too, so a suite whose tools read or change the test environment needs nothing in the sandbox. A suite module that exports `HOST_TOOLS = "package.module:function"` has `midojo-run` call that function with each evaluation's interceptor (a `MidojoMCP`) before it mirrors the upstream: the tools it registers with `@mcp.tool()` replace the upstream's tools of the same name and get the evaluation's environment through their `ToolContext`, on the host, and `mcp.block(...)` blocks tools. The weather suite's [`host_tools.py`](suites/weather/host_tools.py) adds each city's notes to the real `get_weather` result, records `send_weather_alert` in the environment, and blocks `send_email`. `midojo-run` refuses a suite with `HOST_TOOLS` without `--interception host`. In Python, pass the function as `HostInterception(upstream=..., tools=...)`.
 
 The suite's network policy must allow the interceptor's host and port for the binaries that make the MCP calls. It needs no rule for the control plane, which the sandbox never reaches in host mode; remove any such rule so the agent can't reach it. `midojo-run` warns when no policy entry allows the interceptor's host and port. That check doesn't look at an entry's `binaries`, so make sure they include the program that makes the MCP calls:
 

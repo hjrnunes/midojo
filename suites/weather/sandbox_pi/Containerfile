@@ -1,10 +1,12 @@
 # Example sandbox for the weather suite.
 #
-# Extends the pi community sandbox with the weather agent (its tools, the
-# remote alerts MCP server it sends alerts with, and an OpenAI-compatible model
-# provider), then adds MiDojo's PI extension and fake alerts MCP server.
-# Replace this with your own production sandbox image — the suite.yaml eval
-# does not change.
+# Extends the pi community sandbox with the weather agent: its system prompt,
+# an OpenAI-compatible model provider, and the MCP server it calls its weather
+# tools on. Nothing of MiDojo is in the image: the suite runs in host mode,
+# where MiDojo's interception layer runs on the host and the agent's MCP
+# server is the interceptor MiDojo gives it (MIDOJO_TOOL_URL and
+# MIDOJO_TOOL_TOKEN). Replace this with your own production sandbox image —
+# the suite.yaml eval does not change.
 #
 # Build (from repo root):
 #   podman build --pull=always --platform linux/arm64 \
@@ -19,29 +21,20 @@ FROM ghcr.io/nvidia/openshell-community/sandboxes/pi:latest
 
 USER root
 
-# The PI SDK targets PI 1.0, newer than the PI in the community image.
+# PI 1.0, newer than the PI in the community image.
 RUN npm install -g @earendil-works/pi-coding-agent@1.0.0
 
 # Install into pi's global agent dir (~/.pi/agent = /sandbox/.pi/agent), which
 # pi reads regardless of the process working directory. midojo runs the agent
-# in /sandbox/workdir, so a project-local .pi/ would not be found.
+# in /sandbox/workdir, so a project-local .pi/ would not be found, and a file
+# written there would show up in the evaluation's workdir observation.
 RUN mkdir -p /sandbox/.pi/agent
-# mcp.json names the owner's remote alerts service, which the suite replaces
-# with the fake alerts MCP server below. models.json and settings.json keep
-# @LITELLM_API_URL@ and @LITELLM_MODEL@ placeholders for start-agent.sh.
+# mcp.json names the agent's weather tools server, with @MIDOJO_TOOL_URL@ and
+# @MIDOJO_TOOL_TOKEN@ placeholders; models.json and settings.json keep
+# @LITELLM_API_URL@ and @LITELLM_MODEL@ ones. start-agent.sh fills them in.
 COPY suites/weather/sandbox_pi/models.json suites/weather/sandbox_pi/settings.json \
      suites/weather/sandbox_pi/AGENTS.md suites/weather/sandbox_pi/mcp.json /sandbox/.pi/agent/
-
-# The midojo pi-sdk's only imports are type-only, so pi's bundled jiti loads it
-# with no install step or runtime deps.
-COPY interception/pi-sdk/ /sandbox/.pi/agent/pi-sdk/
-COPY suites/weather/sandbox_pi/.pi/extensions/ /sandbox/.pi/agent/extensions/
-
-# The fake alerts MCP server, built on midojo's MCP SDK. The suite's
-# agent_command starts it with start-agent.sh before running PI.
-COPY interception/python-sdk/ /tmp/midojo-sdk/
-RUN uv pip install --no-cache --python /sandbox/.venv/bin/python3 "/tmp/midojo-sdk[mcp]" && rm -rf /tmp/midojo-sdk
-COPY suites/weather/sandbox_pi/fake_mcp.py suites/weather/sandbox_pi/start-agent.sh /sandbox/midojo/
+COPY suites/weather/sandbox_pi/start-agent.sh /sandbox/midojo/
 
 RUN chown -R sandbox:sandbox /sandbox/.pi /sandbox/midojo
 

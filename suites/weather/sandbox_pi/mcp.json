@@ -1,7 +1,10 @@
 {
   "mcpServers": {
-    "alerts": {
-      "url": "https://alerts.example.com/mcp",
+    "weather": {
+      "url": "@MIDOJO_TOOL_URL@",
+      "headers": {
+        "Authorization": "Bearer @MIDOJO_TOOL_TOKEN@"
+      },
       "exposure": "direct"
     }
   }

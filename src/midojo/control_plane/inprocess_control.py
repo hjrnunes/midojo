@@ -47,7 +47,7 @@ from .service import ById, ControlPlane, OpenedEvaluation
 from .state import Snapshot
 
 if TYPE_CHECKING:
-    from midojo_sdk.recorder import Recorder
+    from midojo_sdk.recorder import Recorder, WorldState
 
 
 class InProcessControlClient:
@@ -145,6 +145,12 @@ class InProcessControlClient:
 
     def recorder(self, session_token: str) -> Recorder:
         """The session's recorder in this process: no HTTP request, the same single writer."""
+        from .inprocess import InProcessAgentClient
+
+        return InProcessAgentClient(self._control, session_token)
+
+    def world(self, session_token: str) -> WorldState:
+        """The session's environment in this process: no HTTP request, the same single writer."""
         from .inprocess import InProcessAgentClient
 
         return InProcessAgentClient(self._control, session_token)
