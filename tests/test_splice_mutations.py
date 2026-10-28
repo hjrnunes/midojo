@@ -9,9 +9,13 @@ typed out. The cases cover structured placement and the JSON mirror's
 re-serialisation in each layout, record selectors and indexes, content-block
 placement, size limits, transformations, mismatch policies, occurrence
 counting, call-argument and result-record matching, and a later instruction
-replacing an earlier one's placement. Each mutant below is one plausible
-single edit to the splice code (``tests.mutation_harness``), and the cases
-must catch every one of them.
+replacing an earlier one's placement. A placement (applied, partial,
+fallback) must name its payload's digest, its written text's and its slot,
+and any other outcome none of them; where a case gives ``placed``, their
+values are written from the literal payload and target
+(``tests.slot_literals``). Each mutant below is one plausible single edit to
+the splice code (``tests.mutation_harness``), and the cases must catch every
+one of them; the same copies with no edit must fail no case.
 """
 
 from __future__ import annotations
@@ -39,10 +43,12 @@ from midojo_sdk.injection import (
     Transformation,
 )
 
-from tests.mutation_harness import Mutant, mutated, mutated_function
+from tests.mutation_harness import Mutant, mutated, mutated_function, unedited, unedited_function
+from tests.slot_literals import codec_target, placed
 
 SC, CB = "structured_content", "content_block"
 TOOL = "lookup"
+PLACEMENTS = {"applied", "partial", "fallback"}
 
 
 class Recorder:
@@ -95,7 +101,8 @@ def block(payload: str = "!", target: dict[str, Any] | None = None, **fields: An
 class Case:
     """Calls with ``calls``' arguments; after each, ``texts`` and ``structured`` are what it returned.
 
-    ``outcomes`` are ``(call number, instruction index, status, occurrence, emitted parts)``.
+    ``outcomes`` are ``(call number, instruction index, status, occurrence, emitted parts)``. ``placed`` gives,
+    by instruction index, ``(payload, written text, target in the plan codec's form, mode)`` for its placements.
     """
 
     id: str
@@ -105,8 +112,9 @@ class Case:
     outcomes: list[tuple[int, int, str, int, tuple[str, ...]]]
     calls: list[dict[str, Any]] = field(default_factory=lambda: [{}])
     details: dict[int, str] = field(default_factory=dict)
+    placed: dict[int, tuple[str, str, dict[str, Any], str]] = field(default_factory=dict)
 
-    async def observed(self, module: types.ModuleType) -> tuple[Any, Any, Any]:
+    async def observed(self, module: types.ModuleType) -> tuple[Any, Any, Any, Any, Any]:
         mcp = module.MidojoMCP(
             "splice",
             recorder=Recorder(),
@@ -125,10 +133,40 @@ class Case:
             for o in mcp.injection_outcomes
         )
         details = {o.instruction_index: o.detail for o in mcp.injection_outcomes}
-        return returned, outcomes, {index: details[index] for index in self.details}
+        named = sorted(
+            (o.admission_order, o.instruction_index, _named(o.payload_digest, o.placed_digest, o.slot))
+            for o in mcp.injection_outcomes
+        )
+        fields = {
+            index: [
+                {
+                    "payload_digest": o.payload_digest,
+                    "placed_digest": o.placed_digest,
+                    "slot": None if o.slot is None else o.slot.to_data(),
+                }
+                for o in sorted(mcp.injection_outcomes, key=lambda o: o.admission_order)
+                if o.instruction_index == index and o.status.value in PLACEMENTS
+            ]
+            for index in self.placed
+        }
+        return returned, outcomes, {index: details[index] for index in self.details}, named, fields
 
-    def expected(self) -> tuple[Any, Any, Any]:
-        return self.returned, sorted(self.outcomes), self.details
+    def expected(self) -> tuple[Any, Any, Any, Any, Any]:
+        outcomes = sorted(self.outcomes)
+        named = [(call, index, "all" if status in PLACEMENTS else "none") for call, index, status, _, _ in outcomes]
+        fields = {
+            index: [
+                placed(*self.placed[index]) for _, i, status, _, _ in outcomes if i == index and status in PLACEMENTS
+            ]
+            for index in self.placed
+        }
+        return self.returned, outcomes, self.details, named, fields
+
+
+def _named(*values: Any) -> str:
+    """Whether an outcome names all of what a placement placed and where, none of it, or only some."""
+    present = [value is not None for value in values]
+    return "all" if all(present) else "none" if not any(present) else "some"
 
 
 NOTE = {"a": {"note": "hi"}}
@@ -145,6 +183,9 @@ CASES = [
         [(['{"a":{"note":"hi!"}}'], NOTED)],
         [(1, 0, "applied", 1, BOTH)],
         details={0: "exact selector matched; mirrored text re-serialised"},
+        placed={
+            0: ("!", "!", codec_target(surface="structured_content", structured_content_path=["a", "note"]), "append")
+        },
     ),
     Case(
         "mirror.spaced",
@@ -216,6 +257,7 @@ CASES = [
         (at(("a",)),),
         [(['{"a":"x"}', "one note"], {"a": "x!"})],
         [(1, 0, "partial", 1, (SC,))],
+        placed={0: ("!", "!", codec_target(surface="structured_content", structured_content_path=["a"]), "append")},
         details={
             0: "exact selector matched structured content only; text content is not a single text block (2 content blocks)"
         },
@@ -264,6 +306,17 @@ CASES = [
             )
         ],
         [(1, 0, "applied", 1, BOTH)],
+        placed={
+            0: (
+                "!",
+                "!",
+                codec_target(
+                    surface="structured_content",
+                    structured_content_path=["rows", {"field": "sku", "equals": "S1"}, "body"],
+                ),
+                "append",
+            )
+        },
     ),
     Case(
         "record.int-is-not-true",
@@ -279,6 +332,17 @@ CASES = [
             )
         ],
         [(1, 0, "applied", 1, BOTH)],
+        placed={
+            0: (
+                "!",
+                "!",
+                codec_target(
+                    surface="structured_content",
+                    structured_content_path=["notes", {"field": "id", "equals": 1}, "body"],
+                ),
+                "append",
+            )
+        },
     ),
     Case(
         "record.two-matches",
@@ -340,6 +404,8 @@ CASES = [
         (at(("n",), mismatch_policy=MismatchPolicy.FALLBACK_APPEND),),
         [(['{"n":1}', "!"], {"n": 1})],
         [(1, 0, "fallback", 1, (CB,))],
+        # A fallback's slot is the planned one.
+        placed={0: ("!", "!", codec_target(surface="structured_content", structured_content_path=["n"]), "append")},
         details={0: "field 'n' does not contain a string; appended a text block"},
     ),
     # --- content blocks ---
@@ -370,6 +436,7 @@ CASES = [
         (block(target={"content_block_index": 1}, mode=InjectionMode.REPLACE),),
         [(["alpha", "!"], None)],
         [(1, 0, "applied", 1, (CB,))],
+        placed={0: ("!", "!", codec_target(content_block_index=1), "replace")},
     ),
     Case(
         "block.index-out-of-range",
@@ -385,6 +452,7 @@ CASES = [
         (block(target={"content_block_type": "text"}),),
         [(["<image>", "beta!"], None)],
         [(1, 0, "applied", 1, (CB,))],
+        placed={0: ("!", "!", codec_target(content_block_type="text"), "append")},
     ),
     # --- size limits and transformations ---
     Case(
@@ -407,6 +475,8 @@ CASES = [
         (block(payload='a"b', transformation=Transformation.JSON_STRING),),
         [(["alpha", '"a\\"b"'], None)],
         [(1, 0, "applied", 1, (CB,))],
+        # The payload's digest is of the payload as planned, the placed digest of the transformed text.
+        placed={0: ('a"b', '"a\\"b"', codec_target(), "append")},
     ),
     # --- occurrences ---
     Case(
@@ -432,6 +502,7 @@ CASES = [
         [(["alpha", "!"], None), (["alpha", "!"], None)],
         [(1, 0, "applied", 1, (CB,)), (2, 0, "applied", 2, (CB,))],
         calls=[{}, {}],
+        placed={0: ("!", "!", codec_target(), "append")},
     ),
     # --- call arguments and result records, type for type ---
     Case(
@@ -446,6 +517,7 @@ CASES = [
             (4, 0, "skipped_occurrence", 2, ()),
         ],
         calls=[{"n": True}, {"n": 1.0}, {"n": 1}, {"n": 1}],
+        placed={0: ("!", "!", codec_target(tool=TOOL, call_arguments={"n": 1}), "append")},
     ),
     Case(
         "result-record.true-is-not-1",
@@ -461,6 +533,38 @@ CASES = [
         (at(("a",), target={"tool": TOOL, "result_record": RecordSelector(1, field="rid")}),),
         [(['{"rid":1,"a":"x!"}'], {"rid": 1, "a": "x!"})],
         [(1, 0, "applied", 1, BOTH)],
+        placed={
+            0: (
+                "!",
+                "!",
+                codec_target(
+                    tool=TOOL,
+                    surface="structured_content",
+                    structured_content_path=["a"],
+                    result_record={"field": "rid", "equals": 1},
+                ),
+                "append",
+            )
+        },
+    ),
+    # --- a slot whose target isn't ASCII: its id digests the text as UTF-8 ---
+    Case(
+        "slot.non-ascii-target",
+        result('{"notes":[{"id":"NOTÉ","body":"a"}]}', structured={"notes": [{"id": "NOTÉ", "body": "a"}]}),
+        (at(("notes", RecordSelector("NOTÉ"), "body")),),
+        [(['{"notes":[{"id":"NOTÉ","body":"a!"}]}'], {"notes": [{"id": "NOTÉ", "body": "a!"}]})],
+        [(1, 0, "applied", 1, BOTH)],
+        placed={
+            0: (
+                "!",
+                "!",
+                codec_target(
+                    surface="structured_content",
+                    structured_content_path=["notes", {"field": "id", "equals": "NOTÉ"}, "body"],
+                ),
+                "append",
+            )
+        },
     ),
     # --- a later instruction replacing an earlier one's placement ---
     Case(
@@ -469,6 +573,8 @@ CASES = [
         (block(payload="A"), block(payload="B", mode=InjectionMode.REPLACE)),
         [(["B"], None)],
         [(1, 0, "applied", 1, ()), (1, 1, "applied", 1, (CB,))],
+        # One place, so one slot id, in two modes.
+        placed={0: ("A", "A", codec_target(), "append"), 1: ("B", "B", codec_target(), "replace")},
     ),
     Case(
         "later.block-rewrite-with-the-same-text",
@@ -601,6 +707,24 @@ SPLICE_MUTANTS = [
         "        pass",
     ),
     Mutant(
+        "payload-digest-after-transformation",
+        '"payload_digest": payload_digest(instruction.payload),',
+        '"payload_digest": payload_digest(placement.payload),',
+    ),
+    Mutant(
+        "placed-digest-before-transformation",
+        '"placed_digest": payload_digest(placement.payload),',
+        '"placed_digest": payload_digest(instruction.payload),',
+    ),
+    Mutant(
+        "fallback-names-nothing",
+        "if placement.status in PLACED else {}",
+        "if placement.status in _SELECTED else {}",
+    ),
+    Mutant(
+        "slot-without-its-mode", '"slot": InjectionSlot.of(instruction),', '"slot": InjectionSlot(instruction.target),'
+    ),
+    Mutant(
         "emitted-ignores-the-result",
         'structured = "structured_content" in placement.placed and _field_still_written(result, fields, field_written)',
         'structured = "structured_content" in placement.placed',
@@ -611,6 +735,37 @@ SPLICE_MUTANTS = [
 @pytest.mark.parametrize("mutant", SPLICE_MUTANTS, ids=[mutant.name for mutant in SPLICE_MUTANTS])
 def test_every_splice_mutant_is_caught(mutant: Mutant):
     assert failing(mutated(splice, mutant)), f"no case catches {mutant.name}"
+
+
+SLOT_ID = injection.InjectionSlot.__dict__["id"].fget
+"""The slot id's getter, whose source (decorator included) a mutant edits."""
+
+SLOT_ID_MUTANTS = [
+    Mutant("keys-unsorted", "sort_keys=True,", "sort_keys=False,"),
+    Mutant("spaced", 'separators=(",", ":"),', 'separators=(", ", ": "),'),
+    Mutant("ascii-escaped", "ensure_ascii=False", "ensure_ascii=True"),
+]
+
+
+@pytest.mark.parametrize("mutant", SLOT_ID_MUTANTS, ids=[mutant.name for mutant in SLOT_ID_MUTANTS])
+def test_every_slot_id_mutant_is_caught(mutant: Mutant, monkeypatch):
+    slot_id = mutated_function(SLOT_ID, mutant)
+    assert isinstance(slot_id, property)
+    monkeypatch.setattr(injection.InjectionSlot, "id", slot_id)
+    assert failing(splice), f"no case catches {mutant.name}"
+
+
+# --- the control: the same copies, with no edit, fail no case ---
+
+
+def test_an_unedited_splice_copy_fails_no_case():
+    assert failing(unedited(splice)) == []
+
+
+def test_unedited_matcher_and_slot_id_copies_fail_no_case(monkeypatch):
+    monkeypatch.setattr(injection, "_same_scalar", unedited_function(injection._same_scalar))
+    monkeypatch.setattr(injection.InjectionSlot, "id", unedited_function(SLOT_ID))
+    assert failing(splice) == []
 
 
 def test_a_call_argument_and_result_record_mutant_is_caught(monkeypatch):
