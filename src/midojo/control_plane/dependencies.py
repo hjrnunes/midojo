@@ -61,12 +61,14 @@ async def get_control(request: Request) -> ControlPlane:
     return request.app.state.control
 
 
-async def get_config(request: Request) -> AppConfig:
-    return request.app.state.config
+# The settings and suites are the control plane's own: one source for the control token a route requires and the
+# one the control plane opens host mode under.
+async def get_config(control: Annotated[ControlPlane, Depends(get_control)]) -> AppConfig:
+    return control.config
 
 
-async def get_suites(request: Request) -> Mapping[SuiteName, YAMLTaskSuite]:
-    return request.app.state.suites
+async def get_suites(control: Annotated[ControlPlane, Depends(get_control)]) -> Mapping[SuiteName, YAMLTaskSuite]:
+    return control.suites
 
 
 def resolve_suite(suites: Mapping[SuiteName, YAMLTaskSuite], suite_name: SuiteName) -> YAMLTaskSuite:

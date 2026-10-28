@@ -499,7 +499,9 @@ async def test_one_evaluations_credential_and_address_are_refused_by_another_eva
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stage", ["closing", "sealed"])
-async def test_closure_refuses_new_calls_as_late_facts_while_the_session_is_still_valid(control, serve, stage):
+async def test_closure_refuses_new_calls_as_late_facts_while_the_session_is_still_valid(suite, serve, stage):
+    # A long closure wait keeps an evaluation with an admitted call closing; no wait lets a seal return at once.
+    control = ControlPlane({"weather": suite}, config=AppConfig(closure_wait_seconds=60 if stage == "closing" else 0))
     run, evaluation = open_evaluation(control)
     upstream_calls: list = []
     interceptor = interceptor_for(control, evaluation.session_token, evaluation.id, calls=upstream_calls)
@@ -508,8 +510,7 @@ async def test_closure_refuses_new_calls_as_late_facts_while_the_session_is_stil
         await target.call_tool("get_weather", {"city": "Boston"})
         closing = None
         if stage == "closing":
-            # An admitted call still unfinished, and a long closure wait, keep the evaluation closing.
-            control.config = AppConfig(closure_wait_seconds=60)
+            # An admitted call still unfinished, and the long closure wait, keep the evaluation closing.
             admitted = CreateFunctionCallStart(call_id="admitted", function="list_alerts", args={})
             control.start_call(ById(run.id, evaluation.id), admitted)
             closing = asyncio.ensure_future(control.close(run.id, evaluation.id))

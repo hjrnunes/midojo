@@ -39,6 +39,7 @@ import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from types import MappingProxyType
 from typing import Any
 
 from pydantic import BaseModel
@@ -131,11 +132,17 @@ class ControlPlane:
         path asks, and refuses (ValueError) a store that already holds one. A
         control plane no app serves has no such routes and opens host mode
         without a token.
+
+        Its wiring is fixed once it is built: ``suites`` (a read-only copy of
+        the mapping given), ``store``, ``config`` (a frozen ``AppConfig``) and
+        ``served`` are read-only, so no caller can, say, take the control token
+        away from a served control plane that already holds host-mode
+        evaluations.
         """
-        self.suites = dict(suites)
-        self.store: Store = store if store is not None else InMemoryStore()
-        self.config = config if config is not None else AppConfig()
-        self.served = served
+        self._suites: Mapping[SuiteName, YAMLTaskSuite] = MappingProxyType(dict(suites))
+        self._store: Store = store if store is not None else InMemoryStore()
+        self._config = config if config is not None else AppConfig()
+        self._served = served
         if self._refuses_host_mode():
             runs = [run.id for run in self.store.list_runs()]
             held = [
@@ -152,6 +159,24 @@ class ControlPlane:
         # Held while a create under an idempotency key looks up, opens and keeps its evaluation, or rotates its
         # session's token.
         self._creating = threading.Lock()
+
+    @property
+    def suites(self) -> Mapping[SuiteName, YAMLTaskSuite]:
+        """The suites this control plane compiles episodes from, read-only."""
+        return self._suites
+
+    @property
+    def store(self) -> Store:
+        return self._store
+
+    @property
+    def config(self) -> AppConfig:
+        return self._config
+
+    @property
+    def served(self) -> bool:
+        """Whether an HTTP app serves this control plane (see ``create_app``)."""
+        return self._served
 
     def _refuses_host_mode(self) -> bool:
         """Whether host mode is refused: served over HTTP with no control token to guard the run-scoped routes."""
