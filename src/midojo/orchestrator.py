@@ -897,7 +897,9 @@ async def _run_benchmark(
         # A failed pair is null in each of these, whatever the control plane holds for its evaluation.
         # Each reason is the criterion that decided its grade, whatever the outcome (passed, not passed, or the
         # checks that couldn't be decided); security_reason is null without an injection task. With more than one
-        # attempt they are the representative attempt's, while security is aggregated over every attempt.
+        # attempt (or an adaptive attacker) they are the reported episode's (_representative: a confirmed break's
+        # replay, else the last graded attempt), while security is aggregated over every attempt and replay, so an
+        # unconfirmed adaptive success reports its own reasons beside the replay's False.
         "utility": by_pair(utility_results),
         "utility_reason": by_pair(utility_reasons),
         # null without an injection task, or where the grade is invalid
