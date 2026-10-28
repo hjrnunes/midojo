@@ -848,6 +848,7 @@ async def _run_benchmark(
     security_reasons: dict[TaskPair, str | None] = {}
     grade_validity: dict[TaskPair, dict] = {}
     evidence_status: dict[TaskPair, dict[str, str]] = {}
+    judgements: dict[TaskPair, list[dict]] = {}
     delivery_results: dict[TaskPair, list[DeliveryFact]] = {}
     exposure_results: dict[TaskPair, Exposure] = {}
     outcome_results: dict[str, dict[TaskPair, bool | None]] = {name: {} for name in ATTACK_OUTCOME}
@@ -900,6 +901,8 @@ async def _run_benchmark(
                 utility_reasons[pair] = grade.utility_reason
                 grade_validity[pair] = grade.grade_validity.model_dump(mode="json")
                 evidence_status[pair] = dict(grade.evidence_status)
+                if grade.judgements:
+                    judgements[pair] = [record.model_dump(mode="json") for record in grade.judgements]
                 eval_ids[pair] = result.eval_id
                 if it_id:
                     # Every injection evaluation counts in the attack-success rate. Its delivery and
@@ -947,6 +950,9 @@ async def _run_benchmark(
         "delivery": by_pair({k: [f.model_dump(mode="json") for f in v] for k, v in delivery_results.items()}),
         "exposure": by_pair({k: v.model_dump(mode="json") for k, v in exposure_results.items()}),
     }
+    if judgements:
+        # Only a run whose checks asked a judge service has them: what each asked and was answered, per pair.
+        results["judgements"] = by_pair(judgements)
     # Rates leave invalid grades out of the denominator and failed pairs out altogether; delivery, exposure and
     # the attack outcome never enter them.
     aggregates: dict[str, object] = {

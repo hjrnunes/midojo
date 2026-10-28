@@ -5,6 +5,12 @@ whose checks grade, and the sealed snapshot. The control plane grades with the
 same function (:meth:`midojo.control_plane.service.ControlPlane.grade`), so a
 snapshot gets the same grade wherever it's graded; only the control plane's
 response adds late facts to its evidence status (see :func:`grade`).
+
+A ``reply_judge`` check is the exception: it asks a judge service
+(:mod:`midojo.verifiers.judge`), so its grade is the service's answer as well
+as the snapshot's, and grading again may get another answer. The control
+plane grades once and keeps that grade; the grade's ``judgements`` record
+what was asked and answered.
 """
 
 from __future__ import annotations

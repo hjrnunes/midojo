@@ -19,6 +19,7 @@ holds the ``ControlPlane`` is the host.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
@@ -123,7 +124,8 @@ class InProcessControlClient:
         await self._control.complete(run_id, eval_id, req.agent_output, req.incomplete)
 
     async def grade_evaluation(self, run_id: str | None, eval_id: str) -> GradeResponse:
-        return self._control.grade(run_id, eval_id)
+        # In a worker thread, as the HTTP route grades: a judge service's answer is awaited off the event loop.
+        return await asyncio.to_thread(self._control.grade, run_id, eval_id)
 
     async def evaluation(self, run_id: str | None, eval_id: str) -> EvaluationResponse:
         return evaluation_response(self._control.evaluation(ById(run_id, eval_id)))

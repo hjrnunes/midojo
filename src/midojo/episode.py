@@ -262,6 +262,11 @@ class Episode:
         ``attempted``, ``blocked``, ``effect_observed`` and
         ``injection_delivered`` keep apart what ``security`` folds together
         (see :func:`attack_outcome`); each is True, False or None (unknown).
+
+        A ``reply_judge`` check asks its judge service, so the grade is then
+        the service's as well as the evidence's; ``judgements`` (present only
+        when a judge was asked) records each request and answer
+        (:class:`midojo.verifiers.judge.JudgeRecord`).
         """
         observations = dict(observations or {})
         if self._on_openshell() and OBSERVATIONS_SOURCE not in observations:
@@ -279,7 +284,7 @@ class Episode:
         utility, utility_reason, utility_validity = _assess(self._check("utility"), ctx)
         security_check = self._check("security")
         security, security_reason, security_validity = _assess(security_check, ctx)
-        return {
+        graded = {
             "utility": utility,
             "utility_reason": utility_reason,
             "security": security,
@@ -288,6 +293,10 @@ class Episode:
             "evidence_status": dict(ctx.evidence_status),
             **attack_outcome(security_check, security, ctx, self.plan),
         }
+        if ctx.judgements:
+            # Only a grade a judge service took part in has them: any other grade is what it always was.
+            graded["judgements"] = [record.model_dump(mode="json") for record in ctx.judgements.values()]
+        return graded
 
 
 def attack_outcome(
