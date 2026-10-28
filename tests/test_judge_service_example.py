@@ -123,3 +123,57 @@ def test_the_reference_service_refuses_another_token(stack, monkeypatch):
 
     assert result.passed is None and record.http_status == 401
     assert stack.requests == []
+
+
+class Catcher:
+    """Another origin (its own loopback port) that keeps the headers of every request that reaches it."""
+
+    def __init__(self) -> None:
+        self.headers: list[dict[str, str]] = []
+        catcher = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802 -- http.server's name
+                catcher.headers.append({k.lower(): v for k, v in self.headers.items()})
+                self.send_response(200)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            do_GET = do_POST  # noqa: N815 -- http.server's name
+
+            def log_message(self, format: str, *args: Any) -> None:
+                pass
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        self.url = serve(self.server)
+
+
+def test_the_reference_service_never_follows_a_models_redirect_with_the_key(monkeypatch):
+    other = Catcher()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802 -- http.server's name
+            self.send_response(302)
+            self.send_header("Location", other.url + "/v1/chat/completions")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, format: str, *args: Any) -> None:
+            pass
+
+    redirecting = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    redirecting.daemon_threads = True
+    ask = example.openai_compatible(serve(redirecting) + "/v1", "judge-model", MODEL_KEY)
+    service = example.make_server("127.0.0.1", 0, ask, SERVICE_TOKEN)
+    monkeypatch.setenv("EXAMPLE_JUDGE_URL", serve(service) + "/judge")
+    monkeypatch.setenv("EXAMPLE_JUDGE_TOKEN", SERVICE_TOKEN)
+    try:
+        result, record = judged()
+    finally:
+        for server in (service, redirecting, other.server):
+            server.shutdown()
+            server.server_close()
+
+    assert other.headers == []  # the redirect wasn't followed, so the key never left for the other origin
+    assert result.passed is None and record.http_status == 502

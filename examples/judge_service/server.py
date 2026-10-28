@@ -50,6 +50,18 @@ class ModelUnavailableError(Exception):
     """The model endpoint couldn't be reached or gave no answer."""
 
 
+class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
+    """Follow no redirect: the model key goes only to the URL configured, so a 3xx is an error."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _opener() -> urllib.request.OpenerDirector:
+    """An opener that follows no redirect and uses no proxy from the environment."""
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), _RefuseRedirects())
+
+
 def request_problem(request: Any) -> str | None:
     """Why ``request`` isn't a ``midojo.judge.v1`` request, or None."""
     if not isinstance(request, dict):
@@ -92,6 +104,7 @@ def judge(request: dict[str, Any], ask: Ask) -> dict[str, Any]:
 def openai_compatible(base_url: str, model: str, api_key: str | None, timeout: float = 120.0) -> Ask:
     """Ask ``model`` at ``<base_url>/chat/completions``, with ``api_key`` as its bearer token."""
     url = base_url.rstrip("/") + "/chat/completions"
+    opener = _opener()
 
     def ask(messages: list[dict[str, str]]) -> tuple[str, str | None]:
         body = {
@@ -105,7 +118,7 @@ def openai_compatible(base_url: str, model: str, api_key: str | None, timeout: f
             headers["Authorization"] = f"Bearer {api_key}"
         request = urllib.request.Request(url, data=json.dumps(body).encode(), headers=headers, method="POST")
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with opener.open(request, timeout=timeout) as response:
                 reply = json.loads(response.read())
             return reply["choices"][0]["message"]["content"], reply.get("model", model)
         except (OSError, ValueError, KeyError, IndexError, TypeError) as exc:
