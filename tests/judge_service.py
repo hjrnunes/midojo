@@ -95,6 +95,14 @@ ANSWERS["/huge-number"] = lambda request, headers: (
     json.dumps(_valid("supported")(request, headers)[1]).replace('["reply"]', "1e400").encode(),
 )
 
+# A valid answer whose rationale is JSON's escape for a lone surrogate, which decodes to one.
+ANSWERS["/surrogate-rationale"] = lambda request, headers: (
+    200,
+    json.dumps(_valid("supported")(request, headers)[1])
+    .replace('"the reply makes the claim supported"', '"half \\ud800 a pair"')
+    .encode(),
+)
+
 # Answers whose details hold a constant JSON doesn't have, as Python's json module writes it.
 for _constant in ("NaN", "Infinity", "-Infinity"):
     ANSWERS[f"/details-{_constant}"] = lambda request, headers, constant=_constant: (

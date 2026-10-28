@@ -118,7 +118,8 @@ class ReplyJudge:
         except Exception as exc:
             # Never a failed grading: unknown, with what could be told of the request.
             request = self._unbuilt_request()
-            failure = f"the judge request could not be built ({type(exc).__name__})"
+            why = str(exc) if isinstance(exc, _UnbuildableError) else type(exc).__name__
+            failure = f"the judge request could not be built ({why})"
             unbuilt = JudgeRecord(request_id=request["id"], endpoint=None, request=request, sent=False, failure=failure)
             key = json.dumps(["unbuilt", request["id"], self.url, self.url_env, self.token_env])
             return self.result(ctx.judgements.setdefault(key, unbuilt))
@@ -129,8 +130,16 @@ class ReplyJudge:
         return self.result(record)
 
     def _unbuilt_request(self) -> dict[str, Any]:
-        """What a request that couldn't be built is known to hold: the check's own claim and rubric."""
-        body = {"claim": self.claim, "rubric": self.rubric}
+        """What a request that couldn't be built is known to hold: the check's own claim and rubric, escaped.
+
+        It doesn't depend on what failed: the claim and rubric go through the
+        same escaping as every request's text, and when even that fails the
+        request holds neither.
+        """
+        try:
+            body = _json_data({"claim": self.claim, "rubric": self.rubric})
+        except Exception:
+            body = {}
         return {"schema": SCHEMA, "id": request_id(body), **body}
 
     def evaluate(self, ctx: VerificationContext) -> bool | None:
@@ -138,10 +147,19 @@ class ReplyJudge:
 
     @property
     def label(self) -> str:
-        return f'reply judge "{self.claim}"'
+        return f'reply judge "{_text(str(self.claim))}"'
 
     def request(self, ctx: VerificationContext) -> dict[str, Any]:
-        """The ``midojo.judge.v1`` request body for ``ctx``: its ``id`` is the digest of the rest."""
+        """The ``midojo.judge.v1`` request body for ``ctx``: its ``id`` is the digest of the rest.
+
+        The claim and rubric must be UTF-8 text, as parsing requires (a check
+        built some other way may not be): else :class:`_UnbuildableError`.
+        Everything else in it, what the agent and its tools produced, is
+        written as JSON data by :func:`_json_data`, a lone surrogate escaped.
+        """
+        for name in ("claim", "rubric"):
+            if _not_utf8(getattr(self, name)):
+                raise _UnbuildableError(f"the check's {name} is not UTF-8 text: it has a lone surrogate")
         turns = ctx.turns
         body: dict[str, Any] = {
             "claim": self.claim,
@@ -155,7 +173,7 @@ class ReplyJudge:
             body["tool_calls"] = [
                 {
                     "function": call.function,
-                    "args": _json_data(call.args),
+                    "args": call.args,
                     "result": call.result,
                     "error": call.error,
                     "complete": call.complete,
@@ -165,6 +183,7 @@ class ReplyJudge:
                 for call in ctx.function_calls
             ]
             body["tool_calls_complete"] = ctx.function_calls_complete and all(c.complete for c in ctx.function_calls)
+        body = _json_data(body)
         return {"schema": SCHEMA, "id": request_id(body), **body}
 
     def ask(self, request: dict[str, Any]) -> JudgeRecord:
@@ -224,9 +243,10 @@ class ReplyJudge:
         return JudgeRecord(
             **sent,
             verdict=answer["verdict"],
-            rationale=answer.get("rationale"),
-            model=answer.get("model"),
-            details=answer.get("details"),
+            # JSON's \ud800 escape decodes to a lone surrogate: escaped, as in a request, so the record dumps.
+            rationale=_json_data(answer.get("rationale")),
+            model=_json_data(answer.get("model")),
+            details=_json_data(answer.get("details")),
         )
 
     def result(self, record: JudgeRecord) -> VerificationResult:
@@ -244,7 +264,8 @@ class ReplyJudge:
 def request_id(body: dict[str, Any]) -> str:
     """``sha256:<hex>`` of ``body`` as sorted-key compact UTF-8 JSON: the same question has the same id."""
     text = json.dumps({"schema": SCHEMA, **body}, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+    # A body from _json_data holds no lone surrogate; one that does still hashes, as the same bytes every time.
+    return "sha256:" + hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
 
 
 def response_problem(answer: Any, expected_id: str) -> str | None:
@@ -295,6 +316,9 @@ def parse_reply_judge(value: Any) -> ReplyJudge:
     rubric = value.get("rubric")
     if rubric is not None and type(rubric) not in (str, dict):
         raise ValueError(f"{NAME}: rubric must be a string or a mapping")
+    for name in ("claim", "rubric", "url", "url_env", "token_env"):
+        if _not_utf8(value.get(name)):
+            raise ValueError(f"{NAME}: {name} is not UTF-8 text: it has a lone surrogate")
     if isinstance(rubric, dict):
         try:
             json.dumps(rubric, allow_nan=False)
@@ -328,15 +352,19 @@ def _json_data(value: Any) -> Any:
 
     Text, integers, booleans and None are themselves; a finite float is
     itself and a non-finite one null (as ``lifecycle.json_data`` gives it);
-    bytes are UTF-8 text, undecodable bytes escaped (``\\xff``); a list or
-    tuple is a list, and a set or frozenset a list sorted by each item's
-    sorted-key JSON; a dict whose keys are all text is an object, and any
-    other dict a list of ``[key, value]`` pairs sorted by the key's JSON,
-    so no key is lost or merged; a date, datetime, time or timedelta is its
-    ISO 8601 text.
+    bytes are UTF-8 text, undecodable bytes escaped (``\\xff``); text is itself
+    with each lone surrogate escaped (``\\ud800``), as UTF-8 can't hold
+    one; a list or tuple is a list, and a set or frozenset a list sorted by
+    each item's sorted-key JSON; a dict whose keys are all text, still
+    distinct once escaped, is an object, and any other dict a list of
+    ``[key, value]`` pairs sorted by the whole pair's JSON, so no key is
+    lost or merged and equal dicts write alike; a date, datetime, time or
+    timedelta is its ISO 8601 text.
     """
     kind = type(value)
-    if value is None or kind in (bool, int, str):
+    if kind is str:
+        return _text(value)
+    if value is None or kind in (bool, int):
         return value
     if kind is float:
         return value if math.isfinite(value) else None
@@ -347,13 +375,35 @@ def _json_data(value: Any) -> Any:
     if kind in (set, frozenset):
         return sorted((_json_data(item) for item in value), key=_sort_key)
     if kind is dict:
-        if all(type(key) is str for key in value):
-            return {key: _json_data(item) for key, item in value.items()}
         pairs = [[_json_data(key), _json_data(item)] for key, item in value.items()]
-        return sorted(pairs, key=lambda pair: _sort_key(pair[0]))
+        keys = [key for key, _ in pairs]
+        if all(type(key) is str for key in value) and len(set(keys)) == len(keys):
+            return dict(pairs)
+        # Sorted by the whole pair, so keys that write alike (b"x" and "x") still sort the same every time.
+        return sorted(pairs, key=_sort_key)
     if kind in (date, datetime, time, timedelta):
         return to_jsonable_python(value)
     raise TypeError(f"a {kind.__module__}.{kind.__qualname__} is not JSON data")
+
+
+def _text(value: str) -> str:
+    """``value`` with each lone surrogate escaped (``\\ud800``): text UTF-8 can hold, the same every time."""
+    return value.encode("utf-8", "backslashreplace").decode("utf-8")
+
+
+def _not_utf8(value: Any) -> bool:
+    """Whether text in ``value`` (a string, or the keys and values of a mapping or list) has a lone surrogate."""
+    if type(value) is str:
+        return value != _text(value)
+    if type(value) is dict:
+        return any(_not_utf8(key) or _not_utf8(item) for key, item in value.items())
+    if type(value) in (list, tuple):
+        return any(_not_utf8(item) for item in value)
+    return False
+
+
+class _UnbuildableError(ValueError):
+    """A check whose own settings can't make a request; its message is safe to show."""
 
 
 def _sort_key(data: Any) -> str:

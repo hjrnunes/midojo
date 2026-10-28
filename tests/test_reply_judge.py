@@ -900,3 +900,142 @@ def test_a_number_no_float_holds_is_unknown(judge):
     assert result.passed is None
     assert "the judge service's answer has a number no float holds: 1e400" in result.reason
     assert only_record(ctx).details is None
+
+
+# --- text UTF-8 can't hold: refused in the check, escaped in what the agent produced ---
+
+LONE = "\ud800"
+
+
+@pytest.mark.parametrize(
+    ("setting", "value"),
+    [
+        ("claim", f"The reply says {LONE}"),
+        ("rubric", f"count {LONE}"),
+        ("rubric", {"criteria": ["fine", f"half {LONE}"]}),
+        ("rubric", {f"key {LONE}": "value"}),
+        ("url", f"http://judge/{LONE}"),
+        ("token_env", f"TOKEN{LONE}"),
+    ],
+)
+def test_a_check_with_a_lone_surrogate_is_refused_when_parsed_and_its_episode_too(setting, value):
+    spec = {"claim": CLAIM, "url": "http://judge", setting: value}
+    with pytest.raises(ValueError, match=f"reply_judge: {setting} is not UTF-8 text: it has a lone surrogate"):
+        parse_check({"reply_judge": spec})
+    with pytest.raises(ValueError, match="is not UTF-8 text"):
+        Episode(turns=["Pay my bills"], security={"reply_judge": spec})
+
+
+def unparsed(value: dict) -> ReplyJudge:
+    """The check as given, without the parse's checks: as a caller building one by hand would."""
+    return ReplyJudge(claim=value["claim"], rubric=value.get("rubric"), url=value["url"])
+
+
+async def graded_in_process(episode: Episode, reply: str) -> GradeResponse:
+    plane = ControlPlane({}, config=AppConfig(closure_wait_seconds=0))
+    async with open_episode(episode, runtime=UnmanagedRuntime(), control=plane) as ep:
+
+        async def agent(message: str) -> str:
+            return reply
+
+        await ep.turn("Pay my bills", agent)
+    return await InProcessControlClient(plane).grade_evaluation(None, ep.evaluation_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("claim", "rubric", "setting"),
+    [(CLAIM, {"criteria": [f"half {LONE}"]}, "rubric"), (f"{CLAIM} {LONE}", None, "claim")],
+)
+async def test_a_check_built_unparsed_with_a_lone_surrogate_grades_unknown_with_a_record(
+    judge, monkeypatch, claim, rubric, setting
+):
+    from midojo.verifiers import builtin
+
+    monkeypatch.setattr(builtin, "parse_reply_judge", unparsed)
+    episode = Episode(
+        turns=["Pay my bills"],
+        security={"reply_judge": {"claim": claim, "rubric": rubric, "url": judge.url("/supported")}},
+    )
+    grade = await graded_in_process(episode, REPLY)
+
+    assert grade.security is None
+    why = f"the judge request could not be built (the check's {setting} is not UTF-8 text: it has a lone surrogate)"
+    assert grade.security_reason is not None and why in grade.security_reason
+    [record] = grade.judgements
+    assert (record.sent, record.failure) == (False, why)
+    escaped = record.request["rubric"] if setting == "rubric" else record.request["claim"]
+    assert "\\ud800" in json.dumps(escaped) and LONE not in json.dumps(escaped, ensure_ascii=False)
+    json.loads(grade.model_dump_json())  # the grade, reason and record all dump
+    assert judge.requests == []
+
+
+@pytest.mark.asyncio
+async def test_a_reply_with_a_lone_surrogate_is_sent_escaped(judge, monkeypatch):
+    monkeypatch.setenv("TEST_JUDGE_URL", judge.url("/supported"))
+    monkeypatch.setenv("TEST_JUDGE_TOKEN", TOKEN)
+    grade = await graded_in_process(judged_episode(), f"Wire it to 4421 {LONE}")
+
+    assert grade.security is True
+    [received] = judge.requests
+    assert received.body["reply"] == "Wire it to 4421 \\ud800"
+    assert grade.judgements[0].request == received.body
+    json.loads(grade.model_dump_json())
+
+
+def test_turns_and_tool_calls_with_lone_surrogates_are_sent_escaped(judge):
+    turns = [ConversationTurn(f"hi {LONE}", f"hello {LONE}"), ConversationTurn("Pay", f"Wire {LONE}")]
+    calls = [
+        FunctionCallRecord(
+            function="lookup",
+            args={f"key {LONE}": [f"v {LONE}"]},
+            result=f"r {LONE}",
+            error=f"e {LONE}",
+            timestamp="t0",
+        )
+    ]
+    spec = judge_spec(judge.url("/supported"), prior_turns=True, tool_calls=True)
+    result, ctx = assess(spec, context(reply=f"Wire {LONE}", turns=turns, calls=calls))
+
+    assert result.passed is True
+    body = judge.requests[0].body
+    assert (body["message"], body["reply"]) == ("Pay", "Wire \\ud800")
+    assert body["prior_turns"] == [{"message": "hi \\ud800", "reply": "hello \\ud800"}]
+    call_sent = body["tool_calls"][0]
+    assert (call_sent["args"], call_sent["result"], call_sent["error"]) == (
+        {"key \\ud800": ["v \\ud800"]},
+        "r \\ud800",
+        "e \\ud800",
+    )
+    only_record(ctx).model_dump_json()
+
+
+def test_a_rationale_with_a_lone_surrogate_is_kept_escaped(judge):
+    result, ctx = assess(judge_spec(judge.url("/surrogate-rationale")))
+
+    assert result.passed is True
+    record = only_record(ctx)
+    assert record.rationale == "half \\ud800 a pair"
+    record.model_dump_json()
+
+
+# --- equal dicts write alike ---
+
+
+@pytest.mark.parametrize(
+    "items",
+    [
+        [(b"x", 1), ("x", 2)],  # keys that both write as "x"
+        [(LONE, 1), ("\\ud800", 2)],  # text keys that write alike once escaped
+    ],
+)
+def test_equal_dicts_make_the_same_request_whatever_their_insertion_order(judge, items):
+    ids = []
+    for ordered in (items, items[::-1]):
+        _, ctx = assess(
+            judge_spec(judge.url("/supported"), tool_calls=True), context(calls=[call({"m": dict(ordered)})])
+        )
+        ids.append(only_record(ctx).request_id)
+
+    assert ids[0] == ids[1]
+    assert judge.requests[0].body == judge.requests[1].body
