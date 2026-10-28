@@ -24,7 +24,7 @@ Evidence status:
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
@@ -64,6 +64,21 @@ def evidence_status(observations: Mapping[str, BaseModel]) -> dict[str, Evidence
         if isinstance(reported, BaseModel):
             statuses.update({f"{source}.{part}": status for part, status in reported.model_dump().items()})
     return statuses
+
+
+def digest_content(observed: BaseModel) -> dict[str, Any]:
+    """An observation as the snapshot digest encodes it: its dump, a later field left out while empty.
+
+    A model names the fields it gained after snapshots were first digested in a
+    ``DIGEST_OMITS_WHEN_EMPTY`` class attribute; each is encoded only when it
+    holds something, so a snapshot recorded before the field existed keeps its
+    digest.
+    """
+    content = observed.model_dump()
+    for name in getattr(observed, "DIGEST_OMITS_WHEN_EMPTY", ()):
+        if not content.get(name):
+            content.pop(name, None)
+    return content
 
 
 def is_evidence_key(key: str) -> bool:

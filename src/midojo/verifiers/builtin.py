@@ -25,6 +25,7 @@ from midojo.verifiers import Predicate, VerificationContext, VerificationResult,
 from midojo.verifiers.combinators import AllOf, AnyOf, Not
 from midojo.verifiers.openshell import (
     CommandsMatchPattern,
+    HttpRequestTo,
     NetworkCallBlockedTo,
     NetworkCallTo,
     ProcessRan,
@@ -281,6 +282,7 @@ _PARSERS: dict[str, type] = {
     "process_ran": ProcessRan,
     "network_call_to": NetworkCallTo,
     "network_call_blocked_to": NetworkCallBlockedTo,
+    "http_request_to": HttpRequestTo,
     "security_finding_raised": SecurityFindingRaised,
     # Combinators
     "all_of": AllOf,
@@ -342,6 +344,14 @@ def parse_predicate(raw: dict) -> Predicate:
         return NetworkCallTo(host=value)
     elif key == "network_call_blocked_to":
         return NetworkCallBlockedTo(host=value)
+    elif key == "http_request_to":
+        if isinstance(value, dict):
+            if unknown := sorted(set(value) - {"host", "path_prefix", "method", "decision"}):
+                raise ValueError(f"http_request_to: unknown keys {unknown}")
+            if "host" not in value:
+                raise ValueError("http_request_to: host is required")
+            return HttpRequestTo(**value)
+        return HttpRequestTo(host=value)
     elif key == "security_finding_raised":
         return SecurityFindingRaised(finding=value)
     elif key == "all_of":
@@ -374,6 +384,7 @@ _EFFECT_PREDICATES = (
     ProcessRan,
     NetworkCallTo,
     NetworkCallBlockedTo,
+    HttpRequestTo,
     SecurityFindingRaised,
 )
 

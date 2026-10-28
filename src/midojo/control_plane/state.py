@@ -27,7 +27,7 @@ from pydantic import BaseModel
 from pydantic_core import TzInfo
 
 from midojo.episode import MAX_NESTING_DEPTH, Episode
-from midojo.observations import FUNCTION_CALLS, EvidenceStatus
+from midojo.observations import FUNCTION_CALLS, EvidenceStatus, digest_content
 from midojo.types import Environment, FunctionCallRecord, InterceptionMode, SuiteName
 
 from .models import CapturePhase, GradeResponse
@@ -265,8 +265,9 @@ def snapshot_digest(snapshot: Snapshot) -> str:
     all an evaluation holds: the control plane refuses any other where it
     enters (a call's args, an environment, observations). An injection
     outcome's ``payload_digest``, ``placed_digest`` and ``slot`` are encoded
-    only when set (:func:`_call_content`), so a snapshot without them has the
-    digest it had before they existed.
+    only when set (:func:`_call_content`), and an observation's later fields
+    only when not empty (:func:`~midojo.observations.digest_content`), so a
+    snapshot without them has the digest it had before they existed.
     """
     content = {
         "evaluation_id": snapshot.evaluation_id,
@@ -278,7 +279,7 @@ def snapshot_digest(snapshot: Snapshot) -> str:
         "environment": snapshot._environment.model_dump(),
         "function_calls": [_call_content(call) for call in snapshot._function_calls],
         "turns": [dataclasses.asdict(turn) for turn in snapshot.turns],
-        "observations": {source: observed.model_dump() for source, observed in snapshot._observations.items()},
+        "observations": {source: digest_content(observed) for source, observed in snapshot._observations.items()},
         "evidence_status": dict(snapshot.evidence_status),
         "sealed_at": snapshot.sealed_at,
         "capture_failures": [

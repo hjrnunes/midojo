@@ -9,8 +9,9 @@ agent runs, ``observe()`` collects runtime observations from outside the agent:
 
   * **file diff** — files created in the workdir, and seeded files modified or
     deleted, wherever they were seeded.
-  * **OCSF events** — kernel-audited network connections, processes (command
-    line and exit code) and security findings.
+  * **OCSF events** — kernel-audited network connections, HTTP requests the
+    policy proxy inspected (L7), processes (command line and exit code) and
+    security findings.
   * **what ran** — the image reference and a digest of the effective sandbox
     policy (see ``_policy_digest``).
 
@@ -62,7 +63,7 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import asdict
-from typing import Any
+from typing import Any, ClassVar, Literal
 
 import grpc
 from google.protobuf.json_format import MessageToDict, ParseDict
@@ -347,6 +348,25 @@ class ProcessRecord(BaseModel):
     exit_code: int | None = None  # None when no PROC:TERMINATE event was logged
 
 
+class HttpRequestRecord(BaseModel):
+    """An HTTP request OpenShell's policy proxy inspected (L7), from one OCSF ``HTTP:`` line.
+
+    ``url`` is as logged; ``host``, ``port``, ``path`` and ``query`` are derived
+    from it (:func:`midojo.runtimes.openshell.logs.split_url`), each None where
+    the URL has no such part or couldn't be split.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    method: str  # upper-case, e.g. "POST"
+    url: str  # as logged, query string included
+    decision: Literal["allowed", "denied"]  # the proxy's ALLOWED or DENIED
+    host: str | None = None  # lower-case
+    port: int | None = None  # only when the URL names one
+    path: str | None = None  # "/" for a URL with no path
+    query: str | None = None  # without the "?"; None when empty
+
+
 class OpenShellEvidence(BaseModel):
     """How completely each part of the OpenShell evidence was collected.
 
@@ -356,7 +376,7 @@ class OpenShellEvidence(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    ocsf: EvidenceStatus = "complete"  # processes, network calls, findings
+    ocsf: EvidenceStatus = "complete"  # processes, network calls, HTTP requests, findings
     workdir: EvidenceStatus = "complete"  # files created, modified and deleted, and new files' contents
 
 
@@ -368,6 +388,11 @@ class OpenShellObservations(BaseModel):
     """
 
     model_config = ConfigDict(extra="forbid")
+
+    # Fields added after snapshots were first digested: the snapshot digest
+    # leaves each out while it's empty (observations.digest_content), so a
+    # snapshot recorded without one keeps its ID.
+    DIGEST_OMITS_WHEN_EMPTY: ClassVar[tuple[str, ...]] = ("http_requests",)
 
     evidence_status: OpenShellEvidence = Field(default_factory=OpenShellEvidence)
 
@@ -387,6 +412,10 @@ class OpenShellObservations(BaseModel):
     # Sandbox-verified executables that made allowed or blocked network calls
     network_callers: list[str] = Field(default_factory=list)
     security_findings: list[str] = Field(default_factory=list)  # finding titles
+    # HTTP requests the proxy inspected, allowed and denied, in log order. Part of
+    # the ``ocsf`` evidence: none when the log read failed, those read so far when
+    # it's incomplete. Empty in observations recorded before it existed.
+    http_requests: list[HttpRequestRecord] = Field(default_factory=list)
 
     # What ran. Optional so evaluations recorded before these fields still validate.
     image: str | None = None  # the image reference the suite gave
@@ -919,6 +948,18 @@ class OpenShellRuntime:
             network_calls_interrupted=ocsf.network_interrupted_endpoints,
             network_callers=ocsf.network_callers,
             security_findings=[f.title for f in ocsf.findings],
+            http_requests=[
+                HttpRequestRecord(
+                    method=e.method,
+                    url=e.url,
+                    decision="allowed" if e.action == "ALLOWED" else "denied",
+                    host=e.host,
+                    port=e.port,
+                    path=e.path,
+                    query=e.query,
+                )
+                for e in ocsf.http_requests
+            ],
             image=self._image,
             policy_digest=self._policy_digest,
         )

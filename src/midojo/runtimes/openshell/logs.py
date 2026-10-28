@@ -14,6 +14,11 @@ as observed on a live 0.1.2 gateway:
   HTTP (L7-inspected endpoints; no caller):
     HTTP:GET [INFO] ALLOWED GET http://example.com/
 
+  An HTTP line keeps its URL as logged and the parts :func:`split_url` derives
+  from it. A line the pattern doesn't match is skipped, like any other
+  unrecognised line; a URL that can't be split is kept with what could be
+  parsed (no host, port or path when ``urlsplit`` refuses it).
+
   Process (only for the sandbox's main process; commands run through exec emit none):
     PROC:LAUNCH [INFO] python3(42) [cmd:python3 /workspace/exploit.py]
     PROC:TERMINATE [INFO] python3(42) [exit:0]
@@ -26,6 +31,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
 # ---------------------------------------------------------------------------
 # Message patterns (derived from openshell-ocsf/src/format/shorthand.rs)
@@ -93,8 +99,30 @@ class NetworkEvent:
 class HttpEvent:
     action: str  # "ALLOWED" or "DENIED"
     method: str  # "GET", "POST", "PUT", etc.
-    url: str
+    url: str  # as logged, query string included
     raw: str
+    # Derived from ``url`` by split_url; None where it has no such part or couldn't be split
+    host: str | None = None  # lower-case, without brackets for an IPv6 literal
+    port: int | None = None  # only when the URL names one
+    path: str | None = None  # "/" for a URL with no path
+    query: str | None = None  # without the "?"; None when empty
+
+
+def split_url(url: str) -> tuple[str | None, int | None, str | None, str | None]:
+    """The host, port, path and query of a logged URL; never raises.
+
+    A URL ``urlsplit`` refuses (an unclosed IPv6 bracket, say) gives no part at
+    all; a port that isn't a valid number is left out, the other parts kept.
+    """
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return None, None, None, None
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    return parts.hostname or None, port, parts.path or "/", parts.query or None
 
 
 @dataclass
@@ -134,6 +162,7 @@ class OCSFEvents:
     network_interrupted: list[NetworkEvent] = field(default_factory=list)
     http_allowed: list[HttpEvent] = field(default_factory=list)
     http_blocked: list[HttpEvent] = field(default_factory=list)
+    http_requests: list[HttpEvent] = field(default_factory=list)  # allowed and denied, in log order
     processes: list[Process] = field(default_factory=list)  # in launch order
     findings: list[FindingEvent] = field(default_factory=list)
 
@@ -177,7 +206,17 @@ def _parse_message(msg: str) -> NetworkEvent | HttpEvent | ProcessEvent | Findin
     m = _HTTP_PATTERN.search(msg)
     if m:
         _, action, method, url = m.groups()
-        return HttpEvent(action=action.upper(), method=method.upper(), url=url, raw=msg)
+        host, port, path, query = split_url(url)
+        return HttpEvent(
+            action=action.upper(),
+            method=method.upper(),
+            url=url,
+            raw=msg,
+            host=host,
+            port=port,
+            path=path,
+            query=query,
+        )
 
     m = _PROC_LAUNCH_PATTERN.search(msg)
     if m:
@@ -225,6 +264,7 @@ def parse_ocsf_lines(lines: list[str]) -> OCSFEvents:
                 result.network_blocked.append(event)
         elif isinstance(event, HttpEvent):
             (result.http_allowed if event.action == "ALLOWED" else result.http_blocked).append(event)
+            result.http_requests.append(event)
         elif isinstance(event, ProcessEvent):
             if event.event_type == "launch":
                 running[event.pid] = Process(binary=event.binary, pid=event.pid, command=event.command)

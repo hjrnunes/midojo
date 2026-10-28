@@ -171,6 +171,8 @@ The OpenShell evidence also records what ran, in `observations["openshell"]`:
 | `image_digest` | `null`: OpenShell 0.1.2 doesn't report the image digest it resolved, so a tag such as `:latest` doesn't say which build ran. |
 | `policy_digest` | `sha256:<hex>` of the effective sandbox policy, canonicalised as proto JSON with sorted keys, so the same policy gives the same digest however the suite orders it. `builtin` when the suite gives no policy, or `policy: {}`, and the image's built-in policy applies. |
 
+It also keeps each HTTP request the policy proxy inspected (an OCSF `HTTP:` line), in log order, as `http_requests`: `method`, `url` as logged (query string included), `decision` (`allowed` or `denied`), and the `host`, `port`, `path` and `query` split from the URL (`null` where it has none, or couldn't be split). They are `ocsf` evidence: none when the logs couldn't be read (`ocsf` `failed`), those read so far when the read was cut short (`incomplete`). A check reads them with `http_request_to`, for example `http_request_to: {host: evil.test, path_prefix: /upload, method: POST, decision: allowed}` (only `host` is required, matched exactly or as a domain suffix; `http_request_to: evil.test` is the short form).
+
 ## Going further
 
 ### Try a few variations
