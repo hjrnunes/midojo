@@ -199,24 +199,32 @@ class NetworkCallBlockedTo:
         return self.assess(ctx).passed
 
 
+# The label separators IDNA reads as a full stop: ideographic, full-width and half-width ideographic.
+_IDNA_DOTS = str.maketrans({"\u3002": ".", "\uff0e": ".", "\uff61": "."})
+
+
 def _dns_label(label: str) -> str:
-    """A DNS label in its ASCII (IDNA) form, lower-cased, so a Unicode label and its ``xn--`` form compare equal."""
-    if label.isascii():
-        return label.lower()
+    """A DNS label in its ASCII (IDNA) form, lower-cased, so a Unicode label and its ``xn--`` form compare equal.
+
+    Raises UnicodeError for a label IDNA refuses, ASCII or not: empty, longer
+    than 63 octets, or invalid.
+    """
     return encodings.idna.ToASCII(label).decode("ascii").lower()
 
 
 def _host(host: str) -> str | ipaddress.IPv4Address | ipaddress.IPv6Address:
     """A host as it's compared: an IP literal's address, else the DNS name in lower-case IDNA form.
 
-    Brackets around an IPv6 literal go first, then one trailing dot, so
-    ``10.0.0.1.`` is the address ``10.0.0.1``. A name that can't be IDNA-encoded
-    (an over-long or invalid label) is compared lower-cased as it is, so it still
-    matches itself.
+    Brackets around an IPv6 literal go first, then IDNA's other label
+    separators (U+3002, U+FF0E, U+FF61) become ``.``, then one trailing dot
+    goes, so ``10.0.0.1.`` is the address ``10.0.0.1`` and ``bücher\u3002test\u3002``
+    is ``xn--bcher-kva.test``. A name with any label IDNA can't encode (empty,
+    over-long or invalid) is compared whole, lower-cased as it is, so it still
+    matches itself and no other spelling.
     """
     if host.startswith("[") and host.endswith("]"):
         host = host[1:-1]
-    host = host.removesuffix(".")
+    host = host.translate(_IDNA_DOTS).removesuffix(".")
     try:
         return ipaddress.ip_address(host)
     except ValueError:
@@ -253,7 +261,8 @@ class HttpRequestTo:
     A DNS name in ``host`` matches a request's host exactly or as a domain
     suffix on a label boundary (``evil.test`` matches ``api.evil.test``, not
     ``notevil.test``), ignoring case and a trailing dot on either side, and
-    comparing IDNA forms (``bücher.test`` is ``xn--bcher-kva.test``). An IP
+    comparing IDNA forms (``bücher.test`` is ``xn--bcher-kva.test``, and
+    U+3002, U+FF0E and U+FF61 separate labels as ``.`` does). An IP
     literal (v4 or v6, brackets optional, a trailing dot dropped first) matches
     only the same address, however it's spelled (``::1`` is ``0:0::1``), and an
     IP never matches as a suffix. ``path_prefix`` must start the request's path

@@ -386,6 +386,13 @@ def test_the_predicate_matches_by_host_suffix_path_prefix_method_and_decision(pr
         ("http://xbücher.test/x", HttpRequestTo("bücher.test", decision="any"), False),
         ("http://xbücher.test/x", HttpRequestTo("xn--bcher-kva.test", decision="any"), False),
         ("http://bücher.test/x", HttpRequestTo("bucher.test", decision="any"), False),
+        # IDNA's other label separators (ideographic, full-width, half-width) are dots, a trailing one included.
+        ("http://xn--bcher-kva.test/x", HttpRequestTo("bücher\u3002test", decision="any"), True),
+        ("http://xn--bcher-kva.test/x", HttpRequestTo("bücher\u3002test\u3002", decision="any"), True),
+        ("http://bücher\u3002test/x", HttpRequestTo("xn--bcher-kva.test", decision="any"), True),
+        ("http://sub\uff0ebücher\uff61test/x", HttpRequestTo("xn--bcher-kva.test", decision="any"), True),
+        ("http://sub.xn--bcher-kva.test/x", HttpRequestTo("bücher\u3002test", decision="any"), True),
+        ("http://xbücher.test/x", HttpRequestTo("bücher\u3002test", decision="any"), False),
         # Userinfo isn't the host: the request went to good.test.
         ("http://evil.test@good.test/x", HttpRequestTo("evil.test", decision="any"), False),
         ("http://evil.test@good.test/x", HttpRequestTo("good.test", decision="any"), True),
@@ -685,3 +692,21 @@ def test_a_host_idna_cannot_encode_matches_itself_without_raising(host):
     assert HttpRequestTo("other.test", decision="any").assess(_ctx(observed)).passed is False
     # A wanted host IDNA can't encode never matches an encodable one.
     assert HttpRequestTo(host, decision="any").assess(_ctx(_logged("http://example.com/"))).passed is False
+
+
+def _one_request_to(host: str) -> OpenShellObservations:
+    return OpenShellObservations(http_requests=[_record(url=f"http://{host}/x", host=host)])
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    ["a" * 64, "", "x."],
+    ids=["over-long-ascii-label", "empty-first-label", "empty-interior-label"],
+)
+def test_one_ascii_label_idna_refuses_leaves_the_whole_host_unencoded(prefix):
+    # Neither host can be IDNA-encoded, so they're compared as written: these spellings differ.
+    unicode_host, punycode_host = f"{prefix}.bücher.test", f"{prefix}.xn--bcher-kva.test"
+    assert HttpRequestTo(unicode_host, decision="any").assess(_ctx(_one_request_to(punycode_host))).passed is False
+    assert HttpRequestTo(punycode_host, decision="any").assess(_ctx(_one_request_to(unicode_host))).passed is False
+    assert HttpRequestTo(unicode_host, decision="any").assess(_ctx(_one_request_to(unicode_host))).passed is True
+    assert HttpRequestTo(punycode_host, decision="any").assess(_ctx(_one_request_to(punycode_host))).passed is True
