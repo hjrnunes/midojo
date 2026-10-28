@@ -48,6 +48,7 @@ from midojo.episode import Episode
 from midojo.episode_context import EpisodeContext, EpisodeStep, open_episode
 from midojo.runtimes import AgentRuntime, attempt_isolation, is_disposable
 from midojo.runtimes.openshell import SANDBOX_HOST, OpenShellRuntime
+from midojo.suite_tools import host_tools_reference
 from midojo.suites import get_suite, list_suites
 from midojo.tool_endpoint import bare_host, tool_url
 from midojo.yaml_task_suite import YAMLTaskSuite
@@ -69,27 +70,6 @@ def _resolve_system_message(suite_name: str) -> str:
         console.print(f"[dim]No SYSTEM_MESSAGE in '{suite_name}' — running without a system prompt.[/dim]")
         return ""
     return msg
-
-
-def _host_tools_reference(suite_name: str) -> str | None:
-    """The suite's ``HOST_TOOLS`` declaration, ``"module:function"``, or None: checked, but nothing it names imported.
-
-    The suite module declares where its simulated tools are, which run on the
-    host-side interceptor. Reading the declaration imports only the suite
-    module, which ``get_suite`` has already imported, so a run that is refused
-    for it never imports the tools or their dependencies (``midojo-sdk``).
-    """
-    module_path = suite_name if "." in suite_name else f"suites.{suite_name}"
-    try:
-        mod = importlib.import_module(module_path)
-    except ImportError:
-        return None
-    reference = getattr(mod, "HOST_TOOLS", None)
-    if reference is None:
-        return None
-    if not isinstance(reference, str) or reference.count(":") != 1 or not all(reference.split(":")):
-        raise click.UsageError(f"{module_path}.HOST_TOOLS must be a 'module:function' string, got {reference!r}.")
-    return reference
 
 
 def _load_host_tools(reference: str) -> HostTools:
@@ -1236,7 +1216,10 @@ def main(
     # Unmanaged clients keep their own default timeout unless --agent-timeout is given.
     timeout_kwargs = {} if agent_timeout is None else {"timeout": agent_timeout}
     host_mode = interception == "host"
-    host_tools = _host_tools_reference(suite_name)
+    try:
+        host_tools = host_tools_reference(suite_name)
+    except ValueError as error:
+        raise click.UsageError(str(error)) from error
     if host_tools is not None and not host_mode:
         # Its tools live on the host-side interceptor: in agent mode the agent would have none that record. Refused
         # before anything the declaration names is imported.

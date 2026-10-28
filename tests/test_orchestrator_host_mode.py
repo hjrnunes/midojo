@@ -365,12 +365,14 @@ def test_a_suite_without_host_tools_gives_its_interceptors_none(cli_benchmark):
 
 
 @pytest.mark.parametrize("reference", [42, "tests.test_orchestrator_host_mode", ":register", "module:"])
-def test_a_suites_host_tools_declaration_must_be_module_and_function(monkeypatch, reference):
+def test_a_suites_host_tools_declaration_must_be_module_and_function(cli_benchmark, monkeypatch, reference):
     import suites.weather
 
     monkeypatch.setattr(suites.weather, "HOST_TOOLS", reference)
-    with pytest.raises(click.UsageError, match="must be a 'module:function' string"):
-        orchestrator._host_tools_reference("weather")
+    result = CliRunner().invoke(orchestrator.main, WEATHER)
+    assert result.exit_code == 2
+    assert f"suites.weather.HOST_TOOLS must be a 'module:function' string, got {reference!r}." in result.output
+    cli_benchmark.assert_not_called()
 
 
 @pytest.mark.parametrize(

@@ -6,6 +6,7 @@ import asyncio
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
+from types import ModuleType
 from typing import Literal
 
 from midojo_sdk.injection import InjectionPlan
@@ -20,8 +21,8 @@ from midojo.control_plane.service import ControlPlane
 from midojo.episode import Episode
 from midojo.episode_context import EpisodeContext
 from midojo.interception_host import HostInterception
-from midojo.orchestrator import _host_tools_reference
 from midojo.runtimes import AgentRuntime, attempt_isolation
+from midojo.suite_tools import host_tools_reference
 from midojo.yaml_task_suite import YAMLTaskSuite
 
 METADATA_PREFIX = "midojo."
@@ -141,6 +142,7 @@ class MidojoEpisodeTarget(PromptTarget):
         cls,
         *,
         suite: YAMLTaskSuite,
+        suite_module: ModuleType,
         user_task_id: str,
         injection_task_id: str,
         probe_key: str,
@@ -149,10 +151,16 @@ class MidojoEpisodeTarget(PromptTarget):
         interception: HostInterception | None = None,
         control: ControlPlane | None = None,
     ) -> MidojoEpisodeTarget:
-        """Declare a single suite probe (the full ``task:probe`` key)."""
+        """Declare a single suite probe (the full ``task:probe`` key).
+
+        ``suite_module`` is the caller's imported module that owns ``suite``.
+        Its HOST_TOOLS declaration is checked without importing its target;
+        the short suite name is never used to guess a module.
+        """
         permitted = suite.get_probes_for_task(injection_task_id)
         permitted_injections(AttackAttempt({probe_key: ""}), permitted)
-        if interception is None and _host_tools_reference(suite.name) is not None:
+        host_tools = host_tools_reference(suite_module)
+        if interception is None and host_tools is not None:
             raise ValueError("a suite declaring HOST_TOOLS requires host interception")
         surface = suite.episode(user_task_id, injection_task_id, {probe_key: ""}).plan
 

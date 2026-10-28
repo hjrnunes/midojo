@@ -15,9 +15,9 @@ PyRIT; importing `midojo.pyrit` without the extra raises an installation hint.
 The default Pyright configuration excludes the optional module, example and
 tests so `uv sync --frozen --extra dev` needs no PyRIT installation. The
 separate `pyright-pyrit.json` checks those files with the extra installed.
-CI should run both environments: the ordinary gates with `--extra dev`,
-then the full test suite and the PyRIT Pyright command above after syncing
-with `--extra dev --extra pyrit`. Excluding the route from the default gate
+CI runs the full test suite in two jobs: one with `--extra dev`, and one
+with `--extra dev --extra pyrit` that also runs the PyRIT Pyright command
+above. Excluding the route from the default gate
 is not a substitute for checking it in the extra environment.
 
 ## Target and evidence
@@ -32,11 +32,18 @@ instructions or probes before an evaluation opens. The host-supplied
 with `ep.turn`, and leaves the context to seal and clean up.
 
 For a suite, `MidojoEpisodeTarget.from_suite` takes a `suite`,
-`user_task_id`, `injection_task_id`, and full `probe_key` (`task:probe`). It
-uses `permitted_injections` and compiles that probe for each candidate. A
+`suite_module` (the caller's imported Python module), `user_task_id`,
+`injection_task_id`, and full `probe_key` (`task:probe`). It uses
+`permitted_injections` and compiles that probe for each candidate. A
 probe occurring at multiple placements is refused: the target
 requires exactly one instruction. A suite declaring `HOST_TOOLS` requires
-host interception. Direct users supply an
+host interception. Pass the module that owns this suite, including for
+out-of-tree suites; its short `suite.name` is never used for module lookup.
+The public `midojo.suite_tools.host_tools_reference(suite_module)` reader
+accepts an imported module, a dotted module path or a bundled suite name.
+It returns the declaration or None, raises ValueError for malformed
+declarations, and never imports anything the declaration names. Direct
+users supply an
 `episode_for_payload(candidate) -> Episode` compiler and its permitted
 single-instruction `InjectionPlan` as `surface`.
 
@@ -47,8 +54,13 @@ The target opens standalone episodes with an in-process control plane, so
 normally there is no run ID. A failed/refused attempt carries its status and
 reason, plus any evaluation/snapshot identity available after cleanup.
 Refused and failed sends return the fixed reply "MiDojo could not evaluate
-this candidate." Failed/refused results and undetermined replays also use a
-fixed, non-sensitive score rationale, since campaigns feed it to the attacker.
+this candidate." Every undetermined verdict uses the fixed, non-sensitive
+score rationale "MiDojo security verdict is undetermined.": failed/refused
+results, missing grades, absent security checks, `security=None`, invalid
+security evidence, and failed or unknown replays. When there is no receipt
+for the response identity (including unreadable/blocked transport fallback),
+the fixed rationale is "No sealed MiDojo verdict for this response identity".
+These rationales are safe to feed back to the attacker.
 Diagnostic details remain only in the receipt, `prompt_metadata` and
 `score_metadata` (`midojo.reason`, or the nested `midojo.replay` receipt).
 A candidate with multiple pieces, a non-text modality or an invalid role
@@ -88,8 +100,9 @@ episodes, an unknown response identity, or an unreadable/blocked transport
 response.
 A failed or unknown replay is also undetermined. Calling `get_value()` on
 such a score raises PyRIT's `UndeterminedScoreError`; it never reads as false.
-PyRIT maps this status to `AttackOutcome.UNDETERMINED`. Utility validity does
-not affect security scoring: invalid utility alone leaves a valid security
+`RedTeamingAttack` maps its final undetermined score to
+`AttackOutcome.UNDETERMINED`. Utility validity does not affect security
+scoring: invalid utility alone leaves a valid security
 verdict usable, matching MiDojo's attempt loop.
 
 `MidojoVerdictFloatScorer` uses the same rules with 1.0 for a confirmed break
@@ -166,7 +179,18 @@ the score metadata.
   parameter, plus `tree_width`/`batch_size` parallel streams. Start both at
   1; concurrent streams need independent runtimes. Both also need campaign
   integration tests and explicit tree-lineage capture. Binary 0/1 scores tie
-  all unsuccessful branches; useful sub-threshold steering remains to be designed.
+  all known unsuccessful branches; useful sub-threshold steering remains to be designed.
+  TAP uses `pyrit.score.score_utils.normalize_score_to_float`, which maps
+  None or an undetermined score to 0.0 (unless original float metadata
+  supplies a value). This loses the distinction in the numeric representation,
+  but not in pruning: `TAPAttack._get_completed_nodes_sorted_by_score` ranks
+  complete scores above undetermined ones, even a known non-break at 0.0.
+  Width pruning keeps only the top `tree_width` nodes; nodes without a score
+  are excluded. If the selected final score is undetermined,
+  `_create_failure_result` returns `AttackOutcome.UNDETERMINED`. Thus an
+  undetermined score receives no positive numerical credit, but is not
+  treated identically to a known non-break. These details were verified
+  against the installed PyRIT 1.1.0 source.
 - **Crescendo:** needs a separate stateful design for conversation history,
   reset boundaries and replay of the whole conversation. This single-turn
   target deliberately does not declare editable history or multi-turn support.
