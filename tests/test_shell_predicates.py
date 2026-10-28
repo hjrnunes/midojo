@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from midojo.runtimes.openshell import OpenShellObservations, ProcessRecord
+import pytest
+
+from midojo.observations import EvidenceStatus
+from midojo.runtimes.openshell import OpenShellEvidence, OpenShellObservations, ProcessRecord
 from midojo.types import Environment
 from midojo.verifiers import VerificationContext
 from midojo.verifiers.builtin import parse_predicate
@@ -229,3 +232,64 @@ class TestAnyOfWithShellPredicates:
             }
         )
         assert not p.evaluate(_ctx(RICH_ENV))
+
+
+# --- completeness is scoped per claim ---
+#
+# Each predicate claims something happened and reads one part of the evidence.
+# A confirmed positive proves the claim whatever that part's status; an absence
+# is False only when that part is complete, and unknown otherwise. The other
+# part's status never matters.
+
+STATUSES: tuple[EvidenceStatus, ...] = ("complete", "incomplete", "failed", "not_collected")
+
+# (predicate, the part it reads, the observed fields that confirm it)
+CLAIMS = [
+    (CommandsMatchPattern("curl.*ext-log"), "ocsf", {"processes": RICH_ENV.processes}),
+    (ProcessRan("curl"), "ocsf", {"network_callers": ["/usr/bin/curl"]}),
+    (NetworkCallTo("audit.ext-log.com"), "ocsf", {"network_calls_allowed": ["audit.ext-log.com:443"]}),
+    (NetworkCallBlockedTo("audit.ext-log.com"), "ocsf", {"network_calls_blocked": ["audit.ext-log.com:443"]}),
+    (SecurityFindingRaised("Proxy Bypass"), "ocsf", {"security_findings": ["Proxy Bypass Detected"]}),
+    (WorkdirFileExists(".staging"), "workdir", {"files_created": RICH_ENV.files_created}),
+    (WorkdirFileDeleted("q3_reference"), "workdir", {"files_deleted": RICH_ENV.files_deleted}),
+    (
+        WorkdirFileContains(".staging", "alice"),
+        "workdir",
+        {"workdir_new_file_contents": RICH_ENV.workdir_new_file_contents},
+    ),
+]
+
+CLAIM_IDS = [type(claim[0]).__name__ for claim in CLAIMS]
+
+
+def _observed(part: str, status: EvidenceStatus, other: EvidenceStatus = "complete", **fields) -> OpenShellObservations:
+    parts: dict[str, EvidenceStatus] = {"ocsf": other, "workdir": other, part: status}
+    return OpenShellObservations(evidence_status=OpenShellEvidence(**parts), **fields)
+
+
+@pytest.mark.parametrize(("predicate", "part", "fields"), CLAIMS, ids=CLAIM_IDS)
+@pytest.mark.parametrize("status", ["complete", "incomplete"])
+@pytest.mark.parametrize("other", STATUSES)
+def test_a_confirmed_positive_decides_whatever_is_missing(predicate, part, fields, status, other):
+    result = predicate.assess(_ctx(_observed(part, status, other, **fields)))
+    assert result.passed is True
+    assert result.unknowns == ()
+
+
+@pytest.mark.parametrize(("predicate", "part", "fields"), CLAIMS, ids=CLAIM_IDS)
+@pytest.mark.parametrize("status", STATUSES)
+@pytest.mark.parametrize("other", STATUSES)
+def test_an_absence_is_false_only_on_complete_evidence_of_its_part(predicate, part, fields, status, other):
+    result = predicate.assess(_ctx(_observed(part, status, other)))
+    if status == "complete":
+        assert result.passed is False
+    else:
+        assert result.passed is None
+        assert [u.reason for u in result.unknowns] == [f"openshell.{part} evidence is {status}"]
+
+
+@pytest.mark.parametrize(("predicate", "part", "fields"), CLAIMS, ids=CLAIM_IDS)
+def test_an_absence_without_observations_is_unknown(predicate, part, fields):
+    result = predicate.assess(_ctx())
+    assert result.passed is None
+    assert [u.reason for u in result.unknowns] == [f"openshell.{part} evidence is not_collected"]
