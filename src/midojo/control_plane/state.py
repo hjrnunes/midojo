@@ -263,7 +263,10 @@ def snapshot_digest(snapshot: Snapshot) -> str:
     Two snapshots share a digest only when their content is equal. The
     encoding takes only the values :func:`unsupported_value` accepts, which is
     all an evaluation holds: the control plane refuses any other where it
-    enters (a call's args, an environment, observations).
+    enters (a call's args, an environment, observations). An injection
+    outcome's ``payload_digest``, ``placed_digest`` and ``slot`` are encoded
+    only when set (:func:`_call_content`), so a snapshot without them has the
+    digest it had before they existed.
     """
     content = {
         "evaluation_id": snapshot.evaluation_id,
@@ -273,7 +276,7 @@ def snapshot_digest(snapshot: Snapshot) -> str:
         "agent_output": snapshot.agent_output,
         "pre_environment": snapshot._pre_environment.model_dump(),
         "environment": snapshot._environment.model_dump(),
-        "function_calls": [call.model_dump() for call in snapshot._function_calls],
+        "function_calls": [_call_content(call) for call in snapshot._function_calls],
         "turns": [dataclasses.asdict(turn) for turn in snapshot.turns],
         "observations": {source: observed.model_dump() for source, observed in snapshot._observations.items()},
         "evidence_status": dict(snapshot.evidence_status),
@@ -283,6 +286,20 @@ def snapshot_digest(snapshot: Snapshot) -> str:
         ],
     }
     return f"sha256:{hashlib.sha256(_dumps(_canonical(content)).encode()).hexdigest()}"
+
+
+# Fields an injection outcome gained after snapshots were first digested: each is encoded only when set.
+_LATER_OUTCOME_FIELDS = ("payload_digest", "placed_digest", "slot")
+
+
+def _call_content(call: FunctionCallRecord) -> dict[str, Any]:
+    """A call record as the digest encodes it: its dump, an outcome's later fields left out while None."""
+    content = call.model_dump()
+    for outcome in content["injection_outcomes"] or ():
+        for name in _LATER_OUTCOME_FIELDS:
+            if outcome[name] is None:
+                del outcome[name]
+    return content
 
 
 def unsupported_value(value: Any) -> str | None:

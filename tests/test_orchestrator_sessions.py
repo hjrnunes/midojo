@@ -18,9 +18,11 @@ from midojo_sdk.injection import (
     Channel,
     InjectionInstruction,
     InjectionPlan,
+    InjectionSlot,
     InjectionTarget,
     RecordSelector,
     SelectorSurface,
+    payload_digest,
 )
 from midojo_sdk.mcp import MidojoMCP
 from midojo_sdk.recorder import ControlPlaneRejectedError, RejectionKind
@@ -1032,6 +1034,10 @@ async def test_results_report_delivery_facts_exposure_and_a_blocked_attempt(
                 "selected": True,
                 "transformation": "identity",
                 "emitted": ["structured_content", "content_block"],
+                # What the interceptor placed, and where, from the record alone.
+                "payload_digest": payload_digest(NOTE_BODY.payload),
+                "placed_digest": payload_digest(NOTE_BODY.payload),
+                "slot": InjectionSlot.of(NOTE_BODY).to_data(),
             }
         ]
     }

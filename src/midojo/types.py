@@ -1,6 +1,7 @@
 import uuid
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
+from midojo_sdk.injection import InjectionSlot
 from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, StringConstraints, model_validator
 
 # A suite name is also a URL path segment. Dots support external module paths;
@@ -49,6 +50,38 @@ InjectionTransformation = Literal["identity", "json_string"]
 ResultPart = Literal["content_block", "structured_content"]
 
 
+# The outcomes that wrote the payload into the result: the values of ``midojo_sdk.injection.PLACED``. Only these
+# record what was placed and where.
+PLACED_STATUSES: frozenset[InjectionStatus] = frozenset({"applied", "partial", "fallback"})
+
+# A payload digest: ``sha256:`` and the SHA-256 of the text's UTF-8 bytes in lowercase hex.
+PayloadDigest = Annotated[str, StringConstraints(strict=True, pattern=r"^sha256:[0-9a-f]{64}$")]
+
+
+class CallInjectionSlot(BaseModel):
+    """Where an instruction placed its payload on a call: ``midojo_sdk.injection.InjectionSlot.to_data``'s form.
+
+    ``target`` is the instruction's target in the plan codec's form (as
+    ``InjectionPlan.to_data`` gives an instruction's ``target``: record
+    selectors as ``{"field": ..., "equals": ...}``, ``call_arguments`` and
+    ``result_record`` left out when empty), ``mode`` its mode, and ``id``
+    ``sha256:<hex>`` of the target's JSON with sorted keys, compact, UTF-8:
+    one ID per place, whatever the mode. A target in any form the codec
+    decodes is kept as the codec encodes it again; ``id`` may be left out
+    and is then filled in, and one given must be that target's.
+    """
+
+    id: str = Field(description="sha256:<hex> of the target's canonical JSON: the same place has the same ID.")
+    target: dict[str, Any] = Field(description="The instruction's tool-output target, in the plan codec's form.")
+    mode: Literal["append", "replace"]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _canonical(cls, data: Any) -> Any:
+        # The SDK's decoder raises ValueError for any slot it refuses, which pydantic reports as invalid.
+        return InjectionSlot.from_data(data).to_data() if isinstance(data, dict) else data
+
+
 class CallInjectionOutcome(BaseModel):
     """One injection instruction's outcome on a recorded call, as the interceptor reported it in the call's finish.
 
@@ -68,6 +101,14 @@ class CallInjectionOutcome(BaseModel):
     facts, when reported, are empty (``selected`` False, ``transformation``
     None, ``emitted`` empty). An ``unmatched`` outcome may also be counted
     (occurrence 1 or more: a strict selector that didn't match).
+
+    A placement (``applied``, ``partial``, ``fallback``) may also say what it
+    placed and where, so a generated payload is identifiable from the record
+    alone: ``payload_digest``, ``placed_digest`` and ``slot``. Any other
+    outcome, occurrence 0 included, has none of them. Each is None when the
+    layer didn't report it, as in a record made before the fields; a None
+    one is left out of the snapshot digest, so such a record digests as it
+    did before.
     """
 
     instruction_index: int = Field(ge=0, description="The instruction's index in the interceptor's plan.")
@@ -102,15 +143,39 @@ class CallInjectionOutcome(BaseModel):
             "it, checked after every instruction for the call. Empty when none does. None: not reported."
         ),
     )
+    payload_digest: PayloadDigest | None = Field(
+        default=None,
+        description=(
+            "sha256:<hex> of the UTF-8 bytes of the instruction's payload, before its transformation. Only for a "
+            "placement (applied, partial, fallback); None otherwise or when not reported."
+        ),
+    )
+    placed_digest: PayloadDigest | None = Field(
+        default=None,
+        description=(
+            "sha256:<hex> of the UTF-8 bytes of the transformed payload the instruction wrote into the result (equal "
+            "to `payload_digest` for the identity transformation; the text a JSON mirror re-serialised around it "
+            "isn't digested). Only for a placement; None otherwise or when not reported."
+        ),
+    )
+    slot: CallInjectionSlot | None = Field(
+        default=None,
+        description=(
+            "Where the instruction placed the payload: its target and mode as planned (a fallback wrote a new text "
+            "block instead, as `detail` says). Only for a placement; None otherwise or when not reported."
+        ),
+    )
 
     @model_validator(mode="after")
     def _uncounted_only_when_unmatched(self) -> "CallInjectionOutcome":
-        if self.occurrence != 0:
-            return self
-        if self.status != "unmatched":
-            raise ValueError(f"Only an unmatched outcome has occurrence 0, not a {self.status} one.")
-        if self.selected or self.transformation is not None or self.emitted:
-            raise ValueError("An outcome at occurrence 0 placed nothing: its delivery facts must be empty.")
+        placed = (self.payload_digest, self.placed_digest, self.slot) != (None, None, None)
+        if self.occurrence == 0:
+            if self.status != "unmatched":
+                raise ValueError(f"Only an unmatched outcome has occurrence 0, not a {self.status} one.")
+            if self.selected or self.transformation is not None or self.emitted or placed:
+                raise ValueError("An outcome at occurrence 0 placed nothing: its delivery facts must be empty.")
+        if placed and self.status not in PLACED_STATUSES:
+            raise ValueError(f"A {self.status} outcome placed nothing: it has no payload digest or slot.")
         return self
 
 

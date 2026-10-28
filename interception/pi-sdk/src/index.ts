@@ -96,6 +96,29 @@ export type Transformation = "identity" | "json_string";
 /** A part of the result returned to the agent: its text (content) blocks or its structured content. */
 export type ResultPart = "content_block" | "structured_content";
 
+/** How an instruction writes its payload: the values of the Python SDK's `InjectionMode`. */
+export type InjectionMode = "append" | "replace";
+
+/** The outcomes that wrote the payload into the result: only these say what was placed and where. */
+const PLACED: ReadonlySet<OutcomeStatus> = new Set<OutcomeStatus>(["applied", "partial", "fallback"]);
+
+/** A payload digest: `sha256:` and the SHA-256 of the text's UTF-8 bytes in lowercase hex. */
+const DIGEST = /^sha256:[0-9a-f]{64}$/;
+
+/**
+ * Where an instruction placed its payload: the Python SDK's
+ * `InjectionSlot.to_data()`, sent as given. `target` is the instruction's
+ * tool-output target in the plan codec's form (`InjectionPlan.to_data`'s
+ * instruction `target`), `mode` its mode, and `id` `sha256:<hex>` of the
+ * target's JSON with sorted keys, compact, UTF-8; left out, the control plane
+ * fills it in, and one given must be the target's.
+ */
+export interface InjectionSlot {
+	id?: string;
+	target: Record<string, unknown>;
+	mode: InjectionMode;
+}
+
 /**
  * How one injection instruction fared on a call, as the call's detailed finish
  * carries it (the Python SDK's `InjectionRecord`). `instructionIndex` names the
@@ -113,6 +136,12 @@ export type ResultPart = "content_block" | "structured_content";
  * that carry the transformed payload (empty when none does). A layer that
  * doesn't report them leaves them out, and they're sent only when given. They
  * never say what the agent saw: a result is recorded before it is returned.
+ *
+ * A placement (`applied`, `partial`, `fallback`) may also say what it placed and
+ * where, sent only when given: `payloadDigest`, `sha256:<hex>` of the UTF-8
+ * bytes of the instruction's payload before its transformation;
+ * `placedDigest`, the same of the transformed text it wrote; and `slot`, the
+ * instruction's target and mode (`InjectionSlot`). Any other record has none.
  */
 export interface InjectionRecord {
 	instructionIndex: number;
@@ -123,6 +152,9 @@ export interface InjectionRecord {
 	selected?: boolean;
 	transformation?: Transformation | null;
 	emitted?: ResultPart[];
+	payloadDigest?: string;
+	placedDigest?: string;
+	slot?: InjectionSlot;
 }
 
 /**
@@ -181,19 +213,31 @@ export function recordsDetails(recorder: unknown): recorder is DetailedRecorder 
 /**
  * Throw a `RangeError` for an injection record the control plane would refuse
  * at occurrence 0: one that isn't `unmatched`, or that reports a delivery fact
- * (`selected` true, a `transformation`, a non-empty `emitted`). Unreported facts
- * are allowed, and so is `unmatched` at occurrence 1 or more (a strict selector
- * that didn't match a counted call).
+ * (`selected` true, a `transformation`, a non-empty `emitted`) or a placement
+ * (a digest or a slot). Unreported facts are allowed, and so is `unmatched` at
+ * occurrence 1 or more (a strict selector that didn't match a counted call).
+ * It also throws for a digest or slot on any record but a placement, and for
+ * a digest not in the `sha256:<hex>` form.
  */
 export function checkInjectionRecord(record: InjectionRecord): void {
+	const placement = record.payloadDigest !== undefined || record.placedDigest !== undefined || record.slot !== undefined;
 	if (
 		record.occurrence === 0 &&
 		(record.status !== "unmatched" ||
 			record.selected === true ||
 			(record.transformation !== undefined && record.transformation !== null) ||
-			(record.emitted !== undefined && record.emitted.length > 0))
+			(record.emitted !== undefined && record.emitted.length > 0) ||
+			placement)
 	) {
 		throw new RangeError("only an unmatched outcome that placed nothing has occurrence 0");
+	}
+	if (placement && !PLACED.has(record.status)) {
+		throw new RangeError(`a ${record.status} outcome placed nothing: it has no payload digest or slot`);
+	}
+	for (const digest of [record.payloadDigest, record.placedDigest]) {
+		if (digest !== undefined && !DIGEST.test(digest)) {
+			throw new RangeError(`a payload digest is 'sha256:' and 64 lowercase hex digits, not ${JSON.stringify(digest)}`);
+		}
 	}
 }
 
@@ -708,7 +752,7 @@ function finishBody(call: CallFinish): Record<string, unknown> {
 	return { ...startBody(call), result: call.result, error: call.error ?? null, blocked: REFUSED.has(call.disposition) };
 }
 
-/** An injection record as the control plane takes it: unreported delivery facts are left out. */
+/** An injection record as the control plane takes it: unreported delivery facts and placements are left out. */
 function injectionRecordBody(record: InjectionRecord): Record<string, unknown> {
 	const body: Record<string, unknown> = {
 		instruction_index: record.instructionIndex,
@@ -720,6 +764,9 @@ function injectionRecordBody(record: InjectionRecord): Record<string, unknown> {
 	if (record.selected !== undefined) body.selected = record.selected;
 	if (record.transformation !== undefined) body.transformation = record.transformation;
 	if (record.emitted !== undefined) body.emitted = record.emitted;
+	if (record.payloadDigest !== undefined) body.payload_digest = record.payloadDigest;
+	if (record.placedDigest !== undefined) body.placed_digest = record.placedDigest;
+	if (record.slot !== undefined) body.slot = record.slot;
 	return body;
 }
 

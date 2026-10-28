@@ -35,6 +35,7 @@ from pydantic import PrivateAttr
 from midojo_sdk.client import AgentControlPlaneClient, transient
 from midojo_sdk.context import ToolContext
 from midojo_sdk.injection import (
+    PLACED,
     CapabilityError,
     CapabilityGap,
     Channel,
@@ -42,6 +43,7 @@ from midojo_sdk.injection import (
     InjectionMode,
     InjectionOutcome,
     InjectionPlan,
+    InjectionSlot,
     InterceptorCapability,
     MismatchPolicy,
     OutcomeStatus,
@@ -49,6 +51,7 @@ from midojo_sdk.injection import (
     SelectorSurface,
     Transformation,
     capability_gaps,
+    payload_digest,
 )
 from midojo_sdk.recorder import (
     Disposition,
@@ -732,6 +735,7 @@ class MidojoMCP:
                 selected=placement.status in _SELECTED,
                 transformation=instruction.transformation,
                 emitted=_emitted(result, keys, fields, placement, written, field_written),
+                **(_placed(instruction, placement) if placement.status in PLACED else {}),
             )
             self._outcomes.append(outcome)
             outcomes.append(outcome)
@@ -1227,10 +1231,24 @@ def _emitted(
     return tuple(carried)
 
 
+def _placed(instruction: InjectionInstruction, placement: _Placement) -> dict[str, Any]:
+    """What a placement wrote and where: the digests of the payload and of its transformed text, and its slot."""
+    return {
+        "payload_digest": payload_digest(instruction.payload),
+        "placed_digest": payload_digest(placement.payload),
+        "slot": InjectionSlot.of(instruction),
+    }
+
+
 def _records(outcomes: Sequence[InjectionOutcome]) -> list[InjectionRecord]:
-    """A call's outcomes as its finish carries them: no scope, call ID or admission order."""
-    return [
-        {
+    """A call's outcomes as its finish carries them: no scope, call ID or admission order.
+
+    What was placed and where is sent only for a placement, so any other
+    outcome's record is as it was before those fields.
+    """
+    records: list[InjectionRecord] = []
+    for outcome in outcomes:
+        record: InjectionRecord = {
             "instruction_index": outcome.instruction_index,
             "probe_key": outcome.probe_key,
             "occurrence": outcome.occurrence,
@@ -1240,8 +1258,14 @@ def _records(outcomes: Sequence[InjectionOutcome]) -> list[InjectionRecord]:
             "transformation": outcome.transformation.value if outcome.transformation is not None else None,
             "emitted": [surface.value for surface in outcome.emitted],
         }
-        for outcome in outcomes
-    ]
+        if outcome.payload_digest is not None:
+            record["payload_digest"] = outcome.payload_digest
+        if outcome.placed_digest is not None:
+            record["placed_digest"] = outcome.placed_digest
+        if outcome.slot is not None:
+            record["slot"] = outcome.slot.to_data()
+        records.append(record)
+    return records
 
 
 def _outcome(
@@ -1258,6 +1282,9 @@ def _outcome(
     selected: bool = False,
     transformation: Transformation | None = None,
     emitted: tuple[SelectorSurface, ...] = (),
+    payload_digest: str | None = None,
+    placed_digest: str | None = None,
+    slot: InjectionSlot | None = None,
 ) -> InjectionOutcome:
     return InjectionOutcome(
         instruction_index=index,
@@ -1272,4 +1299,7 @@ def _outcome(
         selected=selected,
         transformation=transformation,
         emitted=emitted,
+        payload_digest=payload_digest,
+        placed_digest=placed_digest,
+        slot=slot,
     )

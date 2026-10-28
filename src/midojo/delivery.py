@@ -41,6 +41,7 @@ from pydantic import BaseModel
 from midojo.observations import FUNCTION_CALLS, EvidenceStatus
 from midojo.types import (
     CallDisposition,
+    CallInjectionSlot,
     FunctionCallRecord,
     InjectionStatus,
     InjectionTransformation,
@@ -75,7 +76,9 @@ class DeliveryFact(BaseModel):
     index in the episode's plan, the index :class:`InstructionExposure` uses,
     or None when no tool-output instruction of the plan has that place and
     probe key and targets the call's tool (or any tool). ``selected``, ``transformation`` and ``emitted`` are None when
-    the interceptor didn't report them.
+    the interceptor didn't report them. ``payload_digest``, ``placed_digest`` and ``slot`` say what a placement
+    (``applied``, ``partial``, ``fallback``) placed and where (see `midojo.types.CallInjectionOutcome`): None for any other
+    outcome, or when the interceptor didn't report them.
     """
 
     call_id: str
@@ -90,6 +93,9 @@ class DeliveryFact(BaseModel):
     selected: bool | None
     transformation: InjectionTransformation | None
     emitted: list[ResultPart] | None
+    payload_digest: str | None = None
+    placed_digest: str | None = None
+    slot: CallInjectionSlot | None = None
 
 
 def delivery_facts(plan: InjectionPlan, function_calls: Iterable[FunctionCallRecord]) -> list[DeliveryFact]:
@@ -119,6 +125,9 @@ def delivery_facts(plan: InjectionPlan, function_calls: Iterable[FunctionCallRec
             selected=outcome.selected,
             transformation=outcome.transformation,
             emitted=None if outcome.emitted is None else list(outcome.emitted),
+            payload_digest=outcome.payload_digest,
+            placed_digest=outcome.placed_digest,
+            slot=outcome.slot,
         )
         for call in function_calls
         for outcome in call.injection_outcomes or ()

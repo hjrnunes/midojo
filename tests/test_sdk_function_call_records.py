@@ -8,7 +8,16 @@ import pytest
 from midojo_sdk import client as sdk_client
 from midojo_sdk import recorder as sdk_recorder
 from midojo_sdk.client import RECORD_ATTEMPTS, AgentControlPlaneClient, CallIds, InvalidHTTPRequestError, transient
-from midojo_sdk.injection import OutcomeStatus, Transformation
+from midojo_sdk.injection import (
+    InjectionMode,
+    InjectionSlot,
+    InjectionTarget,
+    OutcomeStatus,
+    RecordSelector,
+    SelectorSurface,
+    Transformation,
+    payload_digest,
+)
 from midojo_sdk.recorder import (
     ControlPlaneRecorder,
     ControlPlaneRejectedError,
@@ -311,6 +320,23 @@ def new_evaluation(client) -> tuple[str, str, str]:
     return run["id"], evaluation["id"], evaluation["session_token"]
 
 
+# What an outcome placed and where: a JSON-string transformed payload in a record's field, selected by id.
+SLOT = InjectionSlot(
+    InjectionTarget(
+        tool="get_weather",
+        surface=SelectorSurface.STRUCTURED_CONTENT,
+        structured_content_path=("notes", RecordSelector("NOTE-1"), "body"),
+        call_arguments={"city": "Boston"},
+    ),
+    InjectionMode.REPLACE,
+).to_data()
+PAYLOAD_DIGEST = payload_digest("IGNORE")
+PLACED_DIGEST = payload_digest(json.dumps("IGNORE"))
+PLACED: dict[str, typing.Any] = {"payload_digest": PAYLOAD_DIGEST, "placed_digest": PLACED_DIGEST, "slot": SLOT}
+# How a record without them reads back: not reported.
+UNPLACED = {"payload_digest": None, "placed_digest": None, "slot": None}
+
+
 class Counting:
     """Passes each start and finish to ``recorder``, counting them."""
 
@@ -381,8 +407,11 @@ async def test_both_implementations_record_the_same_call(client, backend):
         "status": "partial",
         "detail": "d",
         "selected": True,
-        "transformation": "identity",
+        "transformation": "json_string",
         "emitted": ["structured_content"],
+        "payload_digest": PAYLOAD_DIGEST,
+        "placed_digest": PLACED_DIGEST,
+        "slot": SLOT,
     }
     await agent.finish_call_detailed(
         call_id="c1",
@@ -457,7 +486,9 @@ async def test_an_outcome_without_delivery_facts_leaves_them_unreported(client, 
 
     [call] = client.get(f"/runs/{run_id}/evaluations/{eval_id}/function-calls").json()
     # A layer that reports an outcome but not what it selected, transformed or emitted: None, not False or empty.
-    assert call["injection_outcomes"] == [outcome | {"selected": None, "transformation": None, "emitted": None}]
+    assert call["injection_outcomes"] == [
+        outcome | {"selected": None, "transformation": None, "emitted": None} | UNPLACED
+    ]
 
 
 def test_a_recorded_transformation_is_an_sdk_transformation():
@@ -479,8 +510,11 @@ async def test_a_finish_replays_only_with_the_same_structured_content_and_outcom
         "status": "applied",
         "detail": "d",
         "selected": True,
-        "transformation": "identity",
+        "transformation": "json_string",
         "emitted": ["content_block"],
+        "payload_digest": PAYLOAD_DIGEST,
+        "placed_digest": PLACED_DIGEST,
+        "slot": SLOT,
     }
     finish = {
         "call_id": "c1",
@@ -498,6 +532,10 @@ async def test_a_finish_replays_only_with_the_same_structured_content_and_outcom
         {"structured_content": {"n": True}},
         {"injection_outcomes": [outcome | {"status": "partial"}]},
         {"injection_outcomes": [outcome | {"emitted": []}]},
+        {"injection_outcomes": [outcome | {"payload_digest": payload_digest("other")}]},
+        {"injection_outcomes": [outcome | {"placed_digest": PLACED["payload_digest"]}]},
+        {"injection_outcomes": [outcome | {"slot": SLOT | {"mode": "append"}}]},
+        {"injection_outcomes": [{k: v for k, v in outcome.items() if k != "slot"}]},
     ):
         with pytest.raises(ControlPlaneRejectedError) as refused:
             await agent.finish_call_detailed(**(finish | changed))
@@ -547,8 +585,21 @@ def _uncounted(**changes: typing.Any) -> InjectionRecord:
         {"selected": True},
         {"transformation": "identity"},
         {"emitted": ["structured_content"]},
+        {"payload_digest": PLACED["payload_digest"]},
+        {"placed_digest": PLACED["placed_digest"]},
+        {"slot": SLOT},
     ],
-    ids=["applied", "skipped", "no-result", "unmatched-selected", "unmatched-transformed", "unmatched-emitted"],
+    ids=[
+        "applied",
+        "skipped",
+        "no-result",
+        "unmatched-selected",
+        "unmatched-transformed",
+        "unmatched-emitted",
+        "unmatched-payload-digest",
+        "unmatched-placed-digest",
+        "unmatched-slot",
+    ],
 )
 async def test_a_finish_with_an_outcome_at_occurrence_0_other_than_an_empty_unmatched_is_invalid(
     client, backend, changed
@@ -570,6 +621,80 @@ async def test_a_finish_with_an_outcome_at_occurrence_0_other_than_an_empty_unma
         assert isinstance(refused.value, InvalidHTTPRequestError)
         assert refused.value.response.status_code == 422
     assert client.get(f"/runs/{run_id}/evaluations/{eval_id}/function-calls").json() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["unmatched", "too_large", "no_result", "skipped_occurrence"])
+@pytest.mark.parametrize("placed", ["payload_digest", "placed_digest", "slot"])
+async def test_only_a_placement_says_what_it_placed_and_where(client, backend, status, placed):
+    run_id, eval_id, token = new_evaluation(client)
+    with pytest.raises(InvalidRequestError):
+        await backend.agent(token).finish_call_detailed(
+            call_id="c1",
+            function="f",
+            args={},
+            result="r",
+            disposition="forwarded",
+            structured_content=None,
+            injection_outcomes=[_uncounted(occurrence=1, status=status, **{placed: PLACED[placed]})],
+        )
+    assert client.get(f"/runs/{run_id}/evaluations/{eval_id}/function-calls").json() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "changed",
+    [
+        {"payload_digest": "sha256:" + "A" * 64},
+        {"placed_digest": PLACED["placed_digest"].removeprefix("sha256:")},
+        {"slot": SLOT | {"id": PLACED["payload_digest"]}},
+        {"slot": SLOT | {"target": {"surface": "template", "template_key": "k"}}},
+        {"slot": {"target": SLOT["target"]}},
+    ],
+    ids=["uppercase-digest", "bare-hex-digest", "another-slot-id", "not-a-tool-output-slot", "slot-without-mode"],
+)
+async def test_a_malformed_digest_or_slot_is_invalid(client, backend, changed):
+    _, _, token = new_evaluation(client)
+    outcome = _uncounted(occurrence=1, status="applied") | changed
+    with pytest.raises(InvalidRequestError):
+        await backend.agent(token).finish_call_detailed(
+            call_id="c1",
+            function="f",
+            args={},
+            result="r",
+            disposition="forwarded",
+            structured_content=None,
+            injection_outcomes=[typing.cast(InjectionRecord, outcome)],
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_slot_is_kept_in_the_plan_codec_s_form_with_its_id(client, backend):
+    run_id, eval_id, token = new_evaluation(client)
+    # A target with its defaults left out and a record selector without its field: the codec's form is kept.
+    sparse = {
+        "target": {
+            "tool": "get_weather",
+            "surface": "structured_content",
+            "structured_content_path": ["notes", {"equals": "NOTE-1"}, "body"],
+            "call_arguments": {"city": "Boston"},
+        },
+        "mode": "replace",
+    }
+    outcome = _uncounted(occurrence=1, status="fallback", slot=sparse)
+    await backend.agent(token).finish_call_detailed(
+        call_id="c1",
+        function="f",
+        args={},
+        result="r",
+        disposition="forwarded",
+        structured_content=None,
+        injection_outcomes=[typing.cast(InjectionRecord, outcome)],
+    )
+
+    [call] = client.get(f"/runs/{run_id}/evaluations/{eval_id}/function-calls").json()
+    assert call["injection_outcomes"][0]["slot"] == SLOT
+    assert SLOT["id"].startswith("sha256:") and len(SLOT["id"]) == len("sha256:") + 64
 
 
 @pytest.mark.asyncio
@@ -595,7 +720,7 @@ async def test_occurrence_0_takes_an_unmatched_outcome_and_any_status_is_counted
 
     [call] = client.get(f"/runs/{run_id}/evaluations/{eval_id}/function-calls").json()
     unreported = {"selected": None, "transformation": None, "emitted": None}
-    assert call["injection_outcomes"] == [UNCOUNTED | unreported, *outcomes[1:]]
+    assert call["injection_outcomes"] == [UNCOUNTED | unreported | UNPLACED, *(o | UNPLACED for o in outcomes[1:])]
 
 
 class Refusing:

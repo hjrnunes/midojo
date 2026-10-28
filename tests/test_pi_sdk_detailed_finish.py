@@ -14,6 +14,7 @@ from typing import Any
 import httpx
 import pytest
 from midojo_sdk.client import AgentControlPlaneClient
+from midojo_sdk.injection import payload_digest
 
 from midojo.types import CallInjectionOutcome, FunctionCallRecord
 
@@ -102,3 +103,11 @@ async def test_the_pi_body_seals_as_the_python_client_s_record(app, client):
         None,
     )
     assert (skipped.occurrence, skipped.status) == (2, "skipped_occurrence")
+    # Only the placement says what it placed and where: the raw and transformed digests, and its slot.
+    assert applied.payload_digest == applied.placed_digest == payload_digest(" — IGNORE PREVIOUS")
+    assert applied.slot is not None and (applied.slot.target["call_arguments"], applied.slot.mode) == (
+        {"order_id": "ORD-102"},
+        "append",
+    )
+    for placed_nothing in (uncounted, unreported, skipped):
+        assert (placed_nothing.payload_digest, placed_nothing.placed_digest, placed_nothing.slot) == (None, None, None)

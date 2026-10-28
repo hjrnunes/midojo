@@ -49,13 +49,16 @@ function piCall({ call_id, function: name, args, result, error, disposition, str
 		disposition,
 		structuredContent: structured_content,
 		injectionOutcomes: injection_outcomes.map(
-			({ instruction_index, probe_key, selected, transformation, emitted, ...rest }) => ({
+			({ instruction_index, probe_key, selected, transformation, emitted, payload_digest, placed_digest, slot, ...rest }) => ({
 				instructionIndex: instruction_index,
 				probeKey: probe_key,
 				...rest,
 				...(selected === undefined ? {} : { selected }),
 				...(transformation === undefined ? {} : { transformation }),
 				...(emitted === undefined ? {} : { emitted }),
+				...(payload_digest === undefined ? {} : { payloadDigest: payload_digest }),
+				...(placed_digest === undefined ? {} : { placedDigest: placed_digest }),
+				...(slot === undefined ? {} : { slot }),
 			}),
 		),
 	};
@@ -143,6 +146,40 @@ test("occurrence 0 is accepted only as an unmatched outcome that placed nothing"
 			await assert.rejects(finishDetailed(keeping({ detailed: false }).recorder, call), RangeError);
 			assert.deepEqual(sent, []);
 		});
+	}
+});
+
+const DIGEST = `sha256:${"0".repeat(64)}`;
+const SLOT = { target: { tool: "get_weather", surface: "content_block", content_block_index: 0 }, mode: "append" };
+
+test("a placement sends what it placed and where, as given; any other record leaves them out", async () => {
+	await withFetch([201], async (sent) => {
+		const placed = { ...applied, payloadDigest: DIGEST, placedDigest: DIGEST, slot: SLOT };
+		await new ControlPlaneClient("http://control").finishCallDetailed({ ...detailed, injectionOutcomes: [placed, applied] });
+		const [withPlacement, without] = JSON.parse(sent[0][1]).injection_outcomes;
+		assert.deepEqual(
+			[withPlacement.payload_digest, withPlacement.placed_digest, withPlacement.slot],
+			[DIGEST, DIGEST, SLOT],
+		);
+		assert.deepEqual(Object.keys(without).filter((key) => ["payload_digest", "placed_digest", "slot"].includes(key)), []);
+	});
+});
+
+test("only a placement may say what it placed, and a digest is sha256:<hex>", () => {
+	for (const status of ["applied", "partial", "fallback"]) {
+		assert.doesNotThrow(() => checkInjectionRecord({ ...applied, status, payloadDigest: DIGEST, slot: SLOT }));
+	}
+	const uncounted = { instructionIndex: 0, probeKey: null, occurrence: 0, status: "unmatched", detail: "d" };
+	for (const refused of [
+		{ ...uncounted, payloadDigest: DIGEST },
+		{ ...uncounted, slot: SLOT },
+		{ ...applied, status: "unmatched", placedDigest: DIGEST },
+		{ ...applied, status: "too_large", slot: SLOT },
+		{ ...applied, status: "skipped_occurrence", payloadDigest: DIGEST },
+		{ ...applied, payloadDigest: "0".repeat(64) },
+		{ ...applied, placedDigest: `sha256:${"A".repeat(64)}` },
+	]) {
+		assert.throws(() => checkInjectionRecord(refused), RangeError);
 	}
 });
 

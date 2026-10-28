@@ -20,6 +20,7 @@ from midojo_sdk.injection import (
     InjectionMode,
     InjectionOutcome,
     InjectionPlan,
+    InjectionSlot,
     InjectionTarget,
     MismatchPolicy,
     Occurrence,
@@ -31,6 +32,7 @@ from midojo_sdk.injection import (
     capability_gaps,
     instruction_from_generator,
     instruction_from_generator_for_plan,
+    payload_digest,
 )
 from midojo_sdk.mcp import MIDOJO_MCP_CAPABILITY, MidojoMCP, ToolContext
 from midojo_sdk.recorder import Disposition, InjectionRecord
@@ -72,6 +74,12 @@ def _instruction(**changes: Any) -> InjectionInstruction:
         "target": InjectionTarget(content_block_index=0, content_block_type="text"),
     }
     return InjectionInstruction(**(fields | changes))
+
+
+def _placed(instruction: InjectionInstruction) -> dict[str, Any]:
+    """What an identity placement of ``instruction`` records it placed, and where."""
+    digest = payload_digest(instruction.payload)
+    return {"payload_digest": digest, "placed_digest": digest, "slot": InjectionSlot.of(instruction).to_data()}
 
 
 class ConcurrentUpstream:
@@ -825,8 +833,9 @@ def _text_result(*texts: str, structured: Any = None, is_error: bool = False) ->
 )
 async def test_a_mirrored_text_block_is_re_serialised_in_its_own_style(style, mode, body):
     text = json.dumps(NOTES, **style)
+    instruction = _structured_instruction(mode=mode)
 
-    result, mcp, recorder = await _forward(_text_result(text, structured=NOTES), _structured_instruction(mode=mode))
+    result, mcp, recorder = await _forward(_text_result(text, structured=NOTES), instruction)
 
     expected = _noted(body)
     assert result.structuredContent == expected
@@ -846,6 +855,7 @@ async def test_a_mirrored_text_block_is_re_serialised_in_its_own_style(style, mo
             "selected": True,
             "transformation": "identity",
             "emitted": ["structured_content", "content_block"],
+            **_placed(instruction),
         }
     ]
 
@@ -1181,6 +1191,7 @@ async def test_only_the_call_with_matching_arguments_is_changed_and_the_others_s
                 "selected": selected,
                 "transformation": transformation,
                 "emitted": emitted,
+                **(_placed(instruction) if selected else {}),
             }
         ]
         for o, (selected, transformation, emitted) in zip(mcp.injection_outcomes, facts, strict=True)

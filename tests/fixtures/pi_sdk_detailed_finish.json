@@ -16,7 +16,14 @@
         "detail": "exact selector matched; mirrored text re-serialised",
         "selected": true,
         "transformation": "identity",
-        "emitted": ["structured_content", "content_block"]
+        "emitted": ["structured_content", "content_block"],
+        "payload_digest": "sha256:ac5e5b44eb4e32b2c7f1bf4dbe46e2a7d6a20a536187c290048d21224de1a7b4",
+        "placed_digest": "sha256:ac5e5b44eb4e32b2c7f1bf4dbe46e2a7d6a20a536187c290048d21224de1a7b4",
+        "slot": {
+          "id": "sha256:4ac2ce95a4bd8d67d920e75430915dc0329c4b005cbc368dd55c94212026ea6d",
+          "target": {"tool": "lookup_order", "surface": "structured_content", "content_block_index": null, "content_block_type": null, "structured_content_path": ["item"], "template_path": [], "template_key": null, "call_arguments": {"order_id": "ORD-102"}},
+          "mode": "append"
+        }
       },
       {
         "instruction_index": 1,
@@ -68,7 +75,14 @@
           "detail": "exact selector matched; mirrored text re-serialised",
           "selected": true,
           "transformation": "identity",
-          "emitted": ["structured_content", "content_block"]
+          "emitted": ["structured_content", "content_block"],
+          "payload_digest": "sha256:ac5e5b44eb4e32b2c7f1bf4dbe46e2a7d6a20a536187c290048d21224de1a7b4",
+          "placed_digest": "sha256:ac5e5b44eb4e32b2c7f1bf4dbe46e2a7d6a20a536187c290048d21224de1a7b4",
+          "slot": {
+            "id": "sha256:4ac2ce95a4bd8d67d920e75430915dc0329c4b005cbc368dd55c94212026ea6d",
+            "target": {"tool": "lookup_order", "surface": "structured_content", "content_block_index": null, "content_block_type": null, "structured_content_path": ["item"], "template_path": [], "template_key": null, "call_arguments": {"order_id": "ORD-102"}},
+            "mode": "append"
+          }
         },
         {
           "instruction_index": 1,
