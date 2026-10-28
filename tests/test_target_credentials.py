@@ -406,6 +406,47 @@ async def test_a_control_plane_served_without_a_control_token_opens_no_host_mode
     )
 
 
+def _store_contents(store: InMemoryStore) -> dict:
+    """Everything the store holds: runs, evaluations, evaluation IDs, sessions and kept creations."""
+    return {
+        "runs": dict(store._runs),
+        "evaluations": {run_id: dict(held) for run_id, held in store._evaluations.items()},
+        "evaluation_ids": set(store._evaluation_ids),
+        "sessions": dict(store._sessions),
+        "creations": dict(store._creations),
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("over_http", [True, False])
+async def test_a_refused_host_mode_creation_in_a_run_leaves_the_tokenless_served_store_as_it_was(suite, over_http):
+    store = InMemoryStore()
+    app = create_app({"weather": suite}, store=store)
+    control = app.state.control
+    run = control.create_run("weather")
+    # An agent-mode evaluation already in the run, kept under a key of its own, which the refusal must not touch.
+    existing = control.create_evaluation(run.id, "weather_new_york", idempotency_key="before")
+    before = _store_contents(store)
+    for keyed in ({}, {"idempotency_key": "k1"}, {"idempotency_key": "before"}):
+        if over_http:
+            body = {"user_task_id": "weather_new_york", "interception": "host", **keyed}
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url=CONTROL_URL) as http:
+                refused = await http.post(f"/runs/{run.id}/evaluations", json=body)
+            assert refused.status_code == 403
+            assert (refused.json()["kind"], refused.json()["late_fact"]) == ("control_token_required", False)
+        else:
+            with pytest.raises(RejectedError) as raised:
+                control.create_evaluation(run.id, "weather_new_york", interception="host", **keyed)
+            assert raised.value.kind is Rejection.CONTROL_TOKEN_REQUIRED and not raised.value.late
+        # No evaluation, no session, no kept creation under the key, and the run and the evaluation already in it
+        # are as they were.
+        assert _store_contents(store) == before
+    assert store.kept_creation(run.id, "k1") is None
+    assert store.get_run(run.id) == run
+    assert [e.id for e in store.list_evaluations(run.id)] == [existing.id]
+    assert store.kept_creation(run.id, "before") == before["creations"][(run.id, "before")]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("how", CREATION_PATHS)
 async def test_a_control_plane_served_with_a_control_token_opens_host_mode_evaluations_in_process(suite, how):

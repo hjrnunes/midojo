@@ -202,6 +202,21 @@ def test_sandbox_environment_never_carries_the_control_token(monkeypatch):
     }
 
 
+def test_an_agent_mode_sandbox_never_gets_the_control_token_from_the_suites_env_vars():
+    runtime, client = _runtime_with_sandbox(env_vars={"LITELLM_MODEL": "m", "MIDOJO_CONTROL_TOKEN": "control-secret"})
+    runtime._agent_command = ["agent", "-p"]
+    runtime.configure(cluster="test", control_url="http://localhost:8090")
+    runtime.setup({}, session_token="session", eval_id="e1", user_task_id="t", injection_task_id=None)
+    runtime.exec_agent("hello", timeout_seconds=30)
+    # The session is the sandbox's own; the control token, which opens every run-scoped route, never goes in.
+    assert dict(client.specs[0].environment) == {
+        "LITELLM_MODEL": "m",
+        "MIDOJO_SESSION_TOKEN": "session",
+        "MIDOJO_URL": "http://host.openshell.internal:8090",
+    }
+    assert not any("control-secret" in text for text in _sandbox_texts(client))
+
+
 # What a suite's env_vars may try to hand the sandbox: the session, the control plane and the real tools.
 _STALE_ENV = {
     "MIDOJO_URL": "http://control",

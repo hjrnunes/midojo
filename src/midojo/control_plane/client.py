@@ -22,7 +22,7 @@ from midojo.observations import observation_type
 from midojo.types import Environment, FunctionCallRecord, InterceptionMode
 
 if TYPE_CHECKING:
-    from midojo_sdk.recorder import Recorder
+    from midojo_sdk.recorder import Recorder, WorldState
 
 ResponseModel = TypeVar("ResponseModel", bound=BaseModel)
 
@@ -122,6 +122,15 @@ class ControlClient(Protocol):
         It records on the same control plane, with the session as its only
         authority: the host keeps the token, and the target never sees it.
         Needs ``midojo-sdk`` (the ``dev`` and ``suites`` extras).
+        """
+        ...
+
+    def world(self, session_token: str) -> WorldState:
+        """The environment of the evaluation ``session_token`` is bound to, for a host-side interceptor's simulated tools.
+
+        It reads and changes the environment on the same control plane, with
+        the session as its only authority, which stays on the host. Needs
+        ``midojo-sdk`` (the ``dev`` and ``suites`` extras).
         """
         ...
 
@@ -240,6 +249,12 @@ class ControlPlaneClient:
         return RetryingRecorder(
             AgentControlPlaneClient(self._base_url, session_token, http=self._http), retryable=transient
         )
+
+    def world(self, session_token: str) -> WorldState:
+        """The session's environment over HTTP, on this client's connection pool. A change is never resent."""
+        from midojo_sdk.client import AgentControlPlaneClient
+
+        return AgentControlPlaneClient(self._base_url, session_token, http=self._http)
 
     async def revoke_session(self, run_id: str | None, eval_id: str) -> None:
         response = await self._http.delete(f"{self._evaluation_url(run_id, eval_id)}/session", headers=self._headers)

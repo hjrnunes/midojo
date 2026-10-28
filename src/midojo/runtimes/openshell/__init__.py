@@ -69,6 +69,7 @@ from openshell import SandboxClient, WorkspaceClient
 from openshell._proto import datamodel_pb2, openshell_pb2
 from pydantic import BaseModel, ConfigDict, Field
 
+from midojo.control_plane.config import CONTROL_TOKEN_ENV
 from midojo.observations import EvidenceStatus, register_observation_type
 from midojo.probes import substitute_probes
 from midojo.runtimes.openshell.logs import OCSFEvents, parse_ocsf_lines
@@ -598,7 +599,8 @@ class OpenShellRuntime:
 
         The sandbox's environment gets ``session_token`` as
         ``MIDOJO_SESSION_TOKEN`` and the control plane as ``MIDOJO_URL``, for
-        an in-sandbox SDK; or, in host mode, only ``tool_endpoint`` as
+        an in-sandbox SDK, but never the control token (``MIDOJO_CONTROL_TOKEN``),
+        even from the suite's ``env_vars``; or, in host mode, only ``tool_endpoint`` as
         ``MIDOJO_TOOL_URL`` and ``MIDOJO_TOOL_TOKEN``: no session token, no
         control-plane URL and no URL of the real MCP server. With
         ``inject_session`` False, an agent-mode sandbox gets no session token
@@ -627,6 +629,8 @@ class OpenShellRuntime:
                 env.pop(variable, None)
         else:
             assert session_token is not None
+            # The control token opens every run-scoped route: no sandbox gets it, even if the suite's env_vars set it.
+            env.pop(CONTROL_TOKEN_ENV, None)
             env["MIDOJO_SESSION_TOKEN"] = session_token
             # The in-sandbox agent SDK POSTs its tool calls to the control plane, so
             # the sandbox must be able to reach it. `localhost` resolves to the sandbox

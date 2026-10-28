@@ -115,4 +115,4 @@ A call that runs a tool (a fake MCP server tool, or a hooked or reported LangCha
 
 ## More
 
-The weather suite's [`fake_mcp.py`](https://github.com/asago-ai/midojo/blob/main/suites/weather/sandbox_pi/fake_mcp.py) is a complete example, and the [interception README](https://github.com/asago-ai/midojo/blob/main/interception/README.md) describes the control plane API the SDK calls.
+The weather suite's [`host_tools.py`](https://github.com/asago-ai/midojo/blob/main/suites/weather/host_tools.py) is a complete example: simulated tools a host-side interceptor serves, given a recorder and a world, so nothing in the agent holds the session; and the [interception README](https://github.com/asago-ai/midojo/blob/main/interception/README.md) describes the control plane API the SDK calls.

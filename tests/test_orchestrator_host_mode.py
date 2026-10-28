@@ -6,6 +6,7 @@ client on loopback. No model and no network beyond loopback.
 
 from __future__ import annotations
 
+import sys
 from unittest.mock import AsyncMock
 
 import click
@@ -306,4 +307,89 @@ def test_the_cli_refuses_host_mode_settings_a_target_couldnt_reach(cli_benchmark
     result = CliRunner().invoke(orchestrator.main, args)
     assert result.exit_code == 2
     assert message in result.output
+    cli_benchmark.assert_not_called()
+
+
+# --- a suite's host-side tools ---
+
+WEATHER = ["--suite", "weather", "--gateway", "g"]
+WEATHER_HOST = [*WEATHER, "--interception", "host", *UPSTREAM, "--interceptor-bind", "0.0.0.0"]
+
+
+def test_the_cli_gives_every_interceptor_the_suites_host_tools(cli_benchmark):
+    from suites.weather import host_tools
+
+    result = CliRunner().invoke(orchestrator.main, [*WEATHER_HOST, "--interceptor-port", "8766"])
+    assert result.exit_code == 0, result.output
+    interception = cli_benchmark.call_args.kwargs["interception"]
+    assert interception.tools is host_tools.register
+    assert (interception.port, interception.advertise_host) == (8766, "host.openshell.internal")
+
+
+def test_the_cli_refuses_a_suite_with_host_tools_in_agent_mode(cli_benchmark):
+    # Its tools live on the host-side interceptor: in agent mode the agent would have none that record.
+    result = CliRunner().invoke(orchestrator.main, WEATHER)
+    assert result.exit_code == 2
+    assert "serves its tools on the host-side interceptor (HOST_TOOLS)" in result.output
+    assert "--interception host" in result.output
+    cli_benchmark.assert_not_called()
+
+
+def test_a_suite_without_host_tools_gives_its_interceptors_none(cli_benchmark):
+    result = CliRunner().invoke(orchestrator.main, [*PI, "--interception", "host", *UPSTREAM])
+    assert result.exit_code == 0, result.output
+    assert cli_benchmark.call_args.kwargs["interception"].tools is None
+
+
+@pytest.mark.parametrize("reference", [42, "tests.test_orchestrator_host_mode", ":register", "module:"])
+def test_a_suites_host_tools_declaration_must_be_module_and_function(monkeypatch, reference):
+    import suites.weather
+
+    monkeypatch.setattr(suites.weather, "HOST_TOOLS", reference)
+    with pytest.raises(click.UsageError, match="must be a 'module:function' string"):
+        orchestrator._host_tools_reference("weather")
+
+
+@pytest.mark.parametrize(
+    "reference", ["tests.test_orchestrator_host_mode:CONTROL_TOKEN", "tests.test_orchestrator_host_mode:missing"]
+)
+def test_a_suites_host_tools_must_name_a_function(reference):
+    with pytest.raises(click.UsageError, match="is not a function"):
+        orchestrator._load_host_tools(reference)
+
+
+@pytest.fixture
+def declared_host_tools(tmp_path, monkeypatch):
+    """An out-of-tree suite declaring HOST_TOOLS in a module whose import raises: the two modules' names."""
+    package = tmp_path / "host_tools_probe"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    (package / "suite.py").write_text('HOST_TOOLS = "host_tools_probe.tools:register"\n')
+    (package / "tools.py").write_text('raise RuntimeError("the host tools were imported")\n')
+    monkeypatch.syspath_prepend(str(tmp_path))
+    # The run's suite is the weather suite's definition, under the probe module's name.
+    weather = orchestrator.get_suite("weather")
+    monkeypatch.setattr(orchestrator, "get_suite", lambda _name: weather)
+    yield "host_tools_probe.suite", "host_tools_probe.tools"
+    for name in ("host_tools_probe", "host_tools_probe.suite", "host_tools_probe.tools"):
+        sys.modules.pop(name, None)
+
+
+def test_a_refused_agent_mode_run_never_imports_the_host_tools(cli_benchmark, declared_host_tools):
+    suite_module, tools_module = declared_host_tools
+    result = CliRunner().invoke(orchestrator.main, ["--suite", suite_module, "--gateway", "g"])
+    # Refused for its declaration alone: the module it names, whose import raises, was never imported.
+    assert result.exit_code == 2, result.output
+    assert "serves its tools on the host-side interceptor (HOST_TOOLS)" in result.output
+    assert suite_module in sys.modules and tools_module not in sys.modules
+    cli_benchmark.assert_not_called()
+
+
+def test_a_host_mode_run_imports_the_host_tools(cli_benchmark, declared_host_tools):
+    suite_module, tools_module = declared_host_tools
+    args = ["--suite", suite_module, "--gateway", "g", "--interception", "host", *UPSTREAM]
+    result = CliRunner().invoke(
+        orchestrator.main, [*args, "--interceptor-bind", "0.0.0.0", "--interceptor-port", "8766"]
+    )
+    assert isinstance(result.exception, RuntimeError) and "the host tools were imported" in str(result.exception)
     cli_benchmark.assert_not_called()

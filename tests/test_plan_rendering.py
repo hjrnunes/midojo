@@ -30,8 +30,19 @@ def _pairs(suite: YAMLTaskSuite) -> list[tuple[str, str | None]]:
     return [(user, injection) for user in suite.user_tasks for injection in injections]
 
 
+# Seeded files a suite no longer has, with the template the fixture was written with. They carried no probe, so
+# every pair still renders as before with them put back. The weather suite seeded a project .pi/mcp.json that
+# pointed the agent at a fake MCP server in its sandbox, until its interception moved to the host.
+REMOVED_FILES: dict[str, dict[str, str]] = {
+    "weather": {
+        ".pi/mcp.json": '{"mcpServers": {"alerts": {"url": "http://localhost:8765/mcp", "exposure": "direct"}}}\n'
+    },
+}
+
+
 def _files(suite: YAMLTaskSuite) -> dict[str, str]:
-    return dict(getattr(suite.definition.agent_runtime, "files", {}) or {})
+    files = dict(getattr(suite.definition.agent_runtime, "files", {}) or {})
+    return {**REMOVED_FILES.get(suite.name, {}), **files}
 
 
 def _rendering(suite: YAMLTaskSuite, user: str, injection: str | None) -> dict[str, Any]:

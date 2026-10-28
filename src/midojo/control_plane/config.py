@@ -1,6 +1,6 @@
 """Configuration for a control-plane application instance."""
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 # Environment variable that sets the control token for midojo-serve and midojo-run.
 CONTROL_TOKEN_ENV = "MIDOJO_CONTROL_TOKEN"
@@ -10,6 +10,10 @@ DEFAULT_CLOSURE_WAIT_SECONDS = 5.0
 
 
 class AppConfig(BaseModel):
+    """A control plane's settings, frozen: fixed for the life of the control plane and app built with them."""
+
+    model_config = ConfigDict(frozen=True)
+
     session_ttl_seconds: int = Field(default=3600, gt=0)
     # Bearer token required on every route except /agent and /health. None leaves them open.
     control_token: str | None = Field(default=None, min_length=1)

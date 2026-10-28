@@ -11,7 +11,7 @@ import sys
 from collections.abc import Callable, Sequence
 from dataclasses import asdict
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 import click
 import httpx
@@ -53,7 +53,7 @@ from midojo.tool_endpoint import bare_host, tool_url
 from midojo.yaml_task_suite import YAMLTaskSuite
 
 if TYPE_CHECKING:
-    from midojo.interception_host import HostInterception
+    from midojo.interception_host import HostInterception, HostTools
 
 console = Console()
 
@@ -69,6 +69,39 @@ def _resolve_system_message(suite_name: str) -> str:
         console.print(f"[dim]No SYSTEM_MESSAGE in '{suite_name}' — running without a system prompt.[/dim]")
         return ""
     return msg
+
+
+def _host_tools_reference(suite_name: str) -> str | None:
+    """The suite's ``HOST_TOOLS`` declaration, ``"module:function"``, or None: checked, but nothing it names imported.
+
+    The suite module declares where its simulated tools are, which run on the
+    host-side interceptor. Reading the declaration imports only the suite
+    module, which ``get_suite`` has already imported, so a run that is refused
+    for it never imports the tools or their dependencies (``midojo-sdk``).
+    """
+    module_path = suite_name if "." in suite_name else f"suites.{suite_name}"
+    try:
+        mod = importlib.import_module(module_path)
+    except ImportError:
+        return None
+    reference = getattr(mod, "HOST_TOOLS", None)
+    if reference is None:
+        return None
+    if not isinstance(reference, str) or reference.count(":") != 1 or not all(reference.split(":")):
+        raise click.UsageError(f"{module_path}.HOST_TOOLS must be a 'module:function' string, got {reference!r}.")
+    return reference
+
+
+def _load_host_tools(reference: str) -> HostTools:
+    """The function a ``HOST_TOOLS`` declaration names, imported: it registers the tools on one evaluation's interceptor.
+
+    Called only for a host-mode run (see ``HostInterception.tools``).
+    """
+    module_name, function_name = reference.split(":")
+    tools = getattr(importlib.import_module(module_name), function_name, None)
+    if not callable(tools):
+        raise click.UsageError(f"HOST_TOOLS names {reference!r}, which is not a function.")
+    return cast("HostTools", tools)
 
 
 def _finite_seconds(_ctx: click.Context, param: click.Parameter, value: float | None) -> float | None:
@@ -1197,6 +1230,14 @@ def main(
     # Unmanaged clients keep their own default timeout unless --agent-timeout is given.
     timeout_kwargs = {} if agent_timeout is None else {"timeout": agent_timeout}
     host_mode = interception == "host"
+    host_tools = _host_tools_reference(suite_name)
+    if host_tools is not None and not host_mode:
+        # Its tools live on the host-side interceptor: in agent mode the agent would have none that record. Refused
+        # before anything the declaration names is imported.
+        raise click.UsageError(
+            f"Suite {suite_name!r} serves its tools on the host-side interceptor (HOST_TOOLS): run it with "
+            "--interception host and --upstream-mcp-url."
+        )
     if host_mode and not control_token:
         # The control plane refuses a host-mode evaluation without one: say so before the run starts.
         raise click.UsageError(
@@ -1211,6 +1252,7 @@ def main(
             port=interceptor_port,
             advertise=interceptor_advertise_host,
             openshell=isinstance(runtime, OpenShellRuntime),
+            tools=_load_host_tools(host_tools) if host_tools is not None else None,
         )
         if host_mode
         else None
@@ -1322,7 +1364,13 @@ def _is_unspecified(host: str) -> bool:
 
 
 def _host_interception(
-    upstream_mcp_url: str | None, *, bind: str, port: int, advertise: str | None, openshell: bool
+    upstream_mcp_url: str | None,
+    *,
+    bind: str,
+    port: int,
+    advertise: str | None,
+    openshell: bool,
+    tools: HostTools | None = None,
 ) -> HostInterception:
     """The run's host-mode settings, from the CLI options, refusing what a target couldn't reach."""
     from midojo.interception_host import HostInterception  # needs midojo-sdk[mcp]
@@ -1350,7 +1398,7 @@ def _host_interception(
                 f"sandbox's own, and an unspecified address names no host. Pass --interceptor-advertise-host with "
                 f"a host the sandbox reaches, or leave it out for {SANDBOX_HOST}."
             )
-    return HostInterception(upstream=upstream_mcp_url, bind_host=bind, port=port, advertise_host=advertise)
+    return HostInterception(upstream=upstream_mcp_url, bind_host=bind, port=port, advertise_host=advertise, tools=tools)
 
 
 if __name__ == "__main__":
