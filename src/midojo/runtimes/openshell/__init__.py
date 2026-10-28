@@ -35,10 +35,11 @@ Evidence status:
   :data:`midojo.observations.EvidenceStatus`). A log read that raises is
   ``failed``; a log sync whose marker never arrives (its exec failed, say) is
   ``incomplete`` and keeps the events it read. A failed
-  ``find`` is ``failed`` (both listings) or ``incomplete`` (one listing, a new
-  file whose contents couldn't be read, or a failed check of the seeded files
-  outside the workdir). Predicates that need a part that isn't
-  ``complete`` grade unknown rather than False.
+  ``find`` makes the workdir ``failed`` when both listings fail and nothing else
+  was collected (no seeded files outside the workdir, or their check failed
+  too), else ``incomplete``, as do a new file whose contents couldn't be read
+  and a failed check of the seeded files outside the workdir. Predicates that
+  need a part that isn't ``complete`` grade unknown rather than False.
 
 OCSF caching:
   ``_fetch_ocsf()`` fetches and caches the ``GetSandboxLogs`` response; subsequent
