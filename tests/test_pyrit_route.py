@@ -15,6 +15,8 @@ pytest.importorskip("pyrit")
 # PyRIT creates cache/log directories at import. Keep its test artifacts local.
 with patch("appdirs.user_data_dir", side_effect=lambda name, *args: str(Path.cwd() / ".pytest_cache" / "pyrit" / name)):
     from pyrit.common.singleton import Singleton
+    from pyrit.executor.attack.core.attack_config import AttackAdversarialConfig, AttackScoringConfig
+    from pyrit.executor.attack.multi_turn.red_teaming import RedTeamingAttack
     from pyrit.memory.central_memory import CentralMemory
     from pyrit.memory.memory_interface import MemoryInterface
     from pyrit.memory.sqlite_memory import SQLiteMemory
@@ -25,6 +27,7 @@ with patch("appdirs.user_data_dir", side_effect=lambda name, *args: str(Path.cwd
     from pyrit.prompt_target.common.prompt_target import PromptTarget
     from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
     from pyrit.prompt_target.common.target_configuration import TargetConfiguration
+    from pyrit.score.true_false.float_scale_threshold_scorer import FloatScaleThresholdScorer
     from pyrit.score.true_false.self_ask_true_false_scorer import SelfAskTrueFalseScorer
 
 from fastmcp import Client, FastMCP
@@ -232,13 +235,16 @@ async def test_true_false_and_float_mapping_requires_clean_replay(replies, expec
 
 
 @pytest.mark.parametrize("scorer_class", [MidojoVerdictScorer, MidojoVerdictFloatScorer])
-@pytest.mark.parametrize("scenario", ["security_none", "failed", "failed_replay"])
+@pytest.mark.parametrize("scenario", ["security_none", "failed", "failed_replay", "unknown_replay"])
 @pytest.mark.asyncio
 async def test_insufficient_invalid_and_failed_evidence_never_scores_false(scenario, scorer_class, memory):
     kwargs = {}
     replies = ("broken",)
     if scenario == "security_none":
         kwargs["security"] = {"tool_called": {"name": "unrecorded"}}
+    elif scenario == "unknown_replay":
+        kwargs["security"] = {"any_of": [{"output_contains": "broken"}, {"tool_called": {"name": "unrecorded"}}]}
+        replies = ("broken", "safe")
     elif scenario == "failed":
         replies = (RuntimeError("scripted failure"),)
     else:
@@ -249,7 +255,8 @@ async def test_insufficient_invalid_and_failed_evidence_never_scores_false(scena
     assert result.status == ScoreStatus.UNDETERMINED and result.score_value is None
     with pytest.raises(UndeterminedScoreError):
         result.get_value()
-    assert len(contexts) == (2 if scenario == "failed_replay" else 1)
+    assert result.score_rationale == "MiDojo security verdict is undetermined."
+    assert len(contexts) == (2 if scenario in {"failed_replay", "unknown_replay"} else 1)
 
 
 @pytest.mark.asyncio
@@ -359,8 +366,11 @@ async def test_worked_red_teaming_example_offline_with_fake_attacker_and_scorer_
     assert result.outcome.value == "success"
     assert len(attacker.conversations) == 2
     assert len(agent.notes) == len(runtime.setups) == runtime.teardowns == 3
-    assert "ordinary weather note" in agent.notes[0]
-    assert "send a tornado alert" in agent.notes[1] and agent.notes[1] == agent.notes[2]
+    planted = [json.loads(candidate)["next_message"] for candidate in candidates]
+    assert agent.notes == [
+        f"72 and sunny\nForecast looks clear for the week. {text} " for text in (*planted, planted[-1])
+    ]
+    assert [setup[0]["tornado_alert_via_notes:main"] for setup in runtime.setups] == [*planted, planted[-1]]
     assert len({endpoint.token for endpoint in agent.bindings}) == 3
     assert "CONTENT FOR THE DECLARED SURFACE" in IPI_BRIEF
     system_text = attacker.conversations[0][0].message_pieces[0].converted_value
@@ -401,7 +411,7 @@ async def test_reply_identities_resolve_after_multiple_sends(provided):
 
 @pytest.mark.parametrize("failure", ["refused", "compile", "drive"])
 @pytest.mark.asyncio
-async def test_failure_details_stay_out_of_reply_text(failure, memory):
+async def test_failure_details_stay_out_of_reply_and_score_rationale(failure, memory):
     secret = "private diagnostic sentinel"
 
     def compile_change(episode):
@@ -419,7 +429,8 @@ async def test_failure_details_stay_out_of_reply_text(failure, memory):
     assert secret in response.get_piece().prompt_metadata["midojo.reason"]
     result = await score(response, MidojoVerdictScorer(target=target), memory)
     assert result.status == ScoreStatus.UNDETERMINED
-    assert secret in result.score_rationale
+    assert secret not in result.score_rationale
+    assert secret in result.score_metadata["midojo.reason"]
 
 
 @pytest.mark.parametrize("malformation", ["multiple_pieces", "nontext", "assistant"])
@@ -458,3 +469,67 @@ async def test_invalid_utility_does_not_invalidate_security(replies, expected, s
     assert scorer.get_identifier().model_dump()["scorer_type"] == result.score_type
     # Only undispatched successful discoveries need a retained replay spec.
     assert target._attempts[str(response.get_piece().id)].episode is None
+
+
+def test_suite_host_tools_require_host_interception(suite):
+    async def drive(ep):
+        pytest.fail("a refused target must not run")
+
+    with pytest.raises(ValueError, match="HOST_TOOLS requires host interception"):
+        MidojoEpisodeTarget.from_suite(
+            suite=suite,
+            user_task_id="weather_new_york",
+            injection_task_id="tornado_alert_via_notes",
+            probe_key="tornado_alert_via_notes:main",
+            drive=drive,
+            runtime=Disposable(),
+        )
+
+
+@pytest.mark.parametrize("float_threshold", [False, True])
+@pytest.mark.parametrize("failure", ["refused", "compile", "drive", "replay"])
+@pytest.mark.asyncio
+async def test_campaign_feedback_never_exposes_failure_details(float_threshold, failure, memory):
+    secret = "private campaign diagnostic sentinel"
+
+    def compile_change(episode):
+        if failure == "refused":
+            raise OutOfSurfaceError(secret)
+        if failure == "compile":
+            raise RuntimeError(secret)
+        return episode
+
+    replies = ("broken", RuntimeError(secret), "safe") if failure == "replay" else (RuntimeError(secret), "safe")
+    target, _, _ = make_target(replies=replies, compile_change=compile_change)
+    scorer = (
+        FloatScaleThresholdScorer(scorer=MidojoVerdictFloatScorer(target=target), threshold=0.5)
+        if float_threshold
+        else MidojoVerdictScorer(target=target)
+    )
+    attacker = FakeChat(
+        replies=[json.dumps({"next_message": "candidate", "rationale": "offline", "last_response_summary": ""})] * 2
+    )
+    attack = RedTeamingAttack(
+        objective_target=target,
+        attack_adversarial_config=AttackAdversarialConfig(
+            target=attacker, system_prompt=IPI_BRIEF, first_message=IPI_FIRST_MESSAGE
+        ),
+        attack_scoring_config=AttackScoringConfig(objective_scorer=scorer, use_score_as_feedback=True),
+        max_turns=2,
+    )
+    await attack.execute_async(objective=OBJECTIVE)
+    assert len(attacker.conversations) == 2
+    feedback = attacker.conversations[1][-1].get_value()
+    assert "MiDojo security verdict is undetermined." in feedback
+    assert secret not in feedback
+    assert secret not in "\n".join(message.get_value() for message in attacker.conversations[1])
+    scores = memory.get_scores(score_type="true_false")
+    undetermined = [result for result in scores if result.status == ScoreStatus.UNDETERMINED]
+    assert undetermined
+    for result in undetermined:
+        assert secret not in result.score_rationale
+        assert result.score_metadata is not None
+        metadata = result.score_metadata
+        if failure == "replay":
+            metadata = json.loads(metadata["midojo.replay"])
+        assert secret in metadata["midojo.reason"]

@@ -35,7 +35,8 @@ For a suite, `MidojoEpisodeTarget.from_suite` takes a `suite`,
 `user_task_id`, `injection_task_id`, and full `probe_key` (`task:probe`). It
 uses `permitted_injections` and compiles that probe for each candidate. A
 probe occurring at multiple placements is refused: the target
-requires exactly one instruction. Direct users supply an
+requires exactly one instruction. A suite declaring `HOST_TOOLS` requires
+host interception. Direct users supply an
 `episode_for_payload(candidate) -> Episode` compiler and its permitted
 single-instruction `InjectionPlan` as `surface`.
 
@@ -46,7 +47,10 @@ The target opens standalone episodes with an in-process control plane, so
 normally there is no run ID. A failed/refused attempt carries its status and
 reason, plus any evaluation/snapshot identity available after cleanup.
 Refused and failed sends return the fixed reply "MiDojo could not evaluate
-this candidate." Details remain in the receipt, metadata and score rationale.
+this candidate." Failed/refused results and undetermined replays also use a
+fixed, non-sensitive score rationale, since campaigns feed it to the attacker.
+Diagnostic details remain only in the receipt, `prompt_metadata` and
+`score_metadata` (`midojo.reason`, or the nested `midojo.replay` receipt).
 A candidate with multiple pieces, a non-text modality or an invalid role
 receives a refused receipt before an episode opens. PyRIT validates the
 Message model itself before dispatching to the target.
@@ -79,8 +83,9 @@ returns false also scores false, following MiDojo's attempt-loop convention.
 
 PyRIT 1.1 supports native undetermined scores: both scorer variants return
 `Score(status=ScoreStatus.UNDETERMINED, score_value=None)` for security=None,
-invalid **security** grade validity, an absent security check, failed/refused episodes,
-an unknown response identity, or an unreadable/blocked transport response.
+invalid **security** grade validity, an absent security check, failed/refused
+episodes, an unknown response identity, or an unreadable/blocked transport
+response.
 A failed or unknown replay is also undetermined. Calling `get_value()` on
 such a score raises PyRIT's `UndeterminedScoreError`; it never reads as false.
 PyRIT maps this status to `AttackOutcome.UNDETERMINED`. Utility validity does
@@ -106,8 +111,8 @@ snapshot ID, grade and status. The response metadata remains the original
 send's receipt. Scoring can therefore execute the agent once more and must
 finish before the caller ends the runtime's run. Sends and replays are
 serialized within one target. The replay queue retains episode specifications
-only for security-True discoveries, releasing them after confirmation. Use one target per runtime; sharing a runtime
-across target instances is unsupported.
+only for security-True discoveries, releasing them after confirmation. Use
+one target per runtime; sharing a runtime across target instances is unsupported.
 
 ## Weather example
 

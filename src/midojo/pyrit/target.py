@@ -20,6 +20,7 @@ from midojo.control_plane.service import ControlPlane
 from midojo.episode import Episode
 from midojo.episode_context import EpisodeContext
 from midojo.interception_host import HostInterception
+from midojo.orchestrator import _host_tools_reference
 from midojo.runtimes import AgentRuntime, attempt_isolation
 from midojo.yaml_task_suite import YAMLTaskSuite
 
@@ -151,6 +152,8 @@ class MidojoEpisodeTarget(PromptTarget):
         """Declare a single suite probe (the full ``task:probe`` key)."""
         permitted = suite.get_probes_for_task(injection_task_id)
         permitted_injections(AttackAttempt({probe_key: ""}), permitted)
+        if interception is None and _host_tools_reference(suite.name) is not None:
+            raise ValueError("a suite declaring HOST_TOOLS requires host interception")
         surface = suite.episode(user_task_id, injection_task_id, {probe_key: ""}).plan
 
         def compile_episode(payload: str) -> Episode:

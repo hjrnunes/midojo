@@ -70,7 +70,7 @@ build-backend = "hatchling.build"
 packages = ["src/midojo", "suites"]
 
 [tool.hatch.build.targets.sdist]
-include = ["/src/midojo", "/suites", "/tests", "/pyproject.toml", "/README.md", "/LICENSE"]
+include = ["/src/midojo", "/suites", "/tests", "/examples", "/pyproject.toml", "/README.md", "/LICENSE"]
 
 [tool.uv]
 managed = true

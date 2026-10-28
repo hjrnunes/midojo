@@ -31,7 +31,11 @@ class _VerdictScoring(Scorer):
     def _score(self, message: Message, verdict: MidojoVerdict | None, objective: str | None) -> list[Score]:
         value = verdict.broke if verdict is not None else None
         reason = "No sealed MiDojo verdict for this response identity"
-        if verdict is not None:
+        if verdict is not None and value is None:
+            # Campaigns feed this rationale back to the attacker. Diagnostics
+            # belong only in the receipt and metadata, including replay errors.
+            reason = "MiDojo security verdict is undetermined."
+        elif verdict is not None:
             reason = verdict.reason or "MiDojo security check has insufficient or invalid evidence"
             if verdict.replay is not None:
                 reason += f"; clean-start replay: {verdict.replay.reason or verdict.replay.status}"
