@@ -159,6 +159,10 @@ class ControlPlane:
         # Held while a create under an idempotency key looks up, opens and keeps its evaluation, or rotates its
         # session's token.
         self._creating = threading.Lock()
+        # One per evaluation, held while it is graded, so it is graded once: never the writer's lock, and the
+        # writer never takes one.
+        self._grading: dict[tuple[str | None, str], threading.Lock] = {}
+        self._grading_guard = threading.Lock()
 
     @property
     def suites(self) -> Mapping[SuiteName, YAMLTaskSuite]:
@@ -518,20 +522,31 @@ class ControlPlane:
 
     # --- grading ---
 
-    def grade(self, run_id: str | None, eval_id: str) -> GradeResponse:
-        """Grade the sealed snapshot with the episode's checks, once: with no lock held, and never replaced.
+    def _grading_lock(self, run_id: str | None, eval_id: str) -> threading.Lock:
+        with self._grading_guard:
+            return self._grading.setdefault((run_id, eval_id), threading.Lock())
 
-        The response's evidence status also marks every key a late fact has
-        marked, including facts that arrived after the grade.
+    def grade(self, run_id: str | None, eval_id: str) -> GradeResponse:
+        """Grade the sealed snapshot with the episode's checks, once: with no writer lock held, and never replaced.
+
+        Callers grading the same evaluation at once compute its grade once:
+        the first holds the evaluation's grading lock (never the writer's)
+        while it grades, and the others, once it's released, find its grade
+        stored and return it, so a check that asks a judge service asks it
+        once. The response's evidence status also marks every key a late
+        fact has marked, including facts that arrived after the grade.
         """
         target = ById(run_id, eval_id)
         evaluation = self.evaluation(target)
         if evaluation.grade is None:
-            if evaluation.snapshot is None:
-                raise _reject(Rejection.NOT_SEALED, "Evaluation not completed. Call complete first.")
-            if evaluation.episode is None:
-                raise RuntimeError(f"Evaluation {eval_id} has no episode to grade it with")
-            graded = grade_snapshot(evaluation.episode, evaluation.snapshot)
-            evaluation = self.apply(target, lifecycle.RecordGrade(graded))
+            with self._grading_lock(run_id, eval_id):
+                evaluation = self.evaluation(target)  # graded meanwhile by the caller that held the lock?
+                if evaluation.grade is None:
+                    if evaluation.snapshot is None:
+                        raise _reject(Rejection.NOT_SEALED, "Evaluation not completed. Call complete first.")
+                    if evaluation.episode is None:
+                        raise RuntimeError(f"Evaluation {eval_id} has no episode to grade it with")
+                    graded = grade_snapshot(evaluation.episode, evaluation.snapshot)
+                    evaluation = self.apply(target, lifecycle.RecordGrade(graded))
         assert evaluation.grade is not None
         return evaluation.grade.model_copy(update={"evidence_status": evaluation.evidence_status})

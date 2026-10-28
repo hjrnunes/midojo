@@ -23,15 +23,22 @@ the service's. The control plane grades an evaluation once and never replaces
 the grade, so its recorded grade, with the judgements it holds, is the one
 that counts; :func:`midojo.grade` asks the service again each time it's called.
 The request is sent synchronously (``httpx.Client``); the control plane grades
-in a worker thread, so a slow judge never blocks its event loop.
+in a worker thread, so a slow judge never blocks its event loop. While it is
+sent, the ``httpx`` and ``httpcore`` loggers drop what that thread logs (a
+response header or reason phrase may echo the token); other threads log as
+before.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -51,6 +58,11 @@ _SPEC_KEYS = frozenset(
     {"claim", "rubric", "url", "url_env", "token_env", "timeout_seconds", "prior_turns", "tool_calls"}
 )
 _RESPONSE_KEYS = frozenset({"schema", "id", "verdict", "rationale", "model", "details"})
+# How deep ``details`` may nest: deeper data can't be dumped into a grade.
+MAX_DETAILS_DEPTH = 64
+# The record's fields that hold what the service sent (or a failure quoting it): the ones redaction reads.
+_SERVICE_TEXT = ("rationale", "model", "details", "failure")
+REDACTED = "[redacted]"
 
 
 class JudgeRecord(BaseModel):
@@ -159,14 +171,23 @@ class ReplyJudge:
             if not token:
                 return JudgeRecord(**fields, failure=f"no judge service token: {self.token_env} is not set")
             headers["Authorization"] = f"Bearer {token}"
-        return _redacted(self._exchange(endpoint, headers, fields), token)
+        try:
+            record = _redacted(self._exchange(endpoint, headers, fields), token)
+            record.model_dump_json()  # the grade dumps it: one that can't be dumped is a failure here
+            return record
+        except Exception as exc:
+            # A judge's failure is an unknown check, never a failed grading. The request may have gone out.
+            return JudgeRecord(**{**fields, "sent": True}, failure=f"the judge check failed ({type(exc).__name__})")
 
     def _exchange(self, endpoint: httpx.URL, headers: dict[str, str], fields: dict[str, Any]) -> JudgeRecord:
         content = json.dumps(fields["request"], ensure_ascii=False).encode("utf-8")
         fields = {**fields, "sent": True}
         try:
             # No proxy or .netrc from the environment, and no redirect: the token goes only to the URL configured.
-            with httpx.Client(timeout=self.timeout_seconds, trust_env=False, follow_redirects=False) as http:
+            with (
+                _transport_quiet(),
+                httpx.Client(timeout=self.timeout_seconds, trust_env=False, follow_redirects=False) as http,
+            ):
                 response = http.post(endpoint, content=content, headers=headers)
         except httpx.TimeoutException as exc:
             failure = f"the judge service timed out after {self.timeout_seconds:g}s ({type(exc).__name__})"
@@ -178,8 +199,10 @@ class ReplyJudge:
         if not response.is_success:
             return JudgeRecord(**sent, failure=f"the judge service answered HTTP {response.status_code}")
         try:
-            answer = json.loads(response.content)
-        except (UnicodeDecodeError, json.JSONDecodeError):
+            answer = json.loads(response.content, parse_constant=_refuse_constant)
+        except _NonFiniteError as exc:
+            return JudgeRecord(**sent, failure=f"the judge service's answer is not JSON: it has {exc}")
+        except (ValueError, RecursionError):  # JSONDecodeError and UnicodeDecodeError are ValueErrors
             return JudgeRecord(**sent, failure="the judge service's answer is not JSON")
         problem = response_problem(answer, fields["request_id"])
         if problem is not None:
@@ -222,14 +245,26 @@ def response_problem(answer: Any, expected_id: str) -> str | None:
         return f"schema is {answer['schema']!r}"
     if "id" in answer and answer["id"] != expected_id:
         return "it answers another request id"
-    if answer.get("verdict") not in PASSED or type(answer.get("verdict")) is not str:
-        return f"verdict {answer.get('verdict')!r} is not one of {list(PASSED)}"
+    verdict = answer.get("verdict")
+    if type(verdict) is not str or verdict not in PASSED:  # the type first: a list or an object isn't hashable
+        return f"verdict {verdict!r} is not one of {list(PASSED)}"
     for name in ("rationale", "model"):
         if answer.get(name) is not None and type(answer[name]) is not str:
             return f"{name} is not a string"
     if answer.get("details") is not None and type(answer["details"]) is not dict:
         return "details is not an object"
+    if _depth(answer.get("details")) > MAX_DETAILS_DEPTH:
+        return f"details nests deeper than {MAX_DETAILS_DEPTH}"
     return None
+
+
+def _depth(value: Any) -> int:
+    """How many objects and arrays deep ``value`` nests, counted level by level rather than by recursion."""
+    depth, level = 0, [value]
+    while containers := [item for item in level if type(item) in (dict, list)]:
+        depth += 1
+        level = [child for item in containers for child in (item.values() if type(item) is dict else item)]
+    return depth
 
 
 def parse_reply_judge(value: Any) -> ReplyJudge:
@@ -289,11 +324,69 @@ def _json_safe(value: Any) -> Any:
     return to_jsonable_python(text(value), inf_nan_mode="null")
 
 
+class _NonFiniteError(ValueError):
+    """The answer has ``NaN``, ``Infinity`` or ``-Infinity``, which JSON doesn't."""
+
+
+def _refuse_constant(name: str) -> Any:
+    raise _NonFiniteError(name)
+
+
 def _redacted(record: JudgeRecord, token: str | None) -> JudgeRecord:
-    """``record`` with every occurrence of ``token`` (one a service echoed back, say) replaced."""
+    """``record`` with ``token`` replaced wherever the service's text holds it (one it echoed back, say).
+
+    Only the values of the fields the service filled in are read (keys and
+    values of ``details`` included), never a field name or the verdict, so the
+    record keeps its schema whatever the token is. When it can't be redacted,
+    the record keeps none of the service's text and says so.
+    """
     if not token:
         return record
-    text, escaped = record.model_dump_json(), json.dumps(token)[1:-1]
-    if escaped not in text:
-        return record
-    return JudgeRecord.model_validate_json(text.replace(escaped, "[redacted]"))
+    try:
+        return record.model_copy(update={name: _without(getattr(record, name), token) for name in _SERVICE_TEXT})
+    except Exception as exc:  # keep nothing the service sent rather than fail the grading
+        failure = f"the judge service's answer could not be redacted ({type(exc).__name__})"
+        kept = record.model_dump(include={"request_id", "endpoint", "request", "sent", "http_status"})
+        return JudgeRecord(**kept, failure=failure)
+
+
+def _without(value: Any, token: str) -> Any:
+    """``value`` with ``token`` replaced in every string it holds."""
+    if type(value) is str:
+        return value.replace(token, REDACTED)
+    if type(value) is dict:
+        return {_without(key, token): _without(item, token) for key, item in value.items()}
+    if type(value) is list:
+        return [_without(item, token) for item in value]
+    return value
+
+
+# Set while this context sends a judge request: the transport loggers drop what it logs then.
+_SENDING: ContextVar[bool] = ContextVar("midojo_judge_sending", default=False)
+
+
+class _DropWhileSending(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not _SENDING.get()
+
+
+_DROP_WHILE_SENDING = _DropWhileSending()
+
+
+@contextmanager
+def _transport_quiet() -> Iterator[None]:
+    """Drop the ``httpx`` and ``httpcore`` log records this thread makes until it leaves.
+
+    A logger's filter only sees the records made on that logger, not a
+    child's, so every transport logger that exists gets the filter; the
+    filter reads a context variable, so other threads keep logging.
+    """
+    for name, logger in list(logging.root.manager.loggerDict.items()):
+        transport = name == "httpx" or name.startswith(("httpx.", "httpcore"))
+        if transport and isinstance(logger, logging.Logger) and _DROP_WHILE_SENDING not in logger.filters:
+            logger.addFilter(_DROP_WHILE_SENDING)
+    sending = _SENDING.set(True)
+    try:
+        yield
+    finally:
+        _SENDING.reset(sending)

@@ -586,3 +586,168 @@ async def test_results_json_keeps_the_judgements_and_never_the_token(judged_suit
     [record] = results["judgements"]["pay_bills,wire"]
     assert record["verdict"] == "supported" and record["request"]["claim"] == CLAIM
     assert TOKEN not in text
+
+
+# --- one grade per evaluation, however many ask at once ---
+
+
+async def sealed_judged_evaluation(plane: ControlPlane) -> str:
+    async with open_episode(judged_episode(), runtime=UnmanagedRuntime(), control=plane) as ep:
+
+        async def agent(message: str) -> str:
+            return REPLY
+
+        await ep.turn("Pay my bills", agent)
+    return ep.evaluation_id
+
+
+@pytest.mark.asyncio
+async def test_concurrent_grades_in_process_ask_the_judge_once_and_get_the_same_grade(monkeypatch):
+    slow = FakeJudge(delay=0.5)
+    monkeypatch.setenv("TEST_JUDGE_URL", slow.url("/supported"))
+    monkeypatch.setenv("TEST_JUDGE_TOKEN", TOKEN)
+    try:
+        plane = ControlPlane({}, config=AppConfig(closure_wait_seconds=0))
+        eval_id = await sealed_judged_evaluation(plane)
+        control = InProcessControlClient(plane)
+        grades = await asyncio.gather(*(control.grade_evaluation(None, eval_id) for _ in range(4)))
+        # And from threads that call the control plane directly.
+        threaded = await asyncio.gather(*(asyncio.to_thread(plane.grade, None, eval_id) for _ in range(2)))
+    finally:
+        slow.close()
+
+    assert len(slow.requests) == 1
+    assert all(grade == grades[0] for grade in [*grades, *threaded])
+    assert grades[0].security is True and len(grades[0].judgements) == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_grades_over_http_ask_the_judge_once_and_get_the_same_grade(judged_suite, judge):
+    judge.delay = 0.5
+    app = create_app({"judged": judged_suite}, config=AppConfig(closure_wait_seconds=0))
+    run = app.state.control.create_run("judged")
+    episode = judged_suite.episode("pay_bills", "wire", judged_suite.get_probes_for_task("wire"))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app)) as http:
+        control = ControlPlaneClient("http://control", http=http)
+        async with open_episode(episode, runtime=UnmanagedRuntime(), control=control, run_id=run.id) as ep:
+
+            async def agent(message: str) -> str:
+                return REPLY
+
+            await ep.turn("Pay my bills", agent)
+        grades = await asyncio.gather(*(control.grade_evaluation(run.id, ep.evaluation_id) for _ in range(3)))
+
+    assert len(judge.requests) == 1
+    assert grades[0] == grades[1] == grades[2] and grades[0].judgements[0].verdict == "supported"
+
+
+# --- no transport log carries the token ---
+
+
+def test_a_token_echoed_in_response_headers_never_reaches_a_log(judge, monkeypatch, caplog):
+    monkeypatch.setenv("TEST_JUDGE_TOKEN", TOKEN)
+    caplog.set_level(logging.DEBUG)
+    # The leak is real: a plain httpx request to the same judge logs the echoed token in its reason phrase
+    # (httpx, INFO) and its response header (httpcore, DEBUG).
+    httpx.post(judge.url("/echo-in-headers"), json={"id": "x"}, headers={"Authorization": f"Bearer {TOKEN}"})
+    assert TOKEN in caplog.text
+    assert {r.name for r in caplog.records if TOKEN in r.getMessage()} >= {"httpx", "httpcore.http11"}
+    caplog.clear()
+
+    ctx = context()
+    result = parse_check(judge_spec(judge.url("/echo-in-headers"), token_env="TEST_JUDGE_TOKEN")).assess(ctx)
+
+    assert result.passed is True
+    assert judge.requests[-1].headers["authorization"] == f"Bearer {TOKEN}"
+    assert TOKEN not in caplog.text and not [r for r in caplog.records if TOKEN in r.getMessage()]
+    assert TOKEN not in only_record(ctx).model_dump_json()
+    # Only the judge's request is quiet: a request after it logs as before.
+    httpx.post(judge.url("/supported"), json={"id": "y"})
+    assert any(r.name == "httpx" for r in caplog.records)
+
+
+# --- malformed answers are unknown, never an exception or True ---
+
+
+@pytest.mark.parametrize(("path", "shown"), [("/verdict-list", "[]"), ("/verdict-object", "{}")])
+def test_a_verdict_of_another_type_is_unknown(judge, path, shown):
+    result, ctx = assess(judge_spec(judge.url(path)))
+
+    assert result.passed is None
+    assert f"verdict {shown} is not one of" in result.reason
+    assert only_record(ctx).verdict is None
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_an_answer_with_a_non_finite_constant_is_not_json(judge, constant):
+    result, ctx = assess(judge_spec(judge.url(f"/details-{constant}")))
+
+    assert result.passed is None
+    assert f"the judge service's answer is not JSON: it has {constant}" in result.reason
+    record = only_record(ctx)
+    assert (record.verdict, record.details, record.http_status) == (None, None, 200)
+
+
+def test_details_that_nest_too_deep_are_unknown_and_the_grade_still_dumps(judge):
+    result, ctx = assess(judge_spec(judge.url("/deep-details")))
+
+    assert result.passed is None and "details nests deeper than 64" in result.reason
+    only_record(ctx).model_dump(mode="json")
+
+
+# --- redaction keeps the record's schema whatever the token ---
+
+
+@pytest.mark.parametrize("token", ["supported", "model", "schema", "verdict", "request_id", "null", "fake-judge-1"])
+def test_a_token_that_is_a_field_name_or_value_leaves_the_record_valid(judge, monkeypatch, token):
+    monkeypatch.setenv("TEST_JUDGE_TOKEN", token)
+    ctx = context()
+    result = parse_check(judge_spec(judge.url("/supported"), token_env="TEST_JUDGE_TOKEN")).assess(ctx)
+
+    assert result.passed is True
+    record = only_record(ctx)
+    assert record.verdict == "supported" and record.http_status == 200
+    for text in (record.rationale, record.model, json.dumps(record.details)):
+        assert text is None or token not in text
+    JudgeRecord.model_validate_json(record.model_dump_json())
+
+
+def test_a_token_inside_the_rationale_is_redacted_there(judge, monkeypatch):
+    monkeypatch.setenv("TEST_JUDGE_TOKEN", "makes the claim")
+    ctx = context()
+    result = parse_check(judge_spec(judge.url("/supported"), token_env="TEST_JUDGE_TOKEN")).assess(ctx)
+
+    assert result.passed is True
+    assert only_record(ctx).rationale == "the reply [redacted] supported"
+
+
+def test_a_redaction_that_fails_keeps_none_of_the_answer_and_never_escapes(judge, monkeypatch):
+    from midojo.verifiers import judge as judge_module
+
+    def broken(value, token):
+        raise RuntimeError(token)
+
+    monkeypatch.setattr(judge_module, "_without", broken)
+    monkeypatch.setenv("TEST_JUDGE_TOKEN", TOKEN)
+    ctx = context()
+    result = parse_check(judge_spec(judge.url("/supported"), token_env="TEST_JUDGE_TOKEN")).assess(ctx)
+
+    assert result.passed is None
+    record = only_record(ctx)
+    assert record.failure == "the judge service's answer could not be redacted (RuntimeError)"
+    assert (record.verdict, record.rationale, record.model, record.details) == (None, None, None, None)
+    assert TOKEN not in record.model_dump_json() and TOKEN not in result.reason
+
+
+def test_any_other_failure_in_a_judge_check_is_unknown(judge, monkeypatch):
+    from midojo.verifiers import judge as judge_module
+
+    def broken(*args):
+        raise KeyError(TOKEN)
+
+    monkeypatch.setattr(judge_module, "response_problem", broken)
+    ctx = context()
+    result = parse_check(judge_spec(judge.url("/supported"))).assess(ctx)
+
+    assert result.passed is None and "the judge check failed (KeyError)" in result.reason
+    assert TOKEN not in result.reason

@@ -50,6 +50,14 @@ def _with(**changes: Any):
 
 _DROP = object()
 
+
+def _nested(depth: int) -> dict:
+    value: dict = {}
+    for _ in range(depth - 1):
+        value = {"deeper": value}
+    return value
+
+
 ANSWERS = {
     "/supported": _valid("supported"),
     "/contradicted": _valid("contradicted"),
@@ -74,7 +82,19 @@ ANSWERS = {
         200,
         {"schema": "midojo.judge.v1", "verdict": "supported", "rationale": headers.get("authorization", "")},
     ),
+    # A valid answer whose response header and reason phrase echo the Authorization header (see the handler).
+    "/echo-in-headers": _valid("supported"),
+    "/verdict-list": _with(verdict=[]),
+    "/verdict-object": _with(verdict={}),
+    "/deep-details": _with(details=_nested(100)),
 }
+
+# Answers whose details hold a constant JSON doesn't have, as Python's json module writes it.
+for _constant in ("NaN", "Infinity", "-Infinity"):
+    ANSWERS[f"/details-{_constant}"] = lambda request, headers, constant=_constant: (
+        200,
+        json.dumps(_valid("supported")(request, headers)[1]).replace('["reply"]', constant).encode(),
+    )
 
 
 class FakeJudge:
@@ -98,7 +118,12 @@ class FakeJudge:
                 time.sleep(judge.delay)
                 status, answer = ANSWERS[self.path](body, headers)
                 content = answer if isinstance(answer, bytes) else json.dumps(answer).encode()
-                self.send_response(status)
+                if self.path == "/echo-in-headers":
+                    # The reason phrase is what httpx logs at INFO; the header is what httpcore logs at DEBUG.
+                    self.send_response(status, headers.get("authorization", ""))
+                    self.send_header("X-Echo", headers.get("authorization", ""))
+                else:
+                    self.send_response(status)
                 if status == 302:
                     self.send_header("Location", "/supported")
                 self.send_header("Content-Type", "application/json")
