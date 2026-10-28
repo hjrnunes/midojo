@@ -1,0 +1,42 @@
+# Only the orchestrator Job reaches the control plane and the bank's real MCP
+# server: the agent reaches its tools through the interceptor the Job serves,
+# never the real server (a call there would go unrecorded) and never the
+# control plane. Enforced only where the cluster's network plugin enforces
+# NetworkPolicy (OpenShift's does).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: minibank-control-plane
+  labels:
+    app.kubernetes.io/part-of: midojo-minibank
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: control-plane
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: orchestrator
+      ports:
+        - port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: minibank-real-mcp
+  labels:
+    app.kubernetes.io/part-of: midojo-minibank
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: real-mcp
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: orchestrator
+      ports:
+        - port: 8083

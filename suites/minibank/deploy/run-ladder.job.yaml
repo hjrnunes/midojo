@@ -20,6 +20,13 @@ spec:
           # Wait for the agent to publish its card, then run the three ladder
           # rungs against the shared honest job. Drop the `-it` flags (or pass
           # different ones) to run the whole suite instead.
+          #
+          # Host mode: for each evaluation midojo-run serves the suite's tools
+          # (suites/minibank/host_tools.py) on an interceptor in this pod, on
+          # port 8766, forwarding to the bank's real MCP server, and gives the
+          # agent only that interceptor's URL (through the minibank-interceptor
+          # Service below) and its bearer token. The session and the control
+          # token stay in this pod.
           command: ["sh", "-c"]
           args:
             - |
@@ -34,12 +41,25 @@ spec:
               PY
               midojo-run \
                 --control-url http://minibank-control-plane:8080 \
-                --agent-url http://minibank-agent:8000 \
+                --agent-uri http://minibank-agent:8000 \
                 --protocol a2a \
                 --suite minibank \
+                --interception host \
+                --upstream-mcp-url http://minibank-real-mcp:8083/mcp \
+                --interceptor-bind 0.0.0.0 \
+                --interceptor-port 8766 \
+                --interceptor-advertise-host minibank-interceptor \
                 -ut recent_transactions \
                 -it ladder_a -it ladder_b -it ladder_c -it garak_hijack \
                 --logdir /tmp/runs
+          env:
+            - name: MIDOJO_CONTROL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: minibank-control-token
+                  key: MIDOJO_CONTROL_TOKEN
+          ports:
+            - containerPort: 8766
           resources:
             requests:
               cpu: 50m
@@ -54,3 +74,19 @@ spec:
               drop: ["ALL"]
             seccompProfile:
               type: RuntimeDefault
+---
+# Where the agent reaches each evaluation's interceptor: the orchestrator Job's
+# pod, on the port midojo-run's --interceptor-port names. The interceptor
+# listens only while an evaluation runs, and accepts only its own bearer token.
+apiVersion: v1
+kind: Service
+metadata:
+  name: minibank-interceptor
+  labels:
+    app.kubernetes.io/part-of: midojo-minibank
+spec:
+  selector:
+    app.kubernetes.io/component: orchestrator
+  ports:
+    - port: 8766
+      targetPort: 8766

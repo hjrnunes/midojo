@@ -15,10 +15,11 @@ images:
 resources:
   - real-mcp.yaml
   - control-plane.yaml
-  - fake-mcp.yaml
   - agent.yaml
   - run-ladder.job.yaml
+  - network-policy.yaml
 
-# NOTE: the agent's LLM-credentials Secret (minibank-llm-creds) is intentionally
-# NOT listed here — create it separately so real creds never get committed.
-# See agent-secret.example.yaml.
+# NOTE: the agent's LLM-credentials Secret (minibank-llm-creds) and the control
+# token Secret (minibank-control-token) are intentionally NOT listed here —
+# create them separately so real secrets never get committed. See
+# agent-secret.example.yaml and control-token-secret.example.yaml.
