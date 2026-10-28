@@ -71,12 +71,13 @@ def _resolve_system_message(suite_name: str) -> str:
     return msg
 
 
-def _resolve_host_tools(suite_name: str) -> HostTools | None:
-    """The suite's ``HOST_TOOLS``: its simulated tools, which run on the host-side interceptor, or None.
+def _host_tools_reference(suite_name: str) -> str | None:
+    """The suite's ``HOST_TOOLS`` declaration, ``"module:function"``, or None: checked, but nothing it names imported.
 
-    A suite module gives them as ``"module:function"``, imported only here, so
-    loading the suite needs no ``midojo-sdk``. The function registers the
-    tools on one evaluation's interceptor (see ``HostInterception.tools``).
+    The suite module declares where its simulated tools are, which run on the
+    host-side interceptor. Reading the declaration imports only the suite
+    module, which ``get_suite`` has already imported, so a run that is refused
+    for it never imports the tools or their dependencies (``midojo-sdk``).
     """
     module_path = suite_name if "." in suite_name else f"suites.{suite_name}"
     try:
@@ -86,12 +87,20 @@ def _resolve_host_tools(suite_name: str) -> HostTools | None:
     reference = getattr(mod, "HOST_TOOLS", None)
     if reference is None:
         return None
-    if not isinstance(reference, str) or reference.count(":") != 1:
+    if not isinstance(reference, str) or reference.count(":") != 1 or not all(reference.split(":")):
         raise click.UsageError(f"{module_path}.HOST_TOOLS must be a 'module:function' string, got {reference!r}.")
+    return reference
+
+
+def _load_host_tools(reference: str) -> HostTools:
+    """The function a ``HOST_TOOLS`` declaration names, imported: it registers the tools on one evaluation's interceptor.
+
+    Called only for a host-mode run (see ``HostInterception.tools``).
+    """
     module_name, function_name = reference.split(":")
     tools = getattr(importlib.import_module(module_name), function_name, None)
     if not callable(tools):
-        raise click.UsageError(f"{module_path}.HOST_TOOLS names {reference!r}, which is not a function.")
+        raise click.UsageError(f"HOST_TOOLS names {reference!r}, which is not a function.")
     return cast("HostTools", tools)
 
 
@@ -1216,9 +1225,10 @@ def main(
     # Unmanaged clients keep their own default timeout unless --agent-timeout is given.
     timeout_kwargs = {} if agent_timeout is None else {"timeout": agent_timeout}
     host_mode = interception == "host"
-    host_tools = _resolve_host_tools(suite_name)
+    host_tools = _host_tools_reference(suite_name)
     if host_tools is not None and not host_mode:
-        # Its tools live on the host-side interceptor: in agent mode the agent would have none that record.
+        # Its tools live on the host-side interceptor: in agent mode the agent would have none that record. Refused
+        # before anything the declaration names is imported.
         raise click.UsageError(
             f"Suite {suite_name!r} serves its tools on the host-side interceptor (HOST_TOOLS): run it with "
             "--interception host and --upstream-mcp-url."
@@ -1237,7 +1247,7 @@ def main(
             port=interceptor_port,
             advertise=interceptor_advertise_host,
             openshell=isinstance(runtime, OpenShellRuntime),
-            tools=host_tools,
+            tools=_load_host_tools(host_tools) if host_tools is not None else None,
         )
         if host_mode
         else None

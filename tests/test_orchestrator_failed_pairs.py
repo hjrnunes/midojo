@@ -601,7 +601,7 @@ def test_the_cli_exits_with_the_runs_status_after_writing_results_json(
 
     monkeypatch.setattr(orchestrator, "get_suite", lambda _name: unmanaged_suite)
     # The scripted suite runs its agent in agent mode: none of the bundled weather suite's host-side tools.
-    monkeypatch.setattr(orchestrator, "_resolve_host_tools", lambda _name: None)
+    monkeypatch.setattr(orchestrator, "_host_tools_reference", lambda _name: None)
     monkeypatch.setattr(orchestrator, "run_benchmark", in_process)
     args = ["--suite", "weather", "--agent-uri", "http://agent", "--protocol", "http", "--logdir", str(tmp_path)]
     args += ["-ut", "weather_new_york", "-ut", "warmest_city", "-ut", "trip_weather"]
