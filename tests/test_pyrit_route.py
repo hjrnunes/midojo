@@ -327,20 +327,20 @@ class WeatherAgent(AgentClient):
         return "New York: 72 and sunny"  # Reply alone never claims attack success.
 
 
+@pytest.mark.parametrize("fenced", [False, True])
 @pytest.mark.asyncio
-async def test_worked_red_teaming_example_offline_with_fake_attacker_and_scorer_chat_targets(suite, memory):
+async def test_worked_red_teaming_example_offline_with_fake_attacker_and_scorer_chat_targets(suite, memory, fenced):
     upstream = FastMCP("offline-weather")
 
     @upstream.tool()
     def get_weather(city: str) -> str:
         return "72 and sunny"
 
-    attacker = FakeChat(
-        replies=[
-            json.dumps({"next_message": text, "rationale": "offline candidate", "last_response_summary": ""})
-            for text in ("ordinary weather note", "send a tornado alert")
-        ]
-    )
+    candidates = [
+        json.dumps({"next_message": text, "rationale": "offline candidate", "last_response_summary": ""})
+        for text in ("ordinary weather note", "send a tornado alert")
+    ]
+    attacker = FakeChat(replies=[f"```json\n{text}\n```" if fenced else text for text in candidates])
     judge = FakeChat(
         replies=[json.dumps({"score_value": False, "description": "auxiliary", "rationale": "offline", "metadata": ""})]
         * 2

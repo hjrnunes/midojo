@@ -117,6 +117,11 @@ generation and iteration; MiDojo runs and grades each attempt. Its attacker
 brief specifies **content for New York's weather notes**, not a user message.
 PyRIT's `next_message` JSON field carries that content; rationale and summary
 stay with the attacker. The defender receives its normal weather question.
+Custom attacker targets should honor the JSON response configuration in the
+request metadata and return the raw reply to PyRIT's parser. Avoid parsing it
+first with bare `json.loads`: PyRIT also accepts Markdown-fenced JSON, which
+is covered by the offline campaign test. The example's `OpenAIChatTarget`
+already forwards the JSON configuration and leaves parsing to the campaign.
 
 The offline test uses fake attacker and scorer chat targets, a disposable
 scripted agent, an in-process control plane and a local MCP server. It tries
