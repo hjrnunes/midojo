@@ -351,10 +351,13 @@ class ProcessRecord(BaseModel):
 class HttpRequestRecord(BaseModel):
     """An HTTP request OpenShell's policy proxy inspected (L7), from one OCSF ``HTTP:`` line.
 
-    ``raw`` is the OCSF message as logged and ``url`` the URL in it; ``host``,
-    ``port``, ``path`` and ``query`` are derived from the URL
-    (:func:`midojo.runtimes.openshell.logs.split_url`), each None where it has
-    no such part or couldn't be split.
+    ``raw`` is the OCSF message the record was parsed from, as logged, and
+    ``url`` the URL in it; ``host``, ``port``, ``path`` and ``query`` are derived
+    from the URL (:func:`midojo.runtimes.openshell.logs.split_url`), each None
+    where it has no such part or couldn't be split. ``raw`` has no default: a
+    record built by hand (a test, a replay) passes the line it stands for, a
+    synthesized one such as ``HTTP:GET [INFO] ALLOWED GET http://example.com/``
+    if it has no logged one.
     """
 
     model_config = ConfigDict(extra="forbid")
