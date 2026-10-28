@@ -9,7 +9,7 @@ from midojo.yaml_task_suite import YAMLTaskSuite
 
 
 @pytest.fixture
-def benchmark(monkeypatch):
+def benchmark(monkeypatch, plain_suite):
     for name in ("MODEL_NAME", "MCP_SERVER_URL", "OPENAI_API_KEY"):
         monkeypatch.delenv(name, raising=False)
     benchmark = AsyncMock(return_value=orchestrator.BenchmarkOutcome(graded=1, failed=0))
@@ -32,7 +32,7 @@ def test_missing_inference_config_stops_before_benchmark(benchmark, protocol, mi
     env.pop(missing)
     result = CliRunner().invoke(
         orchestrator.main,
-        ["--suite", "minibank", "--agent-uri", "http://agent", "--protocol", protocol],
+        ["--suite", "plain", "--agent-uri", "http://agent", "--protocol", protocol],
         env=env,
     )
     assert result.exit_code == 2
@@ -42,7 +42,7 @@ def test_missing_inference_config_stops_before_benchmark(benchmark, protocol, mi
 
 @pytest.mark.parametrize("protocol", ["ogx", "openai", "http"])
 def test_cli_resolves_inference_config_only_for_responses_protocols(benchmark, protocol):
-    args = ["--suite", "minibank", "--agent-uri", "http://agent", "--protocol", protocol]
+    args = ["--suite", "plain", "--agent-uri", "http://agent", "--protocol", protocol]
     env = {}
     if protocol != "http":
         env = {"MODEL_NAME": "env-model", "MCP_SERVER_URL": "http://env-tools/mcp"}
@@ -67,8 +67,8 @@ def test_cli_resolves_inference_config_only_for_responses_protocols(benchmark, p
     [
         (["--suite", "document_assistant"], "requires --gateway"),
         (["--suite", "document_assistant", "--gateway", "g", "--protocol", "http"], "instead of --agent-uri"),
-        (["--suite", "minibank", "--gateway", "g", "--agent-uri", "http://agent", "--protocol", "http"], "unmanaged"),
-        (["--suite", "minibank", "--agent-uri", "http://agent"], "requires --agent-uri and --protocol"),
+        (["--suite", "plain", "--gateway", "g", "--agent-uri", "http://agent", "--protocol", "http"], "unmanaged"),
+        (["--suite", "plain", "--agent-uri", "http://agent"], "requires --agent-uri and --protocol"),
     ],
 )
 def test_cli_flags_must_match_the_suite_runtime(benchmark, args, message):
@@ -89,11 +89,11 @@ def test_openshell_suite_runs_on_the_gateway(benchmark):
 @pytest.mark.parametrize(
     "suite_name,task_id,args,via",
     [
-        ("minibank", "account_balance", ["--agent-uri", "http://agent", "--protocol", "http"], "--protocol http"),
-        ("minibank", "account_balance", ["--agent-uri", "http://agent", "--protocol", "a2a"], "--protocol a2a"),
+        ("plain", "account_balance", ["--agent-uri", "http://agent", "--protocol", "http"], "--protocol http"),
+        ("plain", "account_balance", ["--agent-uri", "http://agent", "--protocol", "a2a"], "--protocol a2a"),
     ],
 )
-def test_multiturn_task_exits_before_creating_a_run(monkeypatch, suite_name, task_id, args, via):
+def test_multiturn_task_exits_before_creating_a_run(monkeypatch, plain_suite, suite_name, task_id, args, via):
     suite = orchestrator.get_suite(suite_name)
     monkeypatch.setattr(suite.user_tasks[task_id], "turns", ["First message", "Follow-up"])
     monkeypatch.setattr(orchestrator, "get_suite", lambda name: suite)
@@ -116,7 +116,7 @@ def test_multiturn_task_exits_before_creating_a_run(monkeypatch, suite_name, tas
 )
 def test_cli_passes_the_control_token_to_the_benchmark(benchmark, monkeypatch, args, env, expected):
     monkeypatch.delenv("MIDOJO_CONTROL_TOKEN", raising=False)
-    args = ["--suite", "minibank", "--agent-uri", "http://agent", "--protocol", "http", *args]
+    args = ["--suite", "plain", "--agent-uri", "http://agent", "--protocol", "http", *args]
     result = CliRunner().invoke(orchestrator.main, args, env=env)
     assert result.exit_code == 0, result.exception
     assert benchmark.call_args.kwargs["control_token"] == expected
@@ -161,7 +161,7 @@ def test_openshell_agent_timeout_defaults_to_300(benchmark):
 @pytest.mark.parametrize("args,timeout", [([], 120), (["--agent-timeout", "600"], 600)])
 def test_agent_timeout_flag_reaches_unmanaged_clients(benchmark, protocol, args, timeout):
     env = {"MODEL_NAME": "model-id", "MCP_SERVER_URL": "http://tools/mcp", "OPENAI_API_KEY": "test-key"}
-    cli = ["--suite", "minibank", "--agent-uri", "http://agent", "--protocol", protocol, *args]
+    cli = ["--suite", "plain", "--agent-uri", "http://agent", "--protocol", protocol, *args]
     result = CliRunner().invoke(orchestrator.main, cli, env=env)
     assert result.exit_code == 0, result.exception
     assert benchmark.call_args.kwargs["agent_client"].timeout == timeout

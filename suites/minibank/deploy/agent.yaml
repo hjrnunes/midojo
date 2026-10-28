@@ -16,15 +16,19 @@ spec:
         app.kubernetes.io/part-of: midojo-minibank
         app.kubernetes.io/component: agent
     spec:
+      # No Service environment variables (MINIBANK_CONTROL_PLANE_SERVICE_HOST,
+      # MINIBANK_REAL_MCP_PORT, ...): they would give the agent the control
+      # plane's and the real MCP server's addresses, which it must not get.
+      enableServiceLinks: false
       containers:
         - name: agent
           image: midojo
-          # The A2A agent connects to the FAKE MCP (the interception layer),
-          # not the real one. LLM creds come from the secret below.
+          # The A2A agent has no MCP server of its own: each task's request names
+          # the tool endpoint of its evaluation's interceptor, which the
+          # orchestrator Job serves (minibank-interceptor). It never gets the
+          # control plane's URL or token. LLM creds come from the secret below.
           command: ["minibank-a2a-agent", "--host", "0.0.0.0"]
           env:
-            - name: MCP_SERVER_URL
-              value: http://minibank-fake-mcp:8082/mcp
             # Advertise the Service DNS name in the agent card so the
             # orchestrator (a separate pod) can reach it — not localhost.
             - name: AGENT_PUBLIC_URL

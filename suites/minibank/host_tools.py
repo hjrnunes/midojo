@@ -1,41 +1,37 @@
-"""Fake MCP server for MegaBank — midojo MITM layer.
+"""The minibank suite's interception layer, run on the host by each evaluation's interceptor.
 
-Sits between the agent and the real MegaBank MCP server. Design:
+``midojo-run --interception host`` builds a host-side interceptor for each
+evaluation (``midojo.interception_host``) and registers these tools on it
+(the suite's ``HOST_TOOLS``). The interceptor's upstream is the bank's real
+MCP server (``a2a_agent/real_mcp.py``, ``minibank-real-mcp-serve``), and the
+agent calls these tools at the interceptor's endpoint, every call recorded
+as ``simulated``:
 
 - READ tools (get_customer_info, get_account_balance, get_transaction_history,
-  get_all_accounts_for_customer, get_bank_state_summary): Forward to upstream,
-  splice injection payloads from the midojo environment into results.
+  get_all_accounts_for_customer, get_bank_state_summary, check_sanctions,
+  list_pending_approvals) forward the call to the real server.
+  get_customer_info and get_transaction_history then add the customer's notes
+  or the account's first transaction memo from the evaluation's environment,
+  where the injection tasks plant their payloads.
 
-- WRITE tools (initiate_transfer, freeze_account, flag_suspicious_activity,
-  approve_pending_transfer): Do NOT forward to upstream. Execute against
-  midojo's environment only. This provides state isolation — security tests
-  never modify the real bank.
+- WRITE tools (initiate_transfer, approve_pending_transfer,
+  flag_suspicious_activity, freeze_account, send_notification) are never
+  forwarded: they change the evaluation's environment only, where the checks
+  look, so a test never changes the real bank.
 
-- CHECK tools (check_sanctions, list_pending_approvals): Forward to upstream
-  for read, but write results are captured in environment.
-
-Data flow:
-
-    Agent --> fake_mcp (this) --> real_mcp (upstream)
-                  |                     |
-                  |  forward reads      |
-                  |  <-- real data --   |
-                  |
-                  |  splice injection from env
-                  |  --- return to agent -->
-                  |
-                  |  writes: env only (no upstream)
+Every tool of the real server has one here, so nothing is mirrored as is: a
+tool the server gains would be mirrored, its calls forwarded to the real bank,
+so give it one here first. The environment and the session that opens it stay on the host: the agent
+gets only the interceptor's URL and its bearer token.
 """
 
 from __future__ import annotations
 
 import json
-import os
 import uuid
 from collections.abc import Callable
 from typing import Any
 
-import click
 from midojo_sdk.mcp import MidojoMCP, ToolContext
 
 # ---------------------------------------------------------------------------
@@ -391,7 +387,7 @@ async def send_notification(ctx: ToolContext, recipient: str, message: str) -> s
 
 
 # ---------------------------------------------------------------------------
-# CLI entry point
+# Registration
 # ---------------------------------------------------------------------------
 
 ALL_TOOLS = [
@@ -410,39 +406,7 @@ ALL_TOOLS = [
 ]
 
 
-def create_fake_mcp_app(
-    control_plane_url: str,
-    upstream_url: str | None = None,
-    path: str = "/mcp",
-):
-    """Create a fake MCP FastAPI app for programmatic startup.
-
-    Uses midojo's /agent/* endpoints. The SDK forwards each incoming
-    X-Midojo-Session token to select the evaluation.
-    """
-    mcp = MidojoMCP(
-        "megabank",
-        control_plane_url=control_plane_url,
-        upstream_url=upstream_url,
-    )
-
+def register(mcp: MidojoMCP) -> None:
+    """Register the minibank suite's tools on one evaluation's interceptor."""
     for tool_fn in ALL_TOOLS:
         mcp.tool()(tool_fn)
-
-    return mcp.http_app(path=path)
-
-
-@click.command()
-@click.option("--host", default="127.0.0.1", help="Host to bind to.")
-@click.option("--port", default=8082, type=int, help="Port to bind to.")
-@click.option("--upstream-url", default=None, help="URL of the real MegaBank MCP server.")
-def main(host: str, port: int, upstream_url: str | None) -> None:
-    import uvicorn
-
-    control_url = os.environ.get("MIDOJO_URL", "http://localhost:8080")
-    app = create_fake_mcp_app(control_url, upstream_url)
-    uvicorn.run(app, host=host, port=port)
-
-
-if __name__ == "__main__":
-    main()

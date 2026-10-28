@@ -9,7 +9,7 @@ from midojo.control_plane.inprocess import InProcessAgentClient
 from midojo.control_plane.main import create_app
 from midojo.control_plane.service import BySession
 from midojo.suites import get_suite
-from suites.minibank.a2a_agent import fake_mcp as minibank
+from suites.minibank import host_tools as minibank
 from suites.weather import host_tools as weather
 
 

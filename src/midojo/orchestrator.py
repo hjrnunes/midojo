@@ -831,7 +831,7 @@ async def _run_benchmark(
     if interception is not None and not agent_client.supports_host_interception:
         raise click.UsageError(
             f"--protocol {protocol} can't give the agent a tool endpoint. Host interception supports --protocol "
-            "openai, ogx and pi, and the openshell runtime."
+            "openai, ogx, a2a and pi, and the openshell runtime."
         )
     if attempts > 1 and attempt_isolation(runtime) is None:
         raise click.UsageError(

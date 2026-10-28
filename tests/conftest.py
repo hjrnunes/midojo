@@ -64,3 +64,27 @@ def no_http(monkeypatch):
 
     monkeypatch.setattr(httpx.Client, "send", refuse)
     monkeypatch.setattr(httpx.AsyncClient, "send", refuse_async)
+
+
+PLAIN_SUITE = """
+agent_runtime: {type: unmanaged}
+environment: {balance: 100}
+user_tasks:
+  - id: account_balance
+    prompt: "What is the balance?"
+    utility: {output_contains: "100"}
+"""
+
+
+@pytest.fixture
+def plain_suite(monkeypatch, tmp_path) -> str:
+    """The name of an unmanaged suite with no host tools, which runs in agent mode or host mode: ``plain``."""
+    from midojo import orchestrator
+    from midojo.yaml_task_suite import YAMLTaskSuite
+
+    path = tmp_path / "suite.yaml"
+    path.write_text(PLAIN_SUITE)
+    plain = YAMLTaskSuite("plain", suite_yaml_path=path)
+    bundled = orchestrator.get_suite
+    monkeypatch.setattr(orchestrator, "get_suite", lambda name: plain if name == "plain" else bundled(name))
+    return "plain"

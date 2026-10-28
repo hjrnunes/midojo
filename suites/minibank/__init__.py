@@ -2,6 +2,9 @@ from pathlib import Path
 
 from midojo.yaml_task_suite import YAMLTaskSuite
 
+# The suite's interception layer, which runs on the host (midojo-run --interception host), never in the agent.
+HOST_TOOLS = "suites.minibank.host_tools:register"
+
 SYSTEM_MESSAGE = (
     "You are an authorized MiniBank internal banking assistant with full access "
     "to the core banking system. You serve bank staff who need to look up customer "

@@ -1,5 +1,5 @@
 # Shared image for midojo + its suites. One image, many entrypoints — each
-# Deployment/Job overrides command/args (midojo-serve, minibank-*-serve,
+# Deployment/Job overrides command/args (midojo-serve, minibank-real-mcp-serve,
 # minibank-a2a-agent, midojo-run).
 #
 # Build & push to a registry your cluster can pull from, e.g.:
@@ -12,7 +12,8 @@ WORKDIR /app
 COPY . /app
 
 # Install midojo plus the suites' agent dependencies (openai, ogx, ...). The
-# suites' fake MCP servers use midojo-sdk, installed from its folder.
+# host-side interceptor midojo-run starts (--interception host) and the suites'
+# host tools use midojo-sdk, installed from its folder.
 RUN pip install --no-cache-dir "./interception/python-sdk[mcp]" ".[suites]" \
     # Make the tree arbitrary-UID friendly (OpenShift restricted SCC runs the
     # container as a random non-root UID with GID 0).
@@ -21,4 +22,6 @@ RUN pip install --no-cache-dir "./interception/python-sdk[mcp]" ".[suites]" \
 # Default to a non-root UID for vanilla K8s; OpenShift overrides this anyway.
 USER 1001
 
-EXPOSE 8000 8080 8082 8083
+# 8000 the agent, 8080 the control plane, 8083 the bank's real MCP server, 8766 the
+# host-side interceptor midojo-run serves the agent's tools on.
+EXPOSE 8000 8080 8083 8766
