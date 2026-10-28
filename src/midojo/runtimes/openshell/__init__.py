@@ -75,7 +75,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from midojo.control_plane.config import CONTROL_TOKEN_ENV
 from midojo.observations import EvidenceStatus, register_observation_type
 from midojo.probes import substitute_probes
-from midojo.runtimes.openshell.logs import OCSFEvents, parse_ocsf_lines
+from midojo.runtimes.openshell.logs import HttpEvent, OCSFEvents, parse_ocsf_lines
 from midojo.tool_endpoint import HOST_MODE_WITHHELD_ENV, SESSION_ENV, ToolEndpoint
 
 # ---------------------------------------------------------------------------
@@ -351,9 +351,10 @@ class ProcessRecord(BaseModel):
 class HttpRequestRecord(BaseModel):
     """An HTTP request OpenShell's policy proxy inspected (L7), from one OCSF ``HTTP:`` line.
 
-    ``url`` is as logged; ``host``, ``port``, ``path`` and ``query`` are derived
-    from it (:func:`midojo.runtimes.openshell.logs.split_url`), each None where
-    the URL has no such part or couldn't be split.
+    ``raw`` is the OCSF message as logged and ``url`` the URL in it; ``host``,
+    ``port``, ``path`` and ``query`` are derived from the URL
+    (:func:`midojo.runtimes.openshell.logs.split_url`), each None where it has
+    no such part or couldn't be split.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -365,6 +366,21 @@ class HttpRequestRecord(BaseModel):
     port: int | None = None  # only when the URL names one
     path: str | None = None  # "/" for a URL with no path
     query: str | None = None  # without the "?"; None when empty
+    raw: str  # the OCSF message the record was parsed from
+
+    @classmethod
+    def of(cls, event: HttpEvent) -> HttpRequestRecord:
+        """The record of a parsed ``HTTP:`` line."""
+        return cls(
+            method=event.method,
+            url=event.url,
+            decision="allowed" if event.action == "ALLOWED" else "denied",
+            host=event.host,
+            port=event.port,
+            path=event.path,
+            query=event.query,
+            raw=event.raw,
+        )
 
 
 class OpenShellEvidence(BaseModel):
@@ -948,18 +964,7 @@ class OpenShellRuntime:
             network_calls_interrupted=ocsf.network_interrupted_endpoints,
             network_callers=ocsf.network_callers,
             security_findings=[f.title for f in ocsf.findings],
-            http_requests=[
-                HttpRequestRecord(
-                    method=e.method,
-                    url=e.url,
-                    decision="allowed" if e.action == "ALLOWED" else "denied",
-                    host=e.host,
-                    port=e.port,
-                    path=e.path,
-                    query=e.query,
-                )
-                for e in ocsf.http_requests
-            ],
+            http_requests=[HttpRequestRecord.of(e) for e in ocsf.http_requests],
             image=self._image,
             policy_digest=self._policy_digest,
         )

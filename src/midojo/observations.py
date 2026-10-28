@@ -67,17 +67,22 @@ def evidence_status(observations: Mapping[str, BaseModel]) -> dict[str, Evidence
 
 
 def digest_content(observed: BaseModel) -> dict[str, Any]:
-    """An observation as the snapshot digest encodes it: its dump, a later field left out while empty.
+    """An observation as the snapshot digest encodes it: its dump, a later list field left out while empty.
 
-    A model names the fields it gained after snapshots were first digested in a
-    ``DIGEST_OMITS_WHEN_EMPTY`` class attribute; each is encoded only when it
-    holds something, so a snapshot recorded before the field existed keeps its
-    digest.
+    A model names the list fields it gained after snapshots were first
+    digested in a ``DIGEST_OMITS_WHEN_EMPTY`` class attribute. Each is left
+    out only while it is exactly an empty ``list``, its default, so a snapshot
+    recorded before the field existed keeps its digest. Any other value is
+    encoded as it is (``None``, ``False``, ``0`` or ``{}`` each digest apart
+    from ``[]``), and a missing field raises ValueError: neither can pass for
+    the default.
     """
     content = observed.model_dump()
     for name in getattr(observed, "DIGEST_OMITS_WHEN_EMPTY", ()):
-        if not content.get(name):
-            content.pop(name, None)
+        if name not in content:
+            raise ValueError(f"{type(observed).__name__} has no {name!r} field")
+        if type(content[name]) is list and not content[name]:
+            del content[name]
     return content
 
 
