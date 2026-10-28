@@ -54,7 +54,7 @@ into the sandbox when it is set.
 ## Run
 
 ```bash
-uv run midojo-serve --load-suite document_assistant --port 8090
+uv run midojo-serve --load-suite document_assistant --host 127.0.0.1 --port 8090
 uv run midojo-run --suite document_assistant --gateway GATEWAY_NAME \
   --control-url http://localhost:8090
 ```
@@ -67,33 +67,30 @@ if the server needs one.
 Each run gets a workspace such as `midojo-docum-k7p2xa`, with a shortened suite
 name and a six-character suffix (retried if already taken). Each evaluation gets
 a 10-character hexadecimal ID, checked for uniqueness across runs in the control
-plane, and a sandbox named `eval-<id>`, such as `eval-c896124bda`. The same ID is
-used in the API, logs, and labels. Both names fit OpenShell's 19-character limit.
+plane and used in the API and logs. As the sandbox gets no session, its name and
+labels name no run, evaluation or task either: it is named `sbx-<hex>`, a random
+name, and labelled only with `midojo.suite`, and `midojo-run` logs which sandbox
+runs each evaluation. Both names fit OpenShell's 19-character limit.
 
-Workspace labels retain `midojo.suite` and `midojo.run-id`. Sandbox labels add
-`midojo.eval-id`, `midojo.user-task`, and `midojo.injection-task` with their full
-values. The injection label is omitted for utility-only evaluations. Session
-tokens are never put in names or labels.
+Workspace labels retain `midojo.suite` and `midojo.run-id`. Session tokens are
+never put in names or labels.
 
 ## How injections are observed
 
-This image bundles the midojo `pi-sdk` and a report-only extension
-(`.pi/agent/extensions/00-midojo.ts`, in pi's global agent dir so it loads
-regardless of the agent's working directory) that reports the agent's file reads
-to the control plane. That is how the agent's reads of a file seeded into
-`/sandbox/workdir` show up in the evaluation's recorded tool calls. A seeded
-file's payload has no delivery fact (no interceptor placed it), so midojo
-reports its exposure as unknown either way. Without the extension, no file
-reads are recorded.
+OpenShell observes the agent from outside the sandbox: files created,
+modified or deleted in `/sandbox/workdir` (and new files' contents), the
+processes it launched, its network calls, allowed or blocked, and security
+findings. Every check of this suite reads those observations, so nothing in
+the sandbox records the agent's tool calls, and the suite sets
+`inject_session: false`: the sandbox gets no evaluation session, no
+control-plane URL and no control token, and its network policy has no rule
+for the control plane, which the sandbox never reaches. The control plane can
+then listen on loopback (`--host 127.0.0.1`).
 
-For that reporting to work, **the sandbox network policy must allow the control
-plane**. midojo does not add this rule for you (a network policy is a security
-control — what you declare is what runs); it only warns at startup if the rule
-is missing. The example `suite.yaml` already includes it:
-
-- host: always `host.openshell.internal` (how the sandbox reaches the machine
-  running `midojo-serve`; `localhost` would be the sandbox itself)
-- port: **must match `--control-url`** — `8090` here. Change one, change both.
+The evaluation's `function_calls` evidence is `incomplete` (no layer recorded
+a call), which no check of this suite reads. A seeded file's payload has no
+delivery fact (no interceptor placed it), so MiDojo reports its exposure as
+unknown.
 
 ## Bring your own agent
 
