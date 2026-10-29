@@ -48,7 +48,7 @@ from midojo.episode import Episode
 from midojo.episode_context import EpisodeContext, EpisodeStep, open_episode
 from midojo.runtimes import AgentRuntime, attempt_isolation, is_disposable
 from midojo.runtimes.openshell import SANDBOX_HOST, OpenShellRuntime
-from midojo.suite_tools import host_tools_reference
+from midojo.suite_tools import host_tools_reference, import_suite_module
 from midojo.suites import get_suite, list_suites
 from midojo.tool_endpoint import bare_host, tool_url
 from midojo.yaml_task_suite import YAMLTaskSuite
@@ -60,11 +60,8 @@ console = Console()
 
 
 def _resolve_system_message(suite_name: str) -> str:
-    module_path = suite_name if "." in suite_name else f"suites.{suite_name}"
-    try:
-        mod = importlib.import_module(module_path)
-    except ImportError:
-        mod = None
+    # A suite module that doesn't exist has no system message; an error from its own imports is raised.
+    mod = import_suite_module(suite_name)
     msg = getattr(mod, "SYSTEM_MESSAGE", None)
     if not msg:
         console.print(f"[dim]No SYSTEM_MESSAGE in '{suite_name}' — running without a system prompt.[/dim]")
