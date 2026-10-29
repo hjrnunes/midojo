@@ -610,7 +610,8 @@ def test_the_orchestrator_star_import_names_the_missing_capability_without_the_d
     assert result.stdout.strip() == "ok"
 
 
-# The submodules a bare ``import midojo`` made reachable as attributes at the base of this change, and its __all__.
+# At the base of this change: every chain of child-module attributes (midojo.X.Y..., each the module of that name)
+# that resolved after a bare ``import midojo``, found by walking the package's module attributes; and its __all__.
 _BASE_REACHABLE = (
     "midojo.control_plane",
     "midojo.control_plane.config",
@@ -668,19 +669,37 @@ print("ok")
     assert result.stdout.strip() == "ok"
 
 
-def test_a_bare_import_reaches_the_openshell_runtime_modules_when_read():
+@pytest.mark.parametrize("entry", ["midojo", *_BASE_REACHABLE])
+def test_every_submodule_chain_a_bare_import_reached_resolves_whichever_module_is_imported_first(entry):
+    # _BASE_REACHABLE is every dotted chain of child modules (midojo.X.Y...) that resolved after a bare
+    # ``import midojo`` at the base of this change. Importing any one of them first must leave all of them reachable,
+    # each the module of that name, and importing a light one, or reading the light chains, must not load the runtime.
+    light = [name for name in _BASE_REACHABLE if not name.startswith("midojo.runtimes.openshell")]
+    heavy = [name for name in _BASE_REACHABLE if name not in light]
     result = _run(
         f"""
-        import sys
-        import midojo
-        assert "midojo.runtimes.openshell" not in sys.modules
-        for name in {[n for n in _BASE_REACHABLE if n.startswith("midojo.runtimes.openshell")]!r}:
-            value = midojo
-            for part in name.split(".")[1:]:
-                value = getattr(value, part)
-            assert value is sys.modules[name], name
-        print("ok")
-        """
+import sys
+import {entry}
+import midojo
+
+def loaded():
+    return sorted(name for name in {HEAVY!r} if name in sys.modules)
+
+def resolve(name):
+    value = midojo
+    for part in name.split(".")[1:]:
+        value = getattr(value, part)
+    assert value is sys.modules[name], name
+
+if {entry!r} in {light!r} or {entry!r} == "midojo":
+    assert not loaded(), f"importing {entry} loaded {{loaded()}}"
+for name in {light!r}:
+    resolve(name)
+    assert {entry!r} in {heavy!r} or not loaded(), f"reading {{name}} loaded {{loaded()}}"
+for name in {heavy!r}:
+    resolve(name)
+print("ok")
+"""
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "ok"

@@ -35,19 +35,12 @@ _EXPORTS = {
 }
 
 
-# The child modules ``import midojo`` loaded when it imported the OpenShell runtime up front, each with the
-# descendants it brought along that don't load that runtime (``midojo.runtimes.openshell`` is lazy in its parent).
-# Each stays reachable from the package, imported on first access.
-_SUBMODULES: dict[str, tuple[str, ...]] = {
-    "control_plane": ("config",),
-    "observations": (),
-    "probes": (),
-    "runtimes": (),
-    "suite_definition": (),
-    "tool_endpoint": (),
-    "types": (),
-    "verifiers": ("builtin", "combinators", "judge", "openshell", "tool_call_condition"),
-}
+# The child modules ``import midojo`` loaded when it imported the OpenShell runtime up front, each imported on first
+# access. Their own descendants it loaded are reachable from each child however it was imported: a child that doesn't
+# import them itself makes them lazy attributes of its own (``control_plane.config``, ``runtimes.openshell``).
+_SUBMODULES = frozenset(
+    {"control_plane", "observations", "probes", "runtimes", "suite_definition", "tool_endpoint", "types", "verifiers"}
+)
 
 
 def __getattr__(name: str) -> Any:
@@ -57,10 +50,7 @@ def __getattr__(name: str) -> Any:
     if module is not None:
         return getattr(importlib.import_module(module), name)
     if name in _SUBMODULES:
-        child = importlib.import_module(f"{__name__}.{name}")
-        for descendant in _SUBMODULES[name]:
-            importlib.import_module(f"{__name__}.{name}.{descendant}")
-        return child
+        return importlib.import_module(f"{__name__}.{name}")
     raise AttributeError(f"module 'midojo' has no attribute {name!r}")
 
 
