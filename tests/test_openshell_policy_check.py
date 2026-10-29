@@ -11,8 +11,8 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from google.protobuf.json_format import MessageToDict
-from openshell._proto import openshell_pb2
+from google.protobuf.json_format import MessageToDict, ParseError
+from openshell._proto import openshell_pb2, sandbox_pb2
 from pydantic import ValidationError
 
 import midojo.runtimes.openshell as openshell_runtime
@@ -67,62 +67,118 @@ def test_another_host_or_port_does_not_match(endpoint):
     assert _policy_rules_allowing(_policy(endpoint), HOST, 8766) == []
 
 
-@pytest.mark.parametrize(
-    "policy",
-    [
-        {},
-        {"networkPolicies": None},
-        {"networkPolicies": ["tools"]},
-        {"networkPolicies": {"tools": "endpoints"}},
-        {"networkPolicies": {"tools": {"endpoints": {"host": HOST, "port": 8766}}}},
-        _policy("host.openshell.internal:8766"),
-        _policy(None),
-        _policy([HOST, 8766]),
-        _policy({"host": 8766, "port": 8766}),
-        _policy({"host": None, "port": 8766}),
-        _policy({"host": HOST, "port": True}),
-        _policy({"host": HOST, "ports": [True]}),
-        _policy({"host": HOST, "port": "eighty"}),
-        _policy({"host": HOST, "port": " 8766"}),
-        _policy({"host": HOST, "port": "+8766"}),
-        _policy({"host": HOST, "port": "8766.0"}),
-        _policy({"host": HOST, "port": "\uff18\uff17\uff16\uff16"}),  # fullwidth digits
-        _policy({"host": HOST, "port": "\u0668766"}),
-        _policy({"host": HOST, "port": None}),
-        _policy({"host": HOST, "port": [8766]}),
-        _policy({"host": HOST, "ports": "8766"}),
-        _policy({"host": HOST, "port": "9" * 5000}),
-        _policy({"host": HOST, "ports": ["9" * 5000]}),
-        _policy({"host": HOST, "port": 0}),
-        _policy({"host": HOST, "port": -8766}),
-        _policy({"host": HOST, "port": 65536}),
-        _policy({"host": HOST, "port": "70000"}),
-        _policy({"host": HOST, "port": 8766 + 2**32}),
-    ],
-)
-def test_a_malformed_entry_never_raises_and_never_matches(policy):
-    assert _policy_rules_allowing(policy, HOST, 8766) == []
+_FULLWIDTH_8766 = "\uff18\uff17\uff16\uff16"
+_ARABIC_INDIC_8 = "\u0668"
+
+# Each policy's network rules as written, against the policy the sandbox gets from them (_resolve_policy).
+_POLICY_CASES = [
+    # Port spellings protobuf reads as 8766.
+    _policy({"host": HOST, "port": 8766}),
+    _policy({"host": HOST, "port": "8766"}),
+    _policy({"host": HOST, "port": "+8766"}),
+    _policy({"host": HOST, "port": "8766.0"}),
+    _policy({"host": HOST, "port": 8766.0}),
+    _policy({"host": HOST, "port": _FULLWIDTH_8766}),
+    _policy({"host": HOST, "port": f"{_ARABIC_INDIC_8}766"}),
+    _policy({"host": HOST, "port": "0" * 5000 + "8766"}),
+    # Other ports, unset ones and ones protobuf refuses.
+    _policy({"host": HOST, "port": 8765}),
+    _policy({"host": HOST, "port": "1e3"}),
+    _policy({"host": HOST, "port": 0}),
+    _policy({"host": HOST, "port": "0"}),
+    _policy({"host": HOST, "port": "-0"}),
+    _policy({"host": HOST, "port": None}),
+    _policy({"host": HOST}),
+    _policy({"host": HOST, "port": 65536}),
+    _policy({"host": HOST, "port": "70000"}),
+    _policy({"host": HOST, "port": -8766}),
+    _policy({"host": HOST, "port": 8766 + 2**32}),
+    _policy({"host": HOST, "port": 8766.5}),
+    _policy({"host": HOST, "port": True}),
+    _policy({"host": HOST, "port": False}),
+    _policy({"host": HOST, "port": "eighty"}),
+    _policy({"host": HOST, "port": " 8766"}),
+    _policy({"host": HOST, "port": "0x223e"}),
+    _policy({"host": HOST, "port": [8766]}),
+    _policy({"host": HOST, "port": "9" * 5000}),
+    # ports, in both orders, beside an unset, other or refused port.
+    _policy({"host": HOST, "ports": [8765, 8766]}),
+    _policy({"host": HOST, "ports": [8766, 8765]}),
+    _policy({"host": HOST, "ports": ["8766"]}),
+    _policy({"host": HOST, "ports": [0]}),
+    _policy({"host": HOST, "port": 0, "ports": [8766]}),
+    _policy({"host": HOST, "port": "0", "ports": [8766]}),
+    _policy({"host": HOST, "port": None, "ports": [8766]}),
+    _policy({"host": HOST, "port": 8766, "ports": None}),
+    _policy({"host": HOST, "port": 443, "ports": ["+8766"]}),
+    _policy({"host": HOST, "port": 70000, "ports": [8766]}),
+    _policy({"host": HOST, "port": 8766, "ports": "garbage"}),
+    _policy({"host": HOST, "port": 8766, "ports": 8766}),
+    _policy({"host": HOST, "port": 8766, "ports": [8765, "x"]}),
+    _policy({"host": HOST, "port": 8766, "ports": [True]}),
+    _policy({"host": HOST, "port": "x", "ports": [8766]}),
+    _policy({"host": HOST, "port": "9" * 5000, "ports": [8766]}),
+    _policy({"host": HOST, "ports": ["9" * 5000]}),
+    # Hosts.
+    _policy({"host": "Host.OpenShell.Internal", "port": 8766}),
+    _policy({"host": f"{HOST}.", "port": "8766"}),
+    _policy({"host": f"{HOST}..", "port": 8766}),
+    _policy({"host": f"tools.{HOST}", "port": 8766}),
+    _policy({"host": "other.internal", "port": 8766}),
+    _policy({"host": 8766, "port": 8766}),
+    _policy({"host": None, "port": 8766}),
+    _policy({"host": HOST, "port": 8766, "unknown": 1}),
+    # Rules and endpoints of the wrong shape.
+    {"networkPolicies": None},
+    {"networkPolicies": ["tools"]},
+    {"networkPolicies": {"tools": "endpoints"}},
+    {"networkPolicies": {"tools": {"endpoints": {"host": HOST, "port": 8766}}}},
+    _policy("host.openshell.internal:8766"),
+    _policy(None),
+    _policy([HOST, 8766]),
+]
 
 
-@pytest.mark.parametrize(
-    "endpoint",
-    [
-        {"host": HOST, "port": 8766, "ports": "garbage"},
-        {"host": HOST, "port": 8766, "ports": 8766},
-        {"host": HOST, "port": 8766, "ports": [8765, "x"]},
-        {"host": HOST, "port": 8766, "ports": [True]},
-        {"host": HOST, "port": "x", "ports": [8766]},
-        {"host": HOST, "port": 70000, "ports": [8766]},
-        {"host": HOST, "port": "9" * 5000, "ports": [8766]},
-    ],
-)
-def test_an_endpoint_with_any_malformed_port_field_never_matches_even_beside_a_valid_one(endpoint):
-    assert _policy_rules_allowing(_policy(endpoint), HOST, 8766) == []
+def _sandbox_policy_allows(policy: dict, host: str, port: int) -> bool:
+    """Whether the policy the sandbox gets allows ``host:port``; one protobuf refuses gives no sandbox at all."""
+    spec = openshell_pb2.SandboxSpec()
+    try:
+        _resolve_policy(policy, spec)
+    except ParseError:
+        return False
+    return any(
+        endpoint.host.lower().removesuffix(".") == host and port in {endpoint.port, *endpoint.ports} - {0}
+        for rule in spec.policy.network_policies.values()
+        for endpoint in rule.endpoints
+    )
 
 
-def test_a_null_port_field_is_unset_as_in_proto_json():
-    assert _policy_rules_allowing(_policy({"host": HOST, "port": None, "ports": [8766]}), HOST, 8766)
-    assert _policy_rules_allowing(_policy({"host": HOST, "port": 8766, "ports": None}), HOST, 8766)
+def test_the_endpoint_parsed_alone_is_the_message_the_sandbox_policy_holds():
+    endpoint = openshell_pb2.SandboxSpec().policy.network_policies["tools"].endpoints.add()
+    assert type(endpoint) is sandbox_pb2.NetworkEndpoint
+
+
+@pytest.mark.parametrize("policy", _POLICY_CASES)
+def test_the_check_allows_exactly_what_the_sandbox_policy_allows(policy):
+    expected = [("tools", [])] if _sandbox_policy_allows(policy, HOST, 8766) else []
+    assert _policy_rules_allowing(policy, HOST, 8766) == expected
+
+
+@pytest.mark.parametrize("policy", _POLICY_CASES)
+def test_with_require_policy_allows_the_run_stops_exactly_when_the_sandbox_policy_denies(monkeypatch, policy):
+    runtime = OpenShellRuntime("shell_suite", image="pi", policy=policy, require_policy_allows=True)
+    runtime.configure(cluster="test", interceptor_url=INTERCEPTOR_URL)
+    if _sandbox_policy_allows(policy, HOST, 8766):
+        _start(monkeypatch, runtime)
+        assert runtime.workspace_name
+    else:
+        with pytest.raises(PolicyCheckError):
+            _start(monkeypatch, runtime)
+
+
+def test_the_policy_cases_cover_both_outcomes():
+    outcomes = [_sandbox_policy_allows(policy, HOST, 8766) for policy in _POLICY_CASES]
+    assert outcomes.count(True) >= 15 and outcomes.count(False) >= 30
 
 
 @pytest.mark.parametrize(
@@ -135,9 +191,13 @@ def test_a_null_port_field_is_unset_as_in_proto_json():
         {"host": HOST, "port": 8766, "ports": "garbage"},
     ],
 )
-def test_a_malformed_entry_does_not_hide_a_well_formed_one_beside_it(malformed):
+def test_a_malformed_endpoint_does_not_hide_a_well_formed_one_beside_it(malformed):
+    # Where the check and the sandbox differ: protobuf refuses the whole policy, so setup() would fail on it
+    # anyway; the check reads each endpoint on its own and still finds the well-formed one.
     policy = _policy(malformed, {"host": HOST, "port": 8766})
     assert _policy_rules_allowing(policy, HOST, 8766) == [("tools", [])]
+    with pytest.raises(ParseError):
+        _resolve_policy(policy, openshell_pb2.SandboxSpec())
 
 
 def test_the_proto_field_name_network_policies_is_read_too():

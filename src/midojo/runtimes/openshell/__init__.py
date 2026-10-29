@@ -69,7 +69,7 @@ import grpc
 from google.protobuf.json_format import MessageToDict, ParseDict
 from google.protobuf.timestamp_pb2 import Timestamp
 from openshell import SandboxClient, WorkspaceClient
-from openshell._proto import datamodel_pb2, openshell_pb2
+from openshell._proto import datamodel_pb2, openshell_pb2, sandbox_pb2
 from pydantic import BaseModel, ConfigDict, Field
 
 from midojo.control_plane.config import CONTROL_TOKEN_ENV
@@ -359,16 +359,19 @@ def _policy_rules_allowing(policy_spec: dict, host: str, port: int) -> list[tupl
 
     It reads the policy's ``networkPolicies`` (or ``network_policies``, which
     proto JSON accepts too; given both, the last in the dict wins, as protobuf's
-    ``ParseDict`` does, and a null one leaves no rules) as OpenShell parses
-    them: an endpoint's ``host`` is compared case-insensitively, one trailing
-    dot ignored on both sides, and its port is ``port`` or any of ``ports``,
-    each an int or a string of ASCII digits (``"8766"``, as an ``${env.VAR}``
-    expansion gives it) from 1 to 65535. Hosts are compared exactly otherwise,
-    as nothing in OpenShell's policy schema says a host can be a pattern. An
-    entry of the wrong shape (an endpoint that isn't a dict; a ``port`` or any
-    of ``ports`` that is a bool, a non-numeric string or out of range; a
-    ``ports`` that isn't a list) never matches and never raises; its siblings
-    are still read.
+    ``ParseDict`` does, and a null one leaves no rules) and parses each endpoint
+    with ``ParseDict`` into OpenShell's ``NetworkEndpoint`` message, the parse
+    :func:`_resolve_policy` gives the sandbox, so a port is whatever protobuf
+    makes of it (``"8766"``, as an ``${env.VAR}`` expansion gives it, but also
+    ``"+8766"``, ``8766.0`` or ``"8766.0"``; a bool is refused). Its port is
+    ``port`` or any of ``ports``, 0 being unset as in proto3, and only 1 to
+    65535 can match. Its ``host`` is compared case-insensitively, one trailing
+    dot ignored on both sides, and exactly otherwise, as nothing in OpenShell's
+    policy schema says a host can be a pattern. An endpoint protobuf can't parse
+    (or that isn't a dict) never matches and never raises, and its siblings are
+    still read: there the check differs from the sandbox, whose whole policy
+    then fails to parse in ``setup()``, as it does for a malformed field
+    anywhere else in the policy, which this check doesn't parse.
 
     Out of scope: L7 rules (an endpoint's HTTP method and path ``rules``) and its
     ``protocol``, ``tls`` and ``enforcement`` aren't evaluated, so an endpoint
@@ -389,12 +392,12 @@ def _policy_rules_allowing(policy_spec: dict, host: str, port: int) -> list[tupl
         endpoints = rule.get("endpoints") if isinstance(rule, dict) else None
         if not isinstance(endpoints, list):
             continue
+        parsed = [_parse_endpoint(endpoint) for endpoint in endpoints]
         if any(
-            isinstance(endpoint, dict)
-            and isinstance(endpoint.get("host"), str)
-            and _normal_host(endpoint["host"]) == wanted
-            and port in (_endpoint_ports(endpoint) or ())
-            for endpoint in endpoints
+            endpoint is not None
+            and _normal_host(endpoint.host) == wanted
+            and port in {number for number in (endpoint.port, *endpoint.ports) if 1 <= number <= 65535}
+            for endpoint in parsed
         ):
             binaries = rule.get("binaries")
             paths = [
@@ -406,37 +409,22 @@ def _policy_rules_allowing(policy_spec: dict, host: str, port: int) -> list[tupl
     return rules
 
 
+def _parse_endpoint(endpoint: Any) -> sandbox_pb2.NetworkEndpoint | None:
+    """``endpoint`` parsed as :func:`_resolve_policy` parses it, or None when protobuf refuses it."""
+    if not isinstance(endpoint, dict):
+        return None
+    message = sandbox_pb2.NetworkEndpoint()
+    try:
+        ParseDict(endpoint, message)
+    except Exception:
+        # A ParseError for anything off the schema, but nothing ParseDict raises may stop the check.
+        return None
+    return message
+
+
 def _normal_host(host: str) -> str:
     host = host.lower()
     return host[:-1] if host.endswith(".") else host
-
-
-def _endpoint_ports(endpoint: dict) -> set[int] | None:
-    """The ports an endpoint names in ``port`` and ``ports``, or None when any value given isn't a port.
-
-    A null ``port`` or ``ports`` is unset, as in proto JSON.
-    """
-    port, ports = endpoint.get("port"), endpoint.get("ports")
-    if ports is not None and not isinstance(ports, list):
-        return None
-    values = ([] if port is None else [port]) + (ports or [])
-    numbers = {_port_number(value) for value in values}
-    return None if None in numbers else {number for number in numbers if number is not None}
-
-
-def _port_number(value: Any) -> int | None:
-    # A bool is an int in Python, not a port; a string must be all ASCII digits ("8766", not " 8766" or "+8766"),
-    # and short enough to convert (int() refuses a string of thousands of digits).
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, str) and value.isascii() and value.isdigit():
-        try:
-            value = int(value)
-        except ValueError:
-            return None
-    if isinstance(value, int) and 1 <= value <= 65535:
-        return value
-    return None
 
 
 # ---------------------------------------------------------------------------
