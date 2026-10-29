@@ -27,7 +27,7 @@ from midojo.runtimes import AgentRuntime, RuntimeRegistry, build_runtime
 from midojo.suite_definition import OpenShellRuntimeDefinition, ProbeDefinition, SuiteDefinition
 from midojo.types import Environment, FunctionCallRecord, SuiteName
 from midojo.verifier import Check, parse_check
-from midojo.verifiers import ConversationTurn
+from midojo.verifiers import ConversationTurn, VerifierRegistry
 from midojo.verifiers.openshell import reads_openshell_observations
 
 # ``${env.VAR}`` references (OGX-style), expanded from the process environment in
@@ -140,10 +140,14 @@ class YAMLTaskSuite:
     builds no runtime and imports no runtime provider: the suite records the
     runtime definition its ``agent_runtime`` asks for, and :meth:`new_runtime`
     builds a fresh runtime from it each time.
+
+    ``verifiers`` is the registry its checks are parsed with, and its
+    episodes graded with (the default registry when None).
     """
 
-    def __init__(self, name: SuiteName, suite_yaml_path: Path) -> None:
+    def __init__(self, name: SuiteName, suite_yaml_path: Path, *, verifiers: VerifierRegistry | None = None) -> None:
         self._suite_yaml_path = suite_yaml_path
+        self._verifiers = verifiers
         raw = yaml.safe_load(suite_yaml_path.read_text())
         if not isinstance(raw, dict):
             raise ValueError(f"Invalid suite definition in {suite_yaml_path}: expected a YAML mapping")
@@ -210,6 +214,7 @@ class YAMLTaskSuite:
             suite_name=self.name,
             user_task_id=user_task_id,
             injection_task_id=injection_task_id,
+            verifiers=self._verifiers,
         )
 
     def provision_environment(self, injections: dict[str, str]) -> Environment:
@@ -266,7 +271,7 @@ class YAMLTaskSuite:
             )
 
     def _parse_check(self, task_id: str, raw: dict[str, Any]) -> Check:
-        check = parse_check(raw)
+        check = parse_check(raw, registry=self._verifiers)
         if not isinstance(self.definition.agent_runtime, OpenShellRuntimeDefinition) and (
             reads_openshell_observations(check.parsed)
         ):

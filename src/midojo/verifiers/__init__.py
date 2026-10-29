@@ -39,6 +39,7 @@ verdict. A grade whose top-level check is unknown is *invalid*.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
@@ -203,50 +204,90 @@ class Check:
         return self.verifier.evaluate(self.parsed, ctx)
 
 
-_VERIFIERS: dict[str, Verifier] = {}
-_default_verifier: Verifier | None = None
+class VerifierRegistry:
+    """The verifiers check blocks dispatch to: named verifiers, and a default one for any other key.
+
+    :func:`parse_check` resolves against :data:`DEFAULT_VERIFIERS` (where
+    :func:`register_verifier` registers, and the built-in predicates register
+    as the default) unless it is given a registry. A suite or an episode given
+    a registry parses and grades its checks with it; build one as a
+    :meth:`copy` of the default, so it keeps the built-in predicates, and
+    register more on it without changing the default. Like the verifiers it
+    holds, a registry is trusted code, shared by reference.
+    """
+
+    def __init__(self, verifiers: Mapping[str, Verifier] | None = None, *, default: Verifier | None = None) -> None:
+        self._verifiers: dict[str, Verifier] = dict(verifiers or {})
+        self._default: Verifier | None = default
+
+    @property
+    def default(self) -> Verifier | None:
+        """The verifier for a block whose key names no registered verifier."""
+        return self._default
+
+    def get(self, name: str) -> Verifier | None:
+        """The verifier registered as ``name``, or None."""
+        return self._verifiers.get(name)
+
+    def copy(self) -> VerifierRegistry:
+        """A registry with the same verifiers and default, changed apart from this one."""
+        return VerifierRegistry(self._verifiers, default=self._default)
+
+    def _default_claims(self) -> frozenset[str]:
+        return getattr(self._default, "claims", frozenset())
+
+    def register(self, verifier: Verifier, *, default: bool = False) -> None:
+        """Register a verifier so suites can address it by its top-level key.
+
+        ``default=True`` installs it as the fallback for check blocks whose key is
+        not a registered verifier (i.e. the built-in predicates). Guards against a
+        name shadowing the default verifier's claimed keys (which would silently
+        route a check to the wrong evaluator) or an already-registered verifier.
+        """
+        if default:
+            if self._default is not None:
+                raise ValueError(f"A default verifier is already registered: {self._default.name!r}")
+            self._default = verifier
+            return
+        if verifier.name in self._default_claims():
+            raise ValueError(f"Verifier name {verifier.name!r} shadows a default-verifier check type")
+        if verifier.name in self._verifiers:
+            raise ValueError(f"Verifier name {verifier.name!r} is already registered")
+        self._verifiers[verifier.name] = verifier
+
+    def parse_check(self, raw: dict) -> Check:
+        """Resolve a ``utility:`` / ``security:`` block to a verifier-bound check (see :func:`parse_check`)."""
+        if isinstance(raw, dict) and len(raw) == 1:
+            key = next(iter(raw))
+            verifier = self._verifiers.get(key)
+            if verifier is not None:
+                return Check(verifier=verifier, parsed=verifier.parse(raw[key]))
+        if self._default is None:
+            raise ValueError("No default verifier registered (import midojo.verifiers)")
+        return Check(verifier=self._default, parsed=self._default.parse(raw))
 
 
-def _default_claims() -> frozenset[str]:
-    return getattr(_default_verifier, "claims", frozenset())
+DEFAULT_VERIFIERS = VerifierRegistry()
+"""The registry :func:`register_verifier` registers in and :func:`parse_check` resolves against by default."""
+
+# The default registry's named verifiers, by name (kept for callers that read or patch them).
+_VERIFIERS: dict[str, Verifier] = DEFAULT_VERIFIERS._verifiers
 
 
 def register_verifier(verifier: Verifier, *, default: bool = False) -> None:
-    """Register a verifier so suites can address it by its top-level key.
-
-    ``default=True`` installs it as the fallback for check blocks whose key is
-    not a registered verifier (i.e. the built-in predicates). Guards against a
-    name shadowing the default verifier's claimed keys (which would silently
-    route a check to the wrong evaluator) or an already-registered verifier.
-    """
-    global _default_verifier
-    if default:
-        if _default_verifier is not None:
-            raise ValueError(f"A default verifier is already registered: {_default_verifier.name!r}")
-        _default_verifier = verifier
-        return
-    if verifier.name in _default_claims():
-        raise ValueError(f"Verifier name {verifier.name!r} shadows a default-verifier check type")
-    if verifier.name in _VERIFIERS:
-        raise ValueError(f"Verifier name {verifier.name!r} is already registered")
-    _VERIFIERS[verifier.name] = verifier
+    """Register a verifier in :data:`DEFAULT_VERIFIERS` (see :meth:`VerifierRegistry.register`)."""
+    DEFAULT_VERIFIERS.register(verifier, default=default)
 
 
-def parse_check(raw: dict) -> Check:
+def parse_check(raw: dict, *, registry: VerifierRegistry | None = None) -> Check:
     """Resolve a ``utility:`` / ``security:`` block to a verifier-bound check.
 
     A registered verifier name as the single key dispatches to that verifier;
     anything else falls through to the default verifier (the built-in
-    predicates), preserving its behavior and error messages.
+    predicates), preserving its behavior and error messages. The verifiers
+    are ``registry``'s, or :data:`DEFAULT_VERIFIERS`'s.
     """
-    if isinstance(raw, dict) and len(raw) == 1:
-        key = next(iter(raw))
-        verifier = _VERIFIERS.get(key)
-        if verifier is not None:
-            return Check(verifier=verifier, parsed=verifier.parse(raw[key]))
-    if _default_verifier is None:
-        raise ValueError("No default verifier registered (import midojo.verifiers)")
-    return Check(verifier=_default_verifier, parsed=_default_verifier.parse(raw))
+    return (registry if registry is not None else DEFAULT_VERIFIERS).parse_check(raw)
 
 
 # ---------------------------------------------------------------------------
@@ -258,6 +299,7 @@ from midojo.verifiers import builtin as _builtin  # noqa: F401  -- registers the
 from midojo.verifiers.combinators import AllOf, AnyOf, Not  # re-exported for the public API
 
 __all__ = [
+    "DEFAULT_VERIFIERS",
     "AllOf",
     "AnyOf",
     "Check",
@@ -267,6 +309,7 @@ __all__ = [
     "VerificationContext",
     "VerificationResult",
     "Verifier",
+    "VerifierRegistry",
     "parse_check",
     "register_verifier",
 ]
