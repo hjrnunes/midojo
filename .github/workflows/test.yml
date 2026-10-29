@@ -23,7 +23,7 @@ jobs:
         run: uv python install 3.12
 
       - name: Install dependencies
-        run: uv sync --frozen --extra dev
+        run: uv sync --locked --extra dev
 
       - name: Run tests
         run: uv run --frozen pytest
@@ -42,7 +42,7 @@ jobs:
         run: uv python install 3.12
 
       - name: Install dependencies with PyRIT
-        run: uv sync --frozen --extra dev --extra pyrit
+        run: uv sync --locked --extra dev --extra pyrit
 
       - name: Run tests with PyRIT
         run: uv run --frozen pytest -q
