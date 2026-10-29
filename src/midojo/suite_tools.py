@@ -12,7 +12,10 @@ def host_tools_reference(suite_module: str | ModuleType) -> str | None:
     A string is a dotted module path or a bundled suite's bare name. An
     already imported module is read directly, without guessing from its
     suite's name. Only the suite module is imported, never anything its
-    declaration names. An unimportable suite module has no declaration.
+    declaration names. A suite module that doesn't exist (it, or a package
+    it would be in, isn't found) has no declaration; any other import error,
+    one raised while the suite module runs its own imports included, is
+    raised as it was.
 
     Raise ValueError for a malformed declaration; callers such as the CLI
     can translate it into their own error type.
@@ -21,7 +24,9 @@ def host_tools_reference(suite_module: str | ModuleType) -> str | None:
         module_path = suite_module if "." in suite_module else f"suites.{suite_module}"
         try:
             suite_module = importlib.import_module(module_path)
-        except ImportError:
+        except ModuleNotFoundError as error:
+            if not _names_module_or_parent(error, module_path):
+                raise
             return None
     reference = getattr(suite_module, "HOST_TOOLS", None)
     if reference is None:
@@ -29,3 +34,8 @@ def host_tools_reference(suite_module: str | ModuleType) -> str | None:
     if not isinstance(reference, str) or reference.count(":") != 1 or not all(reference.split(":")):
         raise ValueError(f"{suite_module.__name__}.HOST_TOOLS must be a 'module:function' string, got {reference!r}.")
     return reference
+
+
+def _names_module_or_parent(error: ModuleNotFoundError, module_path: str) -> bool:
+    """Whether ``error`` is ``module_path`` itself not being found, or a package it would be in."""
+    return error.name is not None and (module_path == error.name or module_path.startswith(error.name + "."))
