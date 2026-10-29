@@ -608,3 +608,79 @@ def test_the_orchestrator_star_import_names_the_missing_capability_without_the_d
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "ok"
+
+
+# The submodules a bare ``import midojo`` made reachable as attributes at the base of this change, and its __all__.
+_BASE_REACHABLE = (
+    "midojo.control_plane",
+    "midojo.control_plane.config",
+    "midojo.observations",
+    "midojo.probes",
+    "midojo.runtimes",
+    "midojo.runtimes.openshell",
+    "midojo.runtimes.openshell.logs",
+    "midojo.suite_definition",
+    "midojo.tool_endpoint",
+    "midojo.types",
+    "midojo.verifiers",
+    "midojo.verifiers.builtin",
+    "midojo.verifiers.combinators",
+    "midojo.verifiers.judge",
+    "midojo.verifiers.openshell",
+    "midojo.verifiers.tool_call_condition",
+)
+_BASE_MIDOJO_ALL = (
+    "AgentBinding",
+    "Episode",
+    "EpisodeContext",
+    "EpisodeResult",
+    "Snapshot",
+    "Verdict",
+    "grade",
+    "open_episode",
+)
+
+
+def test_a_bare_import_reaches_every_submodule_it_did_and_loads_them_only_when_read():
+    import midojo
+
+    assert set(_BASE_MIDOJO_ALL) <= set(midojo.__all__)
+    light = [name for name in _BASE_REACHABLE if not name.startswith("midojo.runtimes.openshell")]
+    result = _run(
+        BLOCKER
+        + f"""
+import sys
+import midojo
+lazy = sorted(name for name in {light!r} if name not in sys.modules)
+assert lazy, "a bare import loads every one of them"
+assert {{name.split(".")[1] for name in {_BASE_REACHABLE!r}}} <= set(dir(midojo))
+for name in {light!r}:
+    value = midojo
+    for part in name.split(".")[1:]:
+        value = getattr(value, part)
+    assert value is sys.modules[name], name
+loaded = sorted(name for name in {HEAVY!r} if name in sys.modules)
+assert not loaded, f"reading the light submodules loaded {{loaded}}"
+print("ok")
+"""
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "ok"
+
+
+def test_a_bare_import_reaches_the_openshell_runtime_modules_when_read():
+    result = _run(
+        f"""
+        import sys
+        import midojo
+        assert "midojo.runtimes.openshell" not in sys.modules
+        for name in {[n for n in _BASE_REACHABLE if n.startswith("midojo.runtimes.openshell")]!r}:
+            value = midojo
+            for part in name.split(".")[1:]:
+                value = getattr(value, part)
+            assert value is sys.modules[name], name
+        print("ok")
+        """
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "ok"
