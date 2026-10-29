@@ -27,6 +27,7 @@ from midojo.episode import Episode
 from midojo.runtimes import DEFAULT_RUNTIMES, RuntimeRegistry, UnmanagedRuntime, build_runtime
 from midojo.suite_definition import OpenShellRuntimeDefinition
 from midojo.verifiers import DEFAULT_VERIFIERS, VerificationResult, VerifierRegistry, parse_check
+from midojo.verifiers.builtin import BuiltinVerifier
 from midojo.yaml_task_suite import YAMLTaskSuite
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -344,3 +345,51 @@ def test_an_episode_refuses_a_verifier_registry_of_another_type():
 def test_an_empty_verifier_registry_has_no_default():
     with pytest.raises(ValueError, match="No default verifier"):
         VerifierRegistry().parse_check({"output_contains": "x"})
+
+
+# ---------------------------------------------------------------------------
+# Compatibility with the names and module state earlier versions exposed
+# ---------------------------------------------------------------------------
+
+
+def test_replacing_the_module_verifier_mapping_changes_what_the_default_path_dispatches_to(monkeypatch):
+    import midojo.verifiers as verifiers
+
+    replaced: dict = {"boundary_custom": _Custom()}
+    monkeypatch.setattr(verifiers, "_VERIFIERS", replaced)
+    assert parse_check({"boundary_custom": "done"}).verifier is replaced["boundary_custom"]
+    assert DEFAULT_VERIFIERS.get("boundary_custom") is replaced["boundary_custom"]
+
+    class Another(_Custom):
+        name = "boundary_another"
+
+    verifiers.register_verifier(Another())
+    assert set(replaced) == {"boundary_custom", "boundary_another"}
+    # An injected registry still resolves against its own verifiers.
+    with pytest.raises(ValueError):
+        parse_check({"boundary_custom": "done"}, registry=VerifierRegistry(default=DEFAULT_VERIFIERS.default))
+
+
+def test_replacing_the_module_default_verifier_changes_the_default_path(monkeypatch):
+    import midojo.verifiers as verifiers
+
+    monkeypatch.setattr(verifiers, "_default_verifier", None)
+    with pytest.raises(ValueError, match="No default verifier"):
+        parse_check({"output_contains": "x"})
+    builtin = BuiltinVerifier()
+    verifiers.register_verifier(builtin, default=True)
+    assert verifiers._default_verifier is builtin
+    assert parse_check({"output_contains": "x"}).verifier is builtin
+
+
+@pytest.mark.parametrize("default_first", [True, False])
+def test_a_named_verifier_and_a_default_that_claims_its_name_conflict_in_either_order(default_first):
+    class OutputContains(_Custom):
+        name = "output_contains"
+
+    registry = VerifierRegistry()
+    steps = [lambda: registry.register(BuiltinVerifier(), default=True), lambda: registry.register(OutputContains())]
+    first, second = steps if default_first else steps[::-1]
+    first()
+    with pytest.raises(ValueError, match="'output_contains' shadows a default-verifier check type"):
+        second()
