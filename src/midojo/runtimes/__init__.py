@@ -30,6 +30,7 @@ in host mode, only the tool endpoint of the interceptor the host runs
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from types import ModuleType
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel
@@ -39,6 +40,7 @@ from midojo.suite_definition import AgentRuntimeDefinition, OpenShellRuntimeDefi
 from midojo.tool_endpoint import ToolEndpoint
 
 if TYPE_CHECKING:
+    from midojo.runtimes import openshell
     from midojo.runtimes.openshell import OpenShellRuntime
 
 
@@ -174,15 +176,19 @@ OPENSHELL_PACKAGES = ("openshell", "grpcio", "protobuf")
 _OPENSHELL_DEPENDENCIES = ("openshell", "grpc", "google.protobuf")
 
 
-def _openshell_runtime_type() -> type[OpenShellRuntime]:
-    """The OpenShell runtime's class, its module imported on first use."""
-    module = import_provider(
+def _openshell_module() -> ModuleType:
+    """The OpenShell runtime's module, imported on first use."""
+    return import_provider(
         "midojo.runtimes.openshell",
         capability="the 'openshell' runtime",
         packages=OPENSHELL_PACKAGES,
         dependencies=_OPENSHELL_DEPENDENCIES,
     )
-    return module.OpenShellRuntime
+
+
+def _openshell_runtime_type() -> type[OpenShellRuntime]:
+    """The OpenShell runtime's class, its module imported on first use."""
+    return _openshell_module().OpenShellRuntime
 
 
 def _build_openshell(suite_name: str, definition: AgentRuntimeDefinition) -> AgentRuntime:
@@ -266,8 +272,46 @@ def build_runtime(
     return (registry if registry is not None else DEFAULT_RUNTIMES).build(suite_name, definition)
 
 
+# Loaded on first use: the OpenShell runtime's class, and its module.
+_LAZY = {"OpenShellRuntime": _openshell_runtime_type, "openshell": _openshell_module}
+
+
 def __getattr__(name: str) -> Any:
-    # ``midojo.runtimes.OpenShellRuntime`` stays importable, without importing the OpenShell runtime up front.
-    if name == "OpenShellRuntime":
-        return _openshell_runtime_type()
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    # ``midojo.runtimes.OpenShellRuntime`` (and ``.openshell``) stay importable, without importing the OpenShell
+    # runtime up front: a named import or an attribute read loads it, and so does a star import, which lists both.
+    load = _LAZY.get(name)
+    if load is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return load()
+
+
+def __dir__() -> list[str]:
+    return sorted({*globals(), *_LAZY})
+
+
+# What ``from midojo.runtimes import *`` exports: every public name it exported when this module imported the
+# OpenShell runtime up front (those it imports included, so a star import still binds them), and the registry.
+__all__ = [
+    "DEFAULT_RUNTIMES",
+    "OPENSHELL_PACKAGES",
+    "AgentRuntime",
+    "AgentRuntimeDefinition",
+    "BaseModel",
+    "DisposableRuntime",
+    "Literal",
+    "OpenShellRuntime",
+    "OpenShellRuntimeDefinition",
+    "Protocol",
+    "ResettableRuntime",
+    "RuntimeBuilder",
+    "RuntimeRegistry",
+    "ToolEndpoint",
+    "UnmanagedRuntime",
+    "annotations",
+    "attempt_isolation",
+    "build_runtime",
+    "is_disposable",
+    "openshell",
+    "register_runtime",
+    "runtime_checkable",
+]

@@ -72,6 +72,22 @@ def _openshell_runtime(runtime: object) -> OpenShellRuntime | None:
     return None
 
 
+# Names this module imported from the OpenShell runtime up front, still importable from it, loaded on first use.
+_FROM_OPENSHELL = frozenset({"OpenShellRuntime", "SANDBOX_HOST"})
+
+
+def __getattr__(name: str) -> Any:
+    if name in _FROM_OPENSHELL:
+        from midojo import runtimes
+
+        return getattr(runtimes.openshell, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    return sorted({*globals(), *_FROM_OPENSHELL})
+
+
 def _resolve_system_message(suite_name: str) -> str:
     # A suite module that doesn't exist has no system message; an error from its own imports is raised.
     mod = import_suite_module(suite_name)

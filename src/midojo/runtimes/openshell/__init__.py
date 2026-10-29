@@ -18,7 +18,8 @@ agent runs, ``observe()`` collects runtime observations from outside the agent:
 The orchestrator records them as ``observations["openshell"]``, and the predicates
 in :mod:`midojo.verifiers.openshell` grade them. Their models live in
 :mod:`midojo.observations.openshell`, which needs none of this module's
-dependencies; they are re-exported here.
+dependencies; they are re-exported here. The ``import X as X`` lines keep
+every name this module exported while it defined them importable from it.
 
 The seed directory (``/sandbox/workdir``) is distinct from an OpenShell
 *workspace*: a workspace is a gateway-side named scope that holds sandboxes and
@@ -66,6 +67,8 @@ import uuid
 from collections.abc import Callable
 from dataclasses import asdict
 from typing import Any
+from typing import ClassVar as ClassVar
+from typing import Literal as Literal
 
 import grpc
 from google.protobuf.json_format import MessageToDict, ParseDict
@@ -73,20 +76,20 @@ from google.protobuf.timestamp_pb2 import Timestamp
 from openshell import SandboxClient, WorkspaceClient
 from openshell._proto import datamodel_pb2, openshell_pb2, sandbox_pb2
 from pydantic import BaseModel
+from pydantic import ConfigDict as ConfigDict
+from pydantic import Field as Field
 
 from midojo.control_plane.config import CONTROL_TOKEN_ENV
 from midojo.observations import EvidenceStatus
-
-# The observation models live apart from the runtime, which imports them; re-exported here.
-from midojo.observations.openshell import (
-    BUILTIN_POLICY_DIGEST,
-    OBSERVATIONS_SOURCE,
-    HttpRequestRecord,
-    OpenShellEvidence,
-    OpenShellObservations,
-    ProcessRecord,
-)
+from midojo.observations import register_observation_type as register_observation_type
+from midojo.observations.openshell import BUILTIN_POLICY_DIGEST as BUILTIN_POLICY_DIGEST
+from midojo.observations.openshell import OBSERVATIONS_SOURCE as OBSERVATIONS_SOURCE
+from midojo.observations.openshell import HttpRequestRecord as HttpRequestRecord
+from midojo.observations.openshell import OpenShellEvidence as OpenShellEvidence
+from midojo.observations.openshell import OpenShellObservations as OpenShellObservations
+from midojo.observations.openshell import ProcessRecord as ProcessRecord
 from midojo.probes import substitute_probes
+from midojo.runtimes.openshell.logs import HttpEvent as HttpEvent
 from midojo.runtimes.openshell.logs import OCSFEvents, parse_ocsf_lines
 from midojo.tool_endpoint import HOST_MODE_WITHHELD_ENV, SESSION_ENV, ToolEndpoint
 

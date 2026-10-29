@@ -393,3 +393,86 @@ def test_a_named_verifier_and_a_default_that_claims_its_name_conflict_in_either_
     first()
     with pytest.raises(ValueError, match="'output_contains' shadows a default-verifier check type"):
         second()
+
+
+def test_the_runtimes_star_import_lists_the_openshell_runtime_and_loads_it_only_when_run():
+    import midojo.runtimes as runtimes
+
+    assert {"OpenShellRuntime", "openshell"} <= set(runtimes.__all__)
+    result = _run(
+        """
+        import sys
+        import midojo.runtimes as runtimes
+        assert {"OpenShellRuntime", "openshell"} <= set(dir(runtimes))
+        assert "midojo.runtimes.openshell" not in sys.modules
+        namespace = {}
+        exec("from midojo.runtimes import *", namespace)
+        import midojo.runtimes.openshell as openshell
+        assert namespace["OpenShellRuntime"] is openshell.OpenShellRuntime
+        assert namespace["openshell"] is openshell
+        assert runtimes.openshell is openshell
+        assert set(runtimes.__all__) <= set(namespace)
+        print("ok")
+        """
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "ok"
+
+
+def test_the_runtimes_star_import_names_the_missing_capability_without_the_dependencies():
+    result = _run(
+        BLOCKER
+        + textwrap.dedent(
+            """
+            from midojo.capabilities import MissingCapabilityError
+            try:
+                exec("from midojo.runtimes import *", {})
+            except MissingCapabilityError as error:
+                assert error.capability == "the 'openshell' runtime"
+            else:
+                raise AssertionError("the star import loads the openshell runtime, which needs its dependencies")
+            print("ok")
+            """
+        )
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "ok"
+
+
+# Public names each module had at the base of this change that it no longer defines up front.
+_KEPT_NAMES = {
+    "midojo.runtimes": ("OpenShellRuntime", "openshell"),
+    "midojo.runtimes.openshell": (
+        "ClassVar",
+        "ConfigDict",
+        "Field",
+        "HttpEvent",
+        "Literal",
+        "register_observation_type",
+        "BUILTIN_POLICY_DIGEST",
+        "OBSERVATIONS_SOURCE",
+        "HttpRequestRecord",
+        "OpenShellEvidence",
+        "OpenShellObservations",
+        "ProcessRecord",
+    ),
+    "midojo.orchestrator": ("OpenShellRuntime", "SANDBOX_HOST"),
+}
+
+
+@pytest.mark.parametrize("module", sorted(_KEPT_NAMES))
+def test_names_a_module_exported_before_are_still_importable_from_it_and_listed(module):
+    result = _run(
+        f"""
+        import importlib
+        module = importlib.import_module({module!r})
+        names = {_KEPT_NAMES[module]!r}
+        missing = [name for name in names if name not in dir(module)]
+        assert not missing, missing
+        for name in names:
+            exec(f"from {module} import {{name}}", {{}})
+        print("ok")
+        """
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "ok"
