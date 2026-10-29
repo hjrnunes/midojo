@@ -3,6 +3,7 @@
 import asyncio
 import importlib
 import json
+import os
 import sys
 import threading
 from dataclasses import replace
@@ -30,7 +31,7 @@ with patch("appdirs.user_data_dir", side_effect=lambda name, *args: str(Path.cwd
     from pyrit.memory.sqlite_memory import SQLiteMemory
     from pyrit.models.messages.conversations import construct_response_from_request
     from pyrit.models.messages.message import Message
-    from pyrit.models.results.attack_result import AttackOutcome
+    from pyrit.models.results.attack_result import AttackOutcome, AttackResult
     from pyrit.models.score.scorable import MessageScorable
     from pyrit.models.score.score import ScoreStatus, UndeterminedScoreError
     from pyrit.prompt_target.common.prompt_target import PromptTarget
@@ -48,11 +49,14 @@ from examples.pyrit_weather import (
     MEMORY_DB_FILE,
     OBJECTIVE,
     PYRIT_RETRY_ENV,
+    attacker_retries,
     build_attack,
     build_attacker,
     parse_args,
     prepare_run,
+    run_campaign,
 )
+from examples.pyrit_weather import main as example_main
 from midojo.agent_client import AgentClient
 from midojo.attacks.attacker import OutOfSurfaceError
 from midojo.control_plane.client import snapshot_from_response
@@ -80,7 +84,7 @@ from midojo.pyrit.scorers import (
     UNDETERMINED_RATIONALE,
 )
 from midojo.pyrit.target import UNDETERMINED_REPLY, MidojoVerdict, _Attempt
-from midojo.runtimes import UnmanagedRuntime
+from midojo.runtimes import OpenShellRuntime, UnmanagedRuntime
 from midojo.suites import get_suite
 from midojo.yaml_task_suite import YAMLTaskSuite
 from suites import weather
@@ -1123,7 +1127,7 @@ def test_attacker_retries_reach_the_openai_client_and_pyrit(retries, monkeypatch
         model_name="offline", endpoint="http://127.0.0.1:9/v1", max_retries=retries, api_key="offline"
     )
     assert attacker._async_client is not None and attacker._async_client.max_retries == retries
-    assert get_retry_max_num_attempts() == retries + 1
+    assert PYRIT_RETRY_ENV not in os.environ  # building the attacker changes no process setting
     # PyRIT's retry around a send stops after that many attempts: one try and ``retries`` retries.
     monkeypatch.setenv("RETRY_WAIT_MIN_SECONDS", "0")
     monkeypatch.setenv("RETRY_WAIT_MAX_SECONDS", "0")
@@ -1134,17 +1138,149 @@ def test_attacker_retries_reach_the_openai_client_and_pyrit(retries, monkeypatch
         calls.append(1)
         raise RateLimitException()
 
-    with pytest.raises(RateLimitException):
-        rate_limited()
+    with attacker_retries(retries):
+        assert get_retry_max_num_attempts() == retries + 1
+        with pytest.raises(RateLimitException):
+            rate_limited()
     assert len(calls) == retries + 1
+    assert PYRIT_RETRY_ENV not in os.environ
     with pytest.raises(ValueError, match="0 or more"):
         build_attacker(model_name="offline", endpoint="http://127.0.0.1:9/v1", max_retries=-1, api_key="offline")
+
+
+@pytest.mark.parametrize("previous", [None, "7"])
+@pytest.mark.parametrize("raised", [None, RuntimeError("campaign failed"), KeyboardInterrupt()])
+def test_attacker_retries_restore_the_previous_setting_on_every_exit(previous, raised, monkeypatch):
+    if previous is None:
+        monkeypatch.delenv(PYRIT_RETRY_ENV, raising=False)
+    else:
+        monkeypatch.setenv(PYRIT_RETRY_ENV, previous)
+
+    def campaign():
+        with attacker_retries(1):
+            assert os.environ[PYRIT_RETRY_ENV] == "2"
+            if raised is not None:
+                raise raised
+
+    if raised is None:
+        campaign()
+    else:
+        with pytest.raises(type(raised)):
+            campaign()
+    assert os.environ.get(PYRIT_RETRY_ENV) == previous
+    with pytest.raises(ValueError, match="0 or more"), attacker_retries(-1):
+        pytest.fail("a negative retry count must be refused before the block")
+    assert os.environ.get(PYRIT_RETRY_ENV) == previous
+
+
+class ScriptedAttack:
+    """Stands in for ``RedTeamingAttack``: returns its result or raises its exception."""
+
+    def __init__(self, outcome):
+        self.outcome = outcome
+        self.objectives = []
+
+    async def execute_async(self, *, objective):
+        self.objectives.append(objective)
+        if isinstance(self.outcome, BaseException):
+            raise self.outcome
+        return self.outcome
+
+
+def failing_writer(monkeypatch):
+    def write(target, output, *, summary):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("examples.pyrit_weather.write_receipts", write)
+
+
+CAMPAIGN_FAILURES = [RuntimeError("campaign failed"), asyncio.CancelledError(), KeyboardInterrupt(), SystemExit(2)]
+
+
+@pytest.mark.parametrize("writer_fails", [False, True])
+@pytest.mark.parametrize("failure", CAMPAIGN_FAILURES, ids=lambda error: type(error).__name__)
+@pytest.mark.asyncio
+async def test_a_campaign_failure_stays_the_raised_exception_whatever_the_receipts_do(
+    failure, writer_fails, tmp_path, monkeypatch
+):
+    target, _, _ = make_target()
+    output = prepare_output_dir(tmp_path / "run")
+    if writer_fails:
+        failing_writer(monkeypatch)
+    with pytest.raises(type(failure)) as raised:
+        await run_campaign(cast(RedTeamingAttack, ScriptedAttack(failure)), target, output=output, objective="o")
+    assert raised.value is failure
+    notes = getattr(failure, "__notes__", [])
+    if writer_fails:
+        assert notes == [f"Writing the receipts to {output} failed too: OSError: disk full"]
+        assert not any(output.iterdir())
+    else:
+        assert not notes
+        summary = read_json(output / SUMMARY_FILE)
+        assert summary["error"] == f"{type(failure).__name__}: {failure}" and "outcome" not in summary
+
+
+@pytest.mark.parametrize("writer_fails", [False, True])
+@pytest.mark.asyncio
+async def test_a_successful_campaign_raises_only_its_own_receipt_failure(writer_fails, tmp_path, monkeypatch):
+    target, _, _ = make_target()
+    output = prepare_output_dir(tmp_path / "run")
+    result = AttackResult(conversation_id="conversation", objective="o", outcome=AttackOutcome.FAILURE)
+    attack = cast(RedTeamingAttack, ScriptedAttack(result))
+    if writer_fails:
+        failing_writer(monkeypatch)
+        with pytest.raises(OSError, match="disk full"):
+            await run_campaign(attack, target, output=output, objective="o", memory_db="db")
+        return
+    assert await run_campaign(attack, target, output=output, objective="o", memory_db="db") is result
+    summary = read_json(output / SUMMARY_FILE)
+    assert summary["outcome"] == "failure" and summary["conversation_id"] == "conversation"
+    assert summary["memory_db"] == "db" and "error" not in summary
+
+
+@pytest.mark.parametrize("ending", ["result", "campaign_failed", "interrupted", "cancelled"])
+@pytest.mark.asyncio
+async def test_main_ends_the_run_and_restores_retries_however_the_campaign_ends(ending, tmp_path, monkeypatch):
+    monkeypatch.delenv(PYRIT_RETRY_ENV, raising=False)
+    calls = []
+    monkeypatch.setattr(OpenShellRuntime, "configure", lambda self, **kwargs: calls.append("configure"))
+    monkeypatch.setattr(OpenShellRuntime, "start_run", lambda self, run_id, **kwargs: calls.append("start_run"))
+    monkeypatch.setattr(OpenShellRuntime, "end_run", lambda self: calls.append("end_run"))
+
+    async def prepared(args):
+        return args.output, tmp_path / "pyrit.db", FakeChat(replies=[])
+
+    outcomes = {
+        "result": AttackResult(conversation_id="c", objective=OBJECTIVE),
+        "campaign_failed": RuntimeError("campaign failed"),
+        "interrupted": KeyboardInterrupt(),
+        "cancelled": asyncio.CancelledError(),
+    }
+
+    async def campaign(attack, target, *, output, objective, **summary):
+        assert os.environ[PYRIT_RETRY_ENV] == "4"  # the campaign runs with the run's retries
+        assert calls == ["configure", "start_run"]
+        outcome = outcomes[ending]
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr("examples.pyrit_weather.prepare_run", prepared)
+    monkeypatch.setattr("examples.pyrit_weather.run_campaign", campaign)
+    argv = [*REQUIRED_ARGS, "--output", str(tmp_path / "run"), "--attacker-max-retries", "3"]
+    if ending == "result":
+        await example_main(argv)
+    else:
+        with pytest.raises(type(outcomes[ending])) as raised:
+            await example_main(argv)
+        assert raised.value is outcomes[ending]
+    assert calls == ["configure", "start_run", "end_run"]
+    assert PYRIT_RETRY_ENV not in os.environ
 
 
 @pytest.mark.parametrize("given", [False, True])
 @pytest.mark.asyncio
 async def test_pyrit_memory_goes_to_the_run_not_the_shared_default(tmp_path, monkeypatch, given):
-    monkeypatch.delenv(PYRIT_RETRY_ENV, raising=False)
     initialized = []
 
     async def initialize(**kwargs):

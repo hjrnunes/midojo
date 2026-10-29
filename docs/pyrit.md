@@ -244,14 +244,20 @@ Its other options:
   PyRIT's retry around each send (`pyrit_target_retry`: rate limits and
   empty responses) gets `RETRY_MAX_NUM_ATTEMPTS=N+1` attempts (PyRIT's
   default is 10). PyRIT reads that variable from the process environment
-  at retry time, and has no constructor argument for it; the example sets
-  it after `initialize_pyrit_async`, so a `.env.local` file PyRIT loads
-  can't override it. The same variable bounds PyRIT's retries of an
-  attacker reply that isn't valid JSON. With 0, a failed request fails the
-  turn at once rather than spending more attacker calls.
+  at retry time, and has no constructor argument for it. The example sets
+  it only while the campaign runs (`attacker_retries`, a context manager
+  entered after `initialize_pyrit_async`, so a `.env.local` file PyRIT
+  loads can't override it) and restores the value it had, or unsets it,
+  however the campaign ends. The same variable bounds PyRIT's retries of
+  an attacker reply that isn't valid JSON. With 0, a failed request fails
+  the turn at once rather than spending more attacker calls.
 
 When the campaign ends, or stops with an error, the example writes
-(`midojo.pyrit.write_receipts`, from the target's receipts):
+(`midojo.pyrit.write_receipts`, from the target's receipts) the files
+below, and ends the runtime's run whatever happens. If the campaign raised
+(a cancellation or an interrupt included), that exception is the one
+raised, and a failure to write the receipts is a note on it; only after a
+campaign that succeeded is a failure to write them raised itself:
 
 - `summary.json`: the run summary (`attack_summary`): the objective, PyRIT's
   `outcome`, `outcome_reason`, `conversation_id`, `attack_result_id`,

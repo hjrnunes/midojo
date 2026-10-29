@@ -5,9 +5,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 from uuid import uuid4
 
 from pyrit.executor.attack.core.attack_config import AttackAdversarialConfig, AttackScoringConfig
@@ -133,24 +135,44 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def build_attacker(*, model_name: str, endpoint: str, max_retries: int, api_key: str | None = None) -> OpenAIChatTarget:
-    """The attacker's chat target, retrying a failed request ``max_retries`` times at each retry layer.
+    """The attacker's chat target, whose openai client retries a failed request ``max_retries`` times.
 
-    The openai client gets it as ``max_retries`` (through PyRIT's
-    ``httpx_client_kwargs``, which PyRIT passes to ``AsyncOpenAI``), and PyRIT's
-    own retry as ``RETRY_MAX_NUM_ATTEMPTS`` (attempts, so ``max_retries + 1``),
-    set in this process's environment: call it after ``initialize_pyrit_async``,
-    whose ``.env.local`` files would otherwise override it. That variable also
-    bounds PyRIT's retries of an attacker reply that isn't valid JSON.
+    The client gets it as ``max_retries``, through PyRIT's ``httpx_client_kwargs``,
+    which PyRIT passes to ``AsyncOpenAI``. PyRIT's own retry around each send
+    is set apart, for the campaign only: see :func:`attacker_retries`.
     """
     if max_retries < 0:
         raise ValueError(f"max_retries must be 0 or more, got {max_retries}")
-    os.environ[PYRIT_RETRY_ENV] = str(max_retries + 1)
     return OpenAIChatTarget(
         model_name=model_name,
         endpoint=endpoint,
         api_key=api_key,
         httpx_client_kwargs={"max_retries": max_retries},
     )
+
+
+@contextmanager
+def attacker_retries(max_retries: int) -> Iterator[None]:
+    """PyRIT's retry around each send retries ``max_retries`` times within the block, and as before after it.
+
+    PyRIT reads ``RETRY_MAX_NUM_ATTEMPTS`` (attempts, so ``max_retries + 1``)
+    from the process environment at retry time and has no argument for it.
+    The block sets it and, on every exit, restores the value it had (or
+    unsets it). Enter it after ``initialize_pyrit_async``, whose ``.env.local``
+    files would otherwise override it. The variable also bounds PyRIT's
+    retries of an attacker reply that isn't valid JSON.
+    """
+    if max_retries < 0:
+        raise ValueError(f"max_retries must be 0 or more, got {max_retries}")
+    previous = os.environ.get(PYRIT_RETRY_ENV)
+    os.environ[PYRIT_RETRY_ENV] = str(max_retries + 1)
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(PYRIT_RETRY_ENV, None)
+        else:
+            os.environ[PYRIT_RETRY_ENV] = previous
 
 
 async def prepare_run(args: argparse.Namespace) -> tuple[Path, Path, OpenAIChatTarget]:
@@ -168,6 +190,33 @@ async def prepare_run(args: argparse.Namespace) -> tuple[Path, Path, OpenAIChatT
     return output, memory_db, attacker
 
 
+async def run_campaign(
+    attack: RedTeamingAttack, target: MidojoEpisodeTarget, *, output: Path, objective: str, **summary: Any
+) -> AttackResult:
+    """Execute the campaign, then write its receipts to ``output`` however it ended.
+
+    When the campaign raises (a cancellation or an interrupt included), that
+    exception stays the one raised, a failure to write the receipts a note on
+    it. Only when the campaign succeeded is a failure to write them raised.
+    """
+    try:
+        result = await attack.execute_async(objective=objective)
+    except BaseException as failure:
+        try:
+            _keep_receipts(target, output, attack_summary(None, objective=objective, error=failure, **summary))
+        except BaseException as write_error:
+            failure.add_note(
+                f"Writing the receipts to {output} failed too: {type(write_error).__name__}: {write_error}"
+            )
+        raise
+    _keep_receipts(target, output, attack_summary(result, objective=objective, **summary))
+    return result
+
+
+def _keep_receipts(target: MidojoEpisodeTarget, output: Path, summary: dict[str, Any]) -> None:
+    print(f"Receipts: {write_receipts(target, output, summary=summary)}")
+
+
 async def main(argv: Sequence[str] | None = None) -> None:
     """Explicit CLI entry point for a real campaign; never invoked by tests."""
     from suites import weather
@@ -181,9 +230,6 @@ async def main(argv: Sequence[str] | None = None) -> None:
     assert isinstance(runtime, OpenShellRuntime)
     runtime.configure(cluster=args.gateway, interceptor_url="http://host.openshell.internal:8766/mcp")
     runtime.start_run(str(uuid4()), suite_name=suite.name)
-    target: MidojoEpisodeTarget | None = None
-    result: AttackResult | None = None
-    error: BaseException | None = None
     try:
         attack, target = build_attack(
             suite=weather,
@@ -199,18 +245,11 @@ async def main(argv: Sequence[str] | None = None) -> None:
             attacker=attacker,
             max_turns=args.max_turns,
         )
-        result = await attack.execute_async(objective=OBJECTIVE)
+        with attacker_retries(args.attacker_max_retries):
+            result = await run_campaign(attack, target, output=output, objective=OBJECTIVE, memory_db=str(memory_db))
         print(result)
-    except BaseException as raised:
-        error = raised
-        raise
     finally:
-        try:
-            if target is not None:
-                summary = attack_summary(result, objective=OBJECTIVE, error=error, memory_db=str(memory_db))
-                print(f"Receipts: {write_receipts(target, output, summary=summary)}")
-        finally:
-            runtime.end_run()
+        runtime.end_run()
 
 
 if __name__ == "__main__":
