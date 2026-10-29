@@ -4,6 +4,7 @@ import asyncio
 import importlib
 import json
 import sys
+import threading
 from dataclasses import replace
 from pathlib import Path
 from typing import cast
@@ -46,8 +47,10 @@ from midojo.pyrit import MidojoEpisodeTarget, MidojoVerdictFloatScorer, MidojoVe
 from midojo.pyrit.target import UNDETERMINED_REPLY
 from midojo.runtimes import UnmanagedRuntime
 from midojo.suites import get_suite
+from midojo.yaml_task_suite import YAMLTaskSuite
 from suites import weather
 from suites.weather.host_tools import register
+from tests.judge_service import FakeJudge
 
 SURFACE = InjectionPlan((InjectionInstruction(Channel.TOOL_OUTPUT, "", InjectionTarget(tool="read_note")),))
 
@@ -342,7 +345,7 @@ class WeatherAgent(AgentClient):
 
 @pytest.mark.parametrize("fenced", [False, True])
 @pytest.mark.asyncio
-async def test_worked_red_teaming_example_offline_with_fake_attacker_and_scorer_chat_targets(suite, memory, fenced):
+async def test_worked_red_teaming_example_offline_with_fake_attacker_and_scorer_chat_targets(memory, fenced):
     upstream = FastMCP("offline-weather")
 
     @upstream.tool()
@@ -361,8 +364,7 @@ async def test_worked_red_teaming_example_offline_with_fake_attacker_and_scorer_
     agent = WeatherAgent()
     runtime = Disposable()
     attack, target = build_attack(
-        suite=suite,
-        suite_module=weather,
+        suite=weather,
         runtime=runtime,
         agent=agent,
         interception=HostInterception(upstream=upstream, tools=register),
@@ -478,14 +480,17 @@ async def test_invalid_utility_does_not_invalidate_security(replies, expected, s
     assert target._attempts[str(response.get_piece().id)].episode is None
 
 
-def test_suite_host_tools_require_host_interception(suite):
+@pytest.mark.parametrize("spec", ["pair", "name", "dotted", "module"])
+def test_suite_host_tools_require_host_interception(suite, spec):
     async def drive(ep):
         pytest.fail("a refused target must not run")
 
+    # The existing pair (a suite and its module), or one spec naming both: a bundled name, a dotted path, the module.
+    given = {"pair": suite, "name": "weather", "dotted": "suites.weather", "module": weather}[spec]
     with pytest.raises(ValueError, match="HOST_TOOLS requires host interception"):
         MidojoEpisodeTarget.from_suite(
-            suite=suite,
-            suite_module=weather,
+            suite=given,
+            suite_module=weather if spec == "pair" else None,
             user_task_id="weather_new_york",
             injection_task_id="tornado_alert_via_notes",
             probe_key="tornado_alert_via_notes:main",
@@ -536,15 +541,15 @@ injection_tasks:
             sys.modules.pop(name, None)
 
 
-def external_target(external_suite, *, interception=None):
+def external_target(external_suite, *, interception=None, spec=None):
     suite, module = external_suite
 
     async def drive(ep):
         pytest.fail("constructing a target must not run it")
 
     return MidojoEpisodeTarget.from_suite(
-        suite=suite,
-        suite_module=module,
+        suite=suite if spec is None else spec,
+        suite_module=module if spec is None else None,
         user_task_id="benign",
         injection_task_id="attack",
         probe_key="attack:main",
@@ -554,14 +559,71 @@ def external_target(external_suite, *, interception=None):
     )
 
 
+@pytest.mark.parametrize("by", ["pair", "dotted", "module"])
 @pytest.mark.parametrize("host_mode", [False, True])
-def test_external_suite_reads_its_own_declaration_without_importing_tools(external_suite, host_mode):
+def test_external_suite_reads_its_own_declaration_without_importing_tools(external_suite, host_mode, by):
+    spec = {"pair": None, "dotted": "external_pyrit_suite.weather", "module": external_suite[1]}[by]
     if host_mode:
-        external_target(external_suite, interception=HostInterception(upstream=FastMCP("unused")))
+        external_target(external_suite, interception=HostInterception(upstream=FastMCP("unused")), spec=spec)
     else:
         with pytest.raises(ValueError, match="HOST_TOOLS requires host interception"):
-            external_target(external_suite)
+            external_target(external_suite, spec=spec)
     assert "external_pyrit_suite.tools" not in sys.modules
+
+
+@pytest.mark.parametrize("external_suite", [None], indirect=True)
+def test_a_suite_spec_compiles_the_modules_own_task_suite(external_suite):
+    _, module = external_suite
+    for spec in ("external_pyrit_suite.weather", module):
+        target = external_target(external_suite, spec=spec)
+        episode = target._episode_for_payload("planted")
+        assert episode.suite_name == "weather" and episode.plan.instructions[0].payload == "planted"
+    # A fresh load of the same suite.yaml is the module's suite too, as get_suite's is for a bundled suite.
+    suite, _ = external_suite
+    external_target((YAMLTaskSuite(suite.name, suite_yaml_path=suite.suite_yaml_path), module))
+
+
+@pytest.mark.parametrize("external_suite", [None], indirect=True)
+@pytest.mark.parametrize("mismatch", ["external_suite_bundled_module", "bundled_suite_external_module", "yaml_copy"])
+def test_a_suite_that_is_not_its_modules_task_suite_is_refused(external_suite, suite, mismatch, tmp_path):
+    external, module = external_suite
+    if mismatch == "external_suite_bundled_module":
+        # The same short name, "weather": the bundled module's HOST_TOOLS must not be read for this suite.
+        pair = (external, weather)
+    elif mismatch == "bundled_suite_external_module":
+        pair = (suite, module)
+    else:
+        copy = tmp_path / "suite.yaml"
+        copy.write_text(external.suite_yaml_path.read_text())
+        pair = (YAMLTaskSuite(external.name, suite_yaml_path=copy), module)
+    with pytest.raises(ValueError, match=r"suite 'weather' \(.*\) is not .*\.task_suite"):
+        external_target(pair)
+    assert "external_pyrit_suite.tools" not in sys.modules
+
+
+@pytest.mark.parametrize("external_suite", [None], indirect=True)
+def test_a_suite_object_alone_or_a_spec_with_another_module_is_refused(external_suite):
+    suite, module = external_suite
+
+    def build(**given):
+        return MidojoEpisodeTarget.from_suite(
+            **given,
+            user_task_id="benign",
+            injection_task_id="attack",
+            probe_key="attack:main",
+            drive=lambda ep: asyncio.sleep(0),
+            runtime=Disposable(),
+        )
+
+    # Never guessed from the short name: suites.weather is a different suite with the same name.
+    with pytest.raises(ValueError, match="needs the suite_module that declares it"):
+        build(suite=suite)
+    with pytest.raises(ValueError, match="suite_module suites.weather is not the suite's module external_pyrit_suite"):
+        build(suite="external_pyrit_suite.weather", suite_module=weather)
+    with pytest.raises(ValueError, match="suite_module external_pyrit_suite.weather is not the suite's module suites"):
+        build(suite=weather, suite_module=module)
+    with pytest.raises(ModuleNotFoundError):
+        build(suite="external_pyrit_suite.missing")
 
 
 @pytest.mark.parametrize("external_suite", [None], indirect=True)
@@ -629,3 +691,72 @@ async def test_campaign_feedback_never_exposes_failure_details(float_threshold, 
         if failure == "replay":
             metadata = json.loads(metadata["midojo.replay"])
         assert secret in metadata["midojo.reason"]
+
+
+async def ticking(until: asyncio.Event) -> int:
+    """How many times the event loop ran this task until ``until`` was set: none while something blocked it."""
+    ticks = 0
+    while not until.is_set():
+        ticks += 1
+        await asyncio.sleep(0.01)
+    return ticks
+
+
+async def responsive(awaitable):
+    """``awaitable``'s result, and how often the event loop ran another task meanwhile."""
+    done = asyncio.Event()
+    ticker = asyncio.create_task(ticking(done))
+    try:
+        result = await awaitable
+    finally:
+        done.set()
+    return result, await ticker
+
+
+@pytest.mark.parametrize("verdict,expected", [("supported", True), ("contradicted", False), ("unresolved", None)])
+@pytest.mark.asyncio
+async def test_a_reply_judge_never_blocks_the_loop_and_a_success_is_still_replayed(
+    verdict, expected, monkeypatch, memory
+):
+    loop_thread = threading.get_ident()
+    grade = ControlPlane.grade
+    graded = []
+
+    def recording_grade(self, run_id, eval_id):
+        graded.append((eval_id, threading.get_ident() != loop_thread))
+        return grade(self, run_id, eval_id)
+
+    # The control plane's own grading, in its worker thread: the target grades nowhere else.
+    monkeypatch.setattr(ControlPlane, "grade", recording_grade)
+    judge = FakeJudge(delay=0.5)
+    try:
+        security = {"reply_judge": {"claim": "The reply says it is broken", "url": judge.url(f"/{verdict}")}}
+        target, _, contexts = make_target(replies=("broken", "broken"), security=security)
+        response, ticks = await responsive(send(target))
+        assert ticks >= 10  # the loop ran while the judge took half a second
+        result, ticks = await responsive(score(response, MidojoVerdictScorer(target=target), memory))
+        if expected is None:
+            assert result.status == ScoreStatus.UNDETERMINED
+        else:
+            assert result.get_value() is expected
+        if expected:
+            assert ticks >= 10  # the replay's judge too
+
+        evaluations = [ep.evaluation_id for ep in contexts]
+        assert len(evaluations) == (2 if expected else 1)  # only a discovered success is replayed
+        assert graded == [(evaluation, True) for evaluation in evaluations]
+        assert len(judge.requests) == len(evaluations)
+        receipt = target.verdict_of(response)
+        assert receipt is not None and receipt.grade is not None
+        receipts = [receipt] if receipt.replay is None else [receipt, receipt.replay]
+        assert [r.evaluation_id for r in receipts] == evaluations
+        for r in receipts:
+            # The receipt is the control plane's recorded grade: asking for it again asks no judge.
+            assert r.evaluation_id is not None and r.grade is not None
+            assert r.grade.judgements[0].verdict == verdict
+            assert r.grade == target.control.grade(None, r.evaluation_id)
+        assert len(judge.requests) == len(evaluations)
+        if expected:
+            assert receipt.replay is not None and receipt.broke is True
+    finally:
+        judge.close()

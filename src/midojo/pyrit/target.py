@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
@@ -27,6 +28,39 @@ from midojo.yaml_task_suite import YAMLTaskSuite
 
 METADATA_PREFIX = "midojo."
 UNDETERMINED_REPLY = "MiDojo could not evaluate this candidate."
+
+
+def _suite_and_module(
+    suite: str | ModuleType | YAMLTaskSuite, suite_module: ModuleType | None
+) -> tuple[YAMLTaskSuite, ModuleType]:
+    """The suite and the module that declares it, from one spec, or a suite checked against its module."""
+    given: YAMLTaskSuite | None = None
+    if isinstance(suite, str):
+        module = importlib.import_module(suite if "." in suite else f"suites.{suite}")
+    elif isinstance(suite, ModuleType):
+        module = suite
+    elif suite_module is None:
+        raise ValueError(
+            f"suite {suite.name!r} needs the suite_module that declares it, "
+            "or pass that module (or its dotted path) as suite"
+        )
+    else:
+        module, given = suite_module, suite
+    if suite_module is not None and suite_module is not module:
+        raise ValueError(f"suite_module {suite_module.__name__} is not the suite's module {module.__name__}")
+    declared = getattr(module, "task_suite", None)
+    if not isinstance(declared, YAMLTaskSuite):
+        raise ValueError(f"{module.__name__}.task_suite must be a YAMLTaskSuite, got {type(declared).__name__}")
+    if given is None:
+        return declared, module
+    if given is not declared and (
+        given.name != declared.name or given.suite_yaml_path.resolve() != declared.suite_yaml_path.resolve()
+    ):
+        raise ValueError(
+            f"suite {given.name!r} ({given.suite_yaml_path}) is not {module.__name__}.task_suite "
+            f"({declared.name!r}, {declared.suite_yaml_path})"
+        )
+    return given, module
 
 
 @dataclass(frozen=True)
@@ -141,8 +175,8 @@ class MidojoEpisodeTarget(PromptTarget):
     def from_suite(
         cls,
         *,
-        suite: YAMLTaskSuite,
-        suite_module: ModuleType,
+        suite: str | ModuleType | YAMLTaskSuite,
+        suite_module: ModuleType | None = None,
         user_task_id: str,
         injection_task_id: str,
         probe_key: str,
@@ -153,10 +187,15 @@ class MidojoEpisodeTarget(PromptTarget):
     ) -> MidojoEpisodeTarget:
         """Declare a single suite probe (the full ``task:probe`` key).
 
-        ``suite_module`` is the caller's imported module that owns ``suite``.
-        Its HOST_TOOLS declaration is checked without importing its target;
-        the short suite name is never used to guess a module.
+        ``suite`` names the suite once, as its module: a bundled suite's name,
+        a dotted module path, or the imported module; its ``task_suite`` is the
+        suite. A ``YAMLTaskSuite`` needs the ``suite_module`` that owns it, and
+        is refused unless it is that module's ``task_suite`` (the same object,
+        or a load of the same name and YAML file). The module's HOST_TOOLS
+        declaration is checked without importing its target; a suite object's
+        short name is never used to guess a module.
         """
+        suite, suite_module = _suite_and_module(suite, suite_module)
         permitted = suite.get_probes_for_task(injection_task_id)
         permitted_injections(AttackAttempt({probe_key: ""}), permitted)
         host_tools = host_tools_reference(suite_module)
@@ -226,16 +265,18 @@ class MidojoEpisodeTarget(PromptTarget):
         try:
             async with ep:
                 await self._drive(ep)
-            snapshot = ep.sealed
-            verdict = midojo.grade(episode, snapshot)
+                snapshot = await ep.seal()
+                # On the control plane, as run_task grades: in a worker thread under its grading lock, so a
+                # reply_judge never blocks the event loop, and the grade is the evaluation's recorded one.
+                grade = await ep.control.grade_evaluation(snapshot.run_id, snapshot.evaluation_id)
             return (
                 MidojoVerdict(
                     "graded",
-                    evaluation_id=verdict.evaluation_id,
-                    snapshot_id=verdict.snapshot_id,
+                    evaluation_id=snapshot.evaluation_id,
+                    snapshot_id=snapshot.snapshot_id,
                     run_id=snapshot.run_id,
-                    grade_json=verdict.grade.model_dump_json(),
-                    reason=verdict.grade.security_reason,
+                    grade_json=grade.model_dump_json(),
+                    reason=grade.security_reason,
                 ),
                 snapshot.agent_output,
             )

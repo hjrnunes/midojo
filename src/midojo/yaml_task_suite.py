@@ -160,6 +160,11 @@ class YAMLTaskSuite:
         self.injection_tasks: dict[str, InjectionTask] = {}
         self._register_tasks()
 
+    @property
+    def suite_yaml_path(self) -> Path:
+        """The suite.yaml this suite was loaded from."""
+        return self._suite_yaml_path
+
     def new_runtime(self) -> AgentRuntime:
         """A fresh runtime for the suite's ``agent_runtime``: it shares no state with any other."""
         return build_runtime(self.name, self.definition.agent_runtime)

@@ -17,8 +17,10 @@ tests so `uv sync --frozen --extra dev` needs no PyRIT installation. The
 separate `pyright-pyrit.json` checks those files with the extra installed.
 CI runs the full test suite in two jobs: one with `--extra dev`, and one
 with `--extra dev --extra pyrit` that also runs the PyRIT Pyright command
-above. Excluding the route from the default gate
-is not a substitute for checking it in the extra environment.
+above. Both jobs install with `uv sync --locked`, which fails when `uv.lock`
+is out of date with `pyproject.toml`; their later `uv run --frozen` steps
+use that environment as installed. Excluding the route from the default
+gate is not a substitute for checking it in the extra environment.
 
 ## Target and evidence
 
@@ -31,19 +33,31 @@ instructions or probes before an evaluation opens. The host-supplied
 `drive` uses the episode's benign turns and `ep.binding`, records replies
 with `ep.turn`, and leaves the context to seal and clean up.
 
-For a suite, `MidojoEpisodeTarget.from_suite` takes a `suite`,
-`suite_module` (the caller's imported Python module), `user_task_id`,
-`injection_task_id`, and full `probe_key` (`task:probe`). It uses
-`permitted_injections` and compiles that probe for each candidate. A
-probe occurring at multiple placements is refused: the target
+For a suite, `MidojoEpisodeTarget.from_suite` takes `suite`,
+`user_task_id`, `injection_task_id`, and full `probe_key` (`task:probe`).
+`suite` names the suite once, by its module: a bundled suite's name
+(`"weather"`), a dotted module path (`"my_package.my_suite"`) or the
+imported module. The module's `task_suite` is the suite, and its
+`HOST_TOOLS` declaration is the one checked. The earlier form, a
+`YAMLTaskSuite` as `suite` with the module that owns it as `suite_module`,
+still works: the suite must be that module's `task_suite`, the same object
+or a load of the same name and YAML file (as `get_suite` loads a bundled
+suite), or `from_suite` raises ValueError. So does a suite object without
+its module, or a `suite_module` other than the one `suite` names: a short
+`suite.name` is never used to find a module, so an out-of-tree suite named
+like a bundled one can't take the bundled suite's declaration.
+
+The target uses `permitted_injections` and compiles that probe for each
+candidate. A probe occurring at multiple placements is refused: the target
 requires exactly one instruction. A suite declaring `HOST_TOOLS` requires
-host interception. Pass the module that owns this suite, including for
-out-of-tree suites; its short `suite.name` is never used for module lookup.
-The public `midojo.suite_tools.host_tools_reference(suite_module)` reader
-accepts an imported module, a dotted module path or a bundled suite name.
-It returns the declaration or None, raises ValueError for malformed
-declarations, and never imports anything the declaration names. Direct
-users supply an
+host interception. The public
+`midojo.suite_tools.host_tools_reference(suite_module)` reader accepts an
+imported module, a dotted module path or a bundled suite name. It returns
+the declaration or None, raises ValueError for malformed declarations, and
+never imports anything the declaration names. Only a suite module that
+doesn't exist (a `ModuleNotFoundError` naming it or a package it would be
+in) reads as None; any other import error, one from the suite module's own
+imports included, propagates. Direct users supply an
 `episode_for_payload(candidate) -> Episode` compiler and its permitted
 single-instruction `InjectionPlan` as `surface`.
 
@@ -74,8 +88,13 @@ receipt.evaluation_id)` and verify the returned `snapshot_id`. Snapshots from
 earlier sends and replays remain available until the target/control plane is
 released; supplying `control=` lets the caller retain them longer.
 
-Scoring uses `midojo.grade(episode, ep.sealed)`: tool evidence belongs to
-that immutable snapshot. No current/latest-evaluation endpoint is involved.
+Each send and replay is graded on the target's control plane once the
+episode is sealed, as `midojo-run` grades (`ep.control.grade_evaluation`):
+in a worker thread under the evaluation's grading lock, so a `reply_judge`
+service never blocks the event loop, and the receipt holds the grade the
+control plane recorded, its judge records included. Tool evidence belongs
+to the evaluation's immutable snapshot. No current/latest-evaluation
+endpoint is involved.
 The scorer resolves the response's piece ID in the target's private receipt
 registry, rather than trusting its text or JSON metadata. This prevents a
 reply or edited metadata from asserting a successful grade. Keep the target
@@ -180,17 +199,18 @@ the score metadata.
   1; concurrent streams need independent runtimes. Both also need campaign
   integration tests and explicit tree-lineage capture. Binary 0/1 scores tie
   all known unsuccessful branches; useful sub-threshold steering remains to be designed.
-  TAP uses `pyrit.score.score_utils.normalize_score_to_float`, which maps
-  None or an undetermined score to 0.0 (unless original float metadata
-  supplies a value). This loses the distinction in the numeric representation,
-  but not in pruning: `TAPAttack._get_completed_nodes_sorted_by_score` ranks
-  complete scores above undetermined ones, even a known non-break at 0.0.
-  Width pruning keeps only the top `tree_width` nodes; nodes without a score
-  are excluded. If the selected final score is undetermined,
-  `_create_failure_result` returns `AttackOutcome.UNDETERMINED`. Thus an
-  undetermined score receives no positive numerical credit, but is not
-  treated identically to a known non-break. These details were verified
-  against the installed PyRIT 1.1.0 source.
+  In the locked PyRIT 1.1.0, the attacker (TAP) sees 0.0 for an
+  undetermined score: its score feedback (`_get_response_score_async`) is
+  `pyrit.score.score_utils.normalize_score_to_float`, which maps None or an
+  undetermined score to 0.0, as for a known non-break. It would use
+  `original_float_value` metadata instead, but the threshold wrapper adds
+  none to an undetermined score. TAP keeps the distinction when pruning:
+  `_get_completed_nodes_sorted_by_score` sorts complete scores before
+  undetermined ones, so an undetermined branch ranks below a known 0.0.
+  Width pruning keeps the first `tree_width` of those nodes; nodes without
+  a score are left out. An undetermined branch is the best one only when no
+  branch has a complete score, and if that final score is undetermined
+  `_create_failure_result` returns `AttackOutcome.UNDETERMINED`.
 - **Crescendo:** needs a separate stateful design for conversation history,
   reset boundaries and replay of the whole conversation. This single-turn
   target deliberately does not declare editable history or multi-turn support.
