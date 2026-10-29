@@ -35,8 +35,8 @@ from pydantic import BaseModel, TypeAdapter
 from midojo.delivery import exposure
 from midojo.env_inference import infer_environment_type
 from midojo.observations import FUNCTION_CALLS, EvidenceStatus, evidence_status
+from midojo.observations.openshell import OBSERVATIONS_SOURCE, OpenShellObservations
 from midojo.runtimes import AgentRuntime, build_runtime
-from midojo.runtimes.openshell import OBSERVATIONS_SOURCE, OpenShellObservations
 from midojo.suite_definition import AgentRuntimeDefinition
 from midojo.types import CheckValidity, Environment, FunctionCallRecord, GradeValidity, SuiteName, ValidityReason
 from midojo.verifier import Check, VerificationContext, VerificationResult, parse_check
