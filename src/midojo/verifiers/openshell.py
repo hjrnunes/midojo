@@ -219,8 +219,8 @@ def _host(host: str) -> str | ipaddress.IPv4Address | ipaddress.IPv6Address:
     separators (U+3002, U+FF0E, U+FF61) become ``.``, then one trailing dot
     goes, so ``10.0.0.1.`` is the address ``10.0.0.1`` and ``bücher\u3002test\u3002``
     is ``xn--bcher-kva.test``. A name with any label IDNA can't encode (empty,
-    over-long or invalid) is compared whole, lower-cased as it is, so it still
-    matches itself and no other spelling.
+    over-long or invalid) isn't partially IDNA-encoded: the whole host is
+    compared lower-cased, so it still matches itself and no other spelling.
     """
     if host.startswith("[") and host.endswith("]"):
         host = host[1:-1]
