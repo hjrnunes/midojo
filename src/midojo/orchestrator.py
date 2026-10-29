@@ -54,7 +54,7 @@ from midojo.yaml_task_suite import YAMLTaskSuite
 
 if TYPE_CHECKING:
     from midojo.interception_host import HostInterception, HostTools
-    from midojo.runtimes.openshell import OpenShellRuntime
+    from midojo.runtimes.openshell import SANDBOX_HOST, OpenShellRuntime
 
 console = Console()
 
@@ -86,6 +86,94 @@ def __getattr__(name: str) -> Any:
 
 def __dir__() -> list[str]:
     return sorted({*globals(), *_FROM_OPENSHELL})
+
+
+# What ``from midojo.orchestrator import *`` exports: every public name it exported when this module imported the
+# OpenShell runtime up front. ``OpenShellRuntime`` and ``SANDBOX_HOST`` stay lazy for a named import or an attribute
+# read; a star import loads the runtime (and without its dependencies raises MissingCapabilityError).
+__all__ = [
+    "ATTACK_OUTCOME",
+    "CONTROL_TOKEN_ENV",
+    "EXIT_ALL_FAILED",
+    "EXIT_SOME_FAILED",
+    "EXPOSURE_BOUNDARIES",
+    "SANDBOX_HOST",
+    "TYPE_CHECKING",
+    "A2AAgentClient",
+    "AgentClient",
+    "AgentRuntime",
+    "Any",
+    "Attacker",
+    "AttackerFactory",
+    "AttemptIsolation",
+    "AttemptOutcome",
+    "AttemptRun",
+    "BenchmarkOutcome",
+    "Callable",
+    "Console",
+    "ControlClient",
+    "ControlPlaneClient",
+    "DeliveryFact",
+    "Episode",
+    "EpisodeContext",
+    "EpisodeRun",
+    "EpisodeStep",
+    "Exchange",
+    "Exposure",
+    "ExposureStatus",
+    "GradeResponse",
+    "NamedTuple",
+    "OGXResponsesClient",
+    "OpenAIResponsesAgentClient",
+    "OpenShellAgentClient",
+    "OpenShellRuntime",
+    "OutOfSurfaceError",
+    "PIAgentClient",
+    "PairFailure",
+    "Panel",
+    "Path",
+    "Sequence",
+    "SimpleHTTPAgentClient",
+    "Snapshot",
+    "StaticAttacker",
+    "Table",
+    "TaskPair",
+    "TaskResult",
+    "Text",
+    "YAMLTaskSuite",
+    "annotations",
+    "asdict",
+    "asyncio",
+    "attempt_isolation",
+    "bare_host",
+    "cast",
+    "check_plan_within",
+    "click",
+    "console",
+    "contextlib",
+    "delivery_facts",
+    "exit_status",
+    "exposure",
+    "get_suite",
+    "host_tools_reference",
+    "httpx",
+    "import_suite_module",
+    "importlib",
+    "ipaddress",
+    "is_adaptive",
+    "is_disposable",
+    "json",
+    "list_suites",
+    "main",
+    "math",
+    "open_episode",
+    "os",
+    "permitted_injections",
+    "run_benchmark",
+    "run_task",
+    "sys",
+    "tool_url",
+]
 
 
 def _resolve_system_message(suite_name: str) -> str:

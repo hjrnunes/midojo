@@ -476,3 +476,135 @@ def test_names_a_module_exported_before_are_still_importable_from_it_and_listed(
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "ok"
+
+
+# What ``from midojo.orchestrator import *`` exported at the base of this change: every public global it had.
+_BASE_ORCHESTRATOR_STAR = (
+    "A2AAgentClient",
+    "ATTACK_OUTCOME",
+    "AgentClient",
+    "AgentRuntime",
+    "Any",
+    "Attacker",
+    "AttackerFactory",
+    "AttemptIsolation",
+    "AttemptOutcome",
+    "AttemptRun",
+    "BenchmarkOutcome",
+    "CONTROL_TOKEN_ENV",
+    "Callable",
+    "Console",
+    "ControlClient",
+    "ControlPlaneClient",
+    "DeliveryFact",
+    "EXIT_ALL_FAILED",
+    "EXIT_SOME_FAILED",
+    "EXPOSURE_BOUNDARIES",
+    "Episode",
+    "EpisodeContext",
+    "EpisodeRun",
+    "EpisodeStep",
+    "Exchange",
+    "Exposure",
+    "ExposureStatus",
+    "GradeResponse",
+    "NamedTuple",
+    "OGXResponsesClient",
+    "OpenAIResponsesAgentClient",
+    "OpenShellAgentClient",
+    "OpenShellRuntime",
+    "OutOfSurfaceError",
+    "PIAgentClient",
+    "PairFailure",
+    "Panel",
+    "Path",
+    "SANDBOX_HOST",
+    "Sequence",
+    "SimpleHTTPAgentClient",
+    "Snapshot",
+    "StaticAttacker",
+    "TYPE_CHECKING",
+    "Table",
+    "TaskPair",
+    "TaskResult",
+    "Text",
+    "YAMLTaskSuite",
+    "annotations",
+    "asdict",
+    "asyncio",
+    "attempt_isolation",
+    "bare_host",
+    "cast",
+    "check_plan_within",
+    "click",
+    "console",
+    "contextlib",
+    "delivery_facts",
+    "exit_status",
+    "exposure",
+    "get_suite",
+    "host_tools_reference",
+    "httpx",
+    "import_suite_module",
+    "importlib",
+    "ipaddress",
+    "is_adaptive",
+    "is_disposable",
+    "json",
+    "list_suites",
+    "main",
+    "math",
+    "open_episode",
+    "os",
+    "permitted_injections",
+    "run_benchmark",
+    "run_task",
+    "sys",
+    "tool_url",
+)
+
+
+def test_the_orchestrator_star_import_exports_everything_it_did_and_named_imports_stay_light():
+    import midojo.orchestrator as orchestrator
+
+    assert set(_BASE_ORCHESTRATOR_STAR) <= set(orchestrator.__all__)
+    result = _run(
+        f"""
+        import sys
+        from midojo.orchestrator import main, run_task
+        import midojo.orchestrator as orchestrator
+        assert {{"OpenShellRuntime", "SANDBOX_HOST"}} <= set(dir(orchestrator))
+        print(sorted(name for name in {HEAVY!r} if name in sys.modules))
+        namespace = {{}}
+        exec("from midojo.orchestrator import *", namespace)
+        import midojo.runtimes.openshell as openshell
+        assert namespace["OpenShellRuntime"] is openshell.OpenShellRuntime
+        assert namespace["SANDBOX_HOST"] == openshell.SANDBOX_HOST
+        assert set({_BASE_ORCHESTRATOR_STAR!r}) <= set(namespace)
+        print("ok")
+        """
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == ["[]", "ok"]
+
+
+def test_the_orchestrator_star_import_names_the_missing_capability_without_the_dependencies():
+    result = _run(
+        BLOCKER
+        + textwrap.dedent(
+            """
+            import midojo.orchestrator
+            from midojo.orchestrator import run_task
+            from midojo.capabilities import MissingCapabilityError
+            try:
+                exec("from midojo.orchestrator import *", {})
+            except MissingCapabilityError as error:
+                assert error.capability == "the 'openshell' runtime"
+            else:
+                raise AssertionError("the star import loads the openshell runtime, which needs its dependencies")
+            print("ok")
+            """
+        )
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "ok"
