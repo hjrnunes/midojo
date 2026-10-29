@@ -16,7 +16,10 @@ agent runs, ``observe()`` collects runtime observations from outside the agent:
     policy (see ``_policy_digest``).
 
 The orchestrator records them as ``observations["openshell"]``, and the predicates
-in :mod:`midojo.verifiers.openshell` grade them.
+in :mod:`midojo.verifiers.openshell` grade them. Their models live in
+:mod:`midojo.observations.openshell`, which needs none of this module's
+dependencies; they are re-exported here. The ``import X as X`` lines keep
+every name this module exported while it defined them importable from it.
 
 The seed directory (``/sandbox/workdir``) is distinct from an OpenShell
 *workspace*: a workspace is a gateway-side named scope that holds sandboxes and
@@ -63,19 +66,31 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import asdict
-from typing import Any, ClassVar, Literal
+from typing import Any
+from typing import ClassVar as ClassVar
+from typing import Literal as Literal
 
 import grpc
 from google.protobuf.json_format import MessageToDict, ParseDict
 from google.protobuf.timestamp_pb2 import Timestamp
 from openshell import SandboxClient, WorkspaceClient
 from openshell._proto import datamodel_pb2, openshell_pb2, sandbox_pb2
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel
+from pydantic import ConfigDict as ConfigDict
+from pydantic import Field as Field
 
 from midojo.control_plane.config import CONTROL_TOKEN_ENV
-from midojo.observations import EvidenceStatus, register_observation_type
+from midojo.observations import EvidenceStatus
+from midojo.observations import register_observation_type as register_observation_type
+from midojo.observations.openshell import BUILTIN_POLICY_DIGEST as BUILTIN_POLICY_DIGEST
+from midojo.observations.openshell import OBSERVATIONS_SOURCE as OBSERVATIONS_SOURCE
+from midojo.observations.openshell import HttpRequestRecord as HttpRequestRecord
+from midojo.observations.openshell import OpenShellEvidence as OpenShellEvidence
+from midojo.observations.openshell import OpenShellObservations as OpenShellObservations
+from midojo.observations.openshell import ProcessRecord as ProcessRecord
 from midojo.probes import substitute_probes
-from midojo.runtimes.openshell.logs import HttpEvent, OCSFEvents, parse_ocsf_lines
+from midojo.runtimes.openshell.logs import HttpEvent as HttpEvent
+from midojo.runtimes.openshell.logs import OCSFEvents, parse_ocsf_lines
 from midojo.tool_endpoint import HOST_MODE_WITHHELD_ENV, SESSION_ENV, ToolEndpoint
 
 # ---------------------------------------------------------------------------
@@ -192,11 +207,6 @@ def _resolve_policy(spec: dict | None, sandbox_spec: Any) -> None:
     if not spec:
         return
     ParseDict(spec, sandbox_spec.policy)
-
-
-# Recorded as ``policy_digest`` when the sandbox spec carries no policy, so the
-# image's built-in policy governs the sandbox and there is nothing to hash.
-BUILTIN_POLICY_DIGEST = "builtin"
 
 
 def _policy_digest(sandbox_spec: Any) -> str:
@@ -425,131 +435,6 @@ def _parse_endpoint(endpoint: Any) -> sandbox_pb2.NetworkEndpoint | None:
 def _normal_host(host: str) -> str:
     host = host.lower()
     return host[:-1] if host.endswith(".") else host
-
-
-# ---------------------------------------------------------------------------
-# Observations
-# ---------------------------------------------------------------------------
-
-
-# Key of the OpenShell entry in an evaluation's runtime observations.
-OBSERVATIONS_SOURCE = "openshell"
-
-
-class ProcessRecord(BaseModel):
-    """A process OCSF saw launch in the sandbox."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    binary: str
-    pid: int
-    command: str | None = None  # the launched command line, when OCSF logged it
-    exit_code: int | None = None  # None when no PROC:TERMINATE event was logged
-
-
-class HttpRequestRecord(BaseModel):
-    """An HTTP request OpenShell's policy proxy inspected (L7), from one OCSF ``HTTP:`` line.
-
-    ``raw`` is the OCSF message the record was parsed from, as logged, and
-    ``url`` the URL in it; ``host``, ``port``, ``path`` and ``query`` are derived
-    from the URL (:func:`midojo.runtimes.openshell.logs.split_url`), each None
-    where it has no such part or couldn't be split. ``raw`` has no default: a
-    record built by hand (a test, a replay) passes the line it stands for, a
-    synthesized one such as ``HTTP:GET [INFO] ALLOWED GET http://example.com/``
-    if it has no logged one.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    method: str  # upper-case, e.g. "POST"
-    url: str  # as logged, query string included
-    decision: Literal["allowed", "denied"]  # the proxy's ALLOWED or DENIED
-    host: str | None = None  # lower-case
-    port: int | None = None  # only when the URL names one
-    path: str | None = None  # "/" for a URL with no path
-    query: str | None = None  # without the "?"; None when empty
-    raw: str  # the OCSF message the record was parsed from
-
-    @classmethod
-    def of(cls, event: HttpEvent) -> HttpRequestRecord:
-        """The record of a parsed ``HTTP:`` line."""
-        return cls(
-            method=event.method,
-            url=event.url,
-            decision="allowed" if event.action == "ALLOWED" else "denied",
-            host=event.host,
-            port=event.port,
-            path=event.path,
-            query=event.query,
-            raw=event.raw,
-        )
-
-
-class OpenShellEvidence(BaseModel):
-    """How completely each part of the OpenShell evidence was collected.
-
-    Defaults to ``complete``, so observations recorded by a producer that doesn't
-    report status are graded as before.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    ocsf: EvidenceStatus = "complete"  # processes, network calls, HTTP requests, findings
-    workdir: EvidenceStatus = "complete"  # files created, modified and deleted, and new files' contents
-
-
-class OpenShellObservations(BaseModel):
-    """What OpenShell saw the agent do during one evaluation.
-
-    Collected by ``OpenShellRuntime.observe()`` outside the agent, and recorded
-    by the orchestrator as ``observations["openshell"]``.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    # Fields added after snapshots were first digested: the snapshot digest
-    # leaves each out while it's empty (observations.digest_content), so a
-    # snapshot recorded without one keeps its ID.
-    DIGEST_OMITS_WHEN_EMPTY: ClassVar[tuple[str, ...]] = ("http_requests",)
-
-    evidence_status: OpenShellEvidence = Field(default_factory=OpenShellEvidence)
-
-    # File diff against the seeded files (absolute paths). Created files are
-    # found in the workdir only; seeded files are checked wherever they were seeded.
-    files_created: list[str] = Field(default_factory=list)
-    files_modified: list[str] = Field(default_factory=list)
-    files_deleted: list[str] = Field(default_factory=list)
-    workdir_new_file_contents: dict[str, str] = Field(default_factory=dict)
-
-    # OCSF events (kernel-verified)
-    processes: list[ProcessRecord] = Field(default_factory=list)  # in launch order
-    network_calls_allowed: list[str] = Field(default_factory=list)  # "host:port"
-    network_calls_blocked: list[str] = Field(default_factory=list)  # "host:port", or "host" for DNS refusals
-    # Closed because the sandbox's policy changed mid-connection, not denied by policy
-    network_calls_interrupted: list[str] = Field(default_factory=list)
-    # Sandbox-verified executables that made allowed or blocked network calls
-    network_callers: list[str] = Field(default_factory=list)
-    security_findings: list[str] = Field(default_factory=list)  # finding titles
-    # HTTP requests the proxy inspected, allowed and denied, in log order. Part of
-    # the ``ocsf`` evidence: none when the log read failed, those read so far when
-    # it's incomplete. Empty in observations recorded before it existed.
-    http_requests: list[HttpRequestRecord] = Field(default_factory=list)
-
-    # What ran. Optional so evaluations recorded before these fields still validate.
-    image: str | None = None  # the image reference the suite gave
-    # None with OpenShell 0.1.2, which reports no resolved image digest: the SDK's
-    # SandboxRef carries no image at all, and the Sandbox proto (spec and
-    # SandboxStatus) carries only the requested reference, SandboxTemplate.image.
-    image_digest: str | None = None
-    policy_digest: str | None = None  # "sha256:<hex>", or BUILTIN_POLICY_DIGEST
-
-    @classmethod
-    def not_collected(cls) -> OpenShellObservations:
-        """Stands in for observations that were never recorded."""
-        return cls(evidence_status=OpenShellEvidence(ocsf="not_collected", workdir="not_collected"))
-
-
-register_observation_type(OBSERVATIONS_SOURCE, OpenShellObservations)
 
 
 # ---------------------------------------------------------------------------

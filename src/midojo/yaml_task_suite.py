@@ -23,11 +23,11 @@ from midojo.control_plane.config import CONTROL_TOKEN_ENV
 from midojo.env_inference import infer_environment_type
 from midojo.episode import Episode, UnknownTaskError, freeze
 from midojo.probes import PROBE_PLACEHOLDER_RE, substitute_probes, substitute_probes_deep
-from midojo.runtimes import AgentRuntime, build_runtime
+from midojo.runtimes import AgentRuntime, RuntimeRegistry, build_runtime
 from midojo.suite_definition import OpenShellRuntimeDefinition, ProbeDefinition, SuiteDefinition
 from midojo.types import Environment, FunctionCallRecord, SuiteName
 from midojo.verifier import Check, parse_check
-from midojo.verifiers import ConversationTurn
+from midojo.verifiers import ConversationTurn, VerifierRegistry
 from midojo.verifiers.openshell import reads_openshell_observations
 
 # ``${env.VAR}`` references (OGX-style), expanded from the process environment in
@@ -137,11 +137,17 @@ class YAMLTaskSuite:
 
     A suite is a catalogue: :meth:`episode` compiles one of its user task x
     injection task pairs into an :class:`~midojo.episode.Episode`. Parsing it
-    builds no runtime; :meth:`new_runtime` builds a fresh one each time.
+    builds no runtime and imports no runtime provider: the suite records the
+    runtime definition its ``agent_runtime`` asks for, and :meth:`new_runtime`
+    builds a fresh runtime from it each time.
+
+    ``verifiers`` is the registry its checks are parsed with, and its
+    episodes graded with (the default registry when None).
     """
 
-    def __init__(self, name: SuiteName, suite_yaml_path: Path) -> None:
+    def __init__(self, name: SuiteName, suite_yaml_path: Path, *, verifiers: VerifierRegistry | None = None) -> None:
         self._suite_yaml_path = suite_yaml_path
+        self._verifiers = verifiers
         raw = yaml.safe_load(suite_yaml_path.read_text())
         if not isinstance(raw, dict):
             raise ValueError(f"Invalid suite definition in {suite_yaml_path}: expected a YAML mapping")
@@ -165,9 +171,13 @@ class YAMLTaskSuite:
         """The suite.yaml this suite was loaded from."""
         return self._suite_yaml_path
 
-    def new_runtime(self) -> AgentRuntime:
-        """A fresh runtime for the suite's ``agent_runtime``: it shares no state with any other."""
-        return build_runtime(self.name, self.definition.agent_runtime)
+    def new_runtime(self, *, registry: RuntimeRegistry | None = None) -> AgentRuntime:
+        """A fresh runtime for the suite's ``agent_runtime``: it shares no state with any other.
+
+        It is built by ``registry`` (the default runtime registry when None);
+        see :func:`midojo.runtimes.build_runtime`.
+        """
+        return build_runtime(self.name, self.definition.agent_runtime, registry=registry)
 
     def episode(
         self,
@@ -204,6 +214,7 @@ class YAMLTaskSuite:
             suite_name=self.name,
             user_task_id=user_task_id,
             injection_task_id=injection_task_id,
+            verifiers=self._verifiers,
         )
 
     def provision_environment(self, injections: dict[str, str]) -> Environment:
@@ -260,7 +271,7 @@ class YAMLTaskSuite:
             )
 
     def _parse_check(self, task_id: str, raw: dict[str, Any]) -> Check:
-        check = parse_check(raw)
+        check = parse_check(raw, registry=self._verifiers)
         if not isinstance(self.definition.agent_runtime, OpenShellRuntimeDefinition) and (
             reads_openshell_observations(check.parsed)
         ):

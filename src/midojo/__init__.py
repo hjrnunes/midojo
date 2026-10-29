@@ -4,6 +4,11 @@ The library API: an :class:`Episode` is what to run, :func:`open_episode` runs
 it once and seals its evaluation (see :mod:`midojo.episode_context`), and
 :func:`grade` grades the sealed :class:`Snapshot`, a pure function. The names
 are imported when first used, so ``import midojo`` stays light.
+
+The child modules a bare ``import midojo`` used to load as a side effect
+(``midojo.runtimes``, ``midojo.control_plane``, ...) are still reachable as
+attributes of the package: each is imported on first access, and listed by
+``dir()``, without being loaded by ``import midojo`` itself.
 """
 
 from typing import TYPE_CHECKING, Any
@@ -30,10 +35,24 @@ _EXPORTS = {
 }
 
 
+# The child modules ``import midojo`` loaded when it imported the OpenShell runtime up front, each imported on first
+# access. Their own descendants it loaded are reachable from each child however it was imported: a child that doesn't
+# import them itself makes them lazy attributes of its own (``control_plane.config``, ``runtimes.openshell``).
+_SUBMODULES = frozenset(
+    {"control_plane", "observations", "probes", "runtimes", "suite_definition", "tool_endpoint", "types", "verifiers"}
+)
+
+
 def __getattr__(name: str) -> Any:
-    module = _EXPORTS.get(name)
-    if module is None:
-        raise AttributeError(f"module 'midojo' has no attribute {name!r}")
     import importlib
 
-    return getattr(importlib.import_module(module), name)
+    module = _EXPORTS.get(name)
+    if module is not None:
+        return getattr(importlib.import_module(module), name)
+    if name in _SUBMODULES:
+        return importlib.import_module(f"{__name__}.{name}")
+    raise AttributeError(f"module 'midojo' has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    return sorted({*globals(), *_EXPORTS, *_SUBMODULES})

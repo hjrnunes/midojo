@@ -35,12 +35,12 @@ from pydantic import BaseModel, TypeAdapter
 from midojo.delivery import exposure
 from midojo.env_inference import infer_environment_type
 from midojo.observations import FUNCTION_CALLS, EvidenceStatus, evidence_status
-from midojo.runtimes import AgentRuntime, build_runtime
-from midojo.runtimes.openshell import OBSERVATIONS_SOURCE, OpenShellObservations
+from midojo.observations.openshell import OBSERVATIONS_SOURCE, OpenShellObservations
+from midojo.runtimes import AgentRuntime, RuntimeRegistry, build_runtime
 from midojo.suite_definition import AgentRuntimeDefinition
 from midojo.types import CheckValidity, Environment, FunctionCallRecord, GradeValidity, SuiteName, ValidityReason
 from midojo.verifier import Check, VerificationContext, VerificationResult, parse_check
-from midojo.verifiers import ConversationTurn
+from midojo.verifiers import ConversationTurn, VerifierRegistry
 from midojo.verifiers.builtin import EFFECTS_ONLY, BuiltinVerifier, attempt
 from midojo.verifiers.openshell import reads_openshell_observations
 
@@ -158,6 +158,8 @@ class Episode:
     ``environment_type`` must be an :class:`~midojo.types.Environment` subclass
     (a class, not an instance); like the verifier registry the checks resolve
     against, it is held by reference and treated as code, not data.
+    ``verifiers`` is that registry (the default one when None); it takes no
+    part in comparing episodes.
     """
 
     runtime: AgentRuntimeDefinition | Mapping[str, Any] = dataclasses.field(
@@ -172,6 +174,7 @@ class Episode:
     suite_name: SuiteName | None = None
     user_task_id: str | None = None
     injection_task_id: str | None = None
+    verifiers: VerifierRegistry | None = dataclasses.field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.turns is not None:
@@ -183,6 +186,8 @@ class Episode:
             object.__setattr__(self, "turns", turns)
         if type(self.plan) is not InjectionPlan:
             raise TypeError("plan must be an InjectionPlan")
+        if self.verifiers is not None and not isinstance(self.verifiers, VerifierRegistry):
+            raise TypeError(f"verifiers must be a VerifierRegistry, not {type(self.verifiers).__name__}")
         for name in ("suite_name", "user_task_id", "injection_task_id"):
             if (value := getattr(self, name)) is not None:
                 _exact_str(value, name)
@@ -216,9 +221,13 @@ class Episode:
         """A fresh copy of the runtime definition the episode needs."""
         return _RUNTIME_DEFINITION.validate_python(thaw(self.runtime))
 
-    def new_runtime(self) -> AgentRuntime:
-        """A fresh runtime for one run of this episode: it shares no state with any other."""
-        return build_runtime(self.suite_name or DEFAULT_EPISODE_NAME, self.runtime_definition())
+    def new_runtime(self, *, registry: RuntimeRegistry | None = None) -> AgentRuntime:
+        """A fresh runtime for one run of this episode: it shares no state with any other.
+
+        It is built by ``registry`` (the default runtime registry when None);
+        see :func:`midojo.runtimes.build_runtime`.
+        """
+        return build_runtime(self.suite_name or DEFAULT_EPISODE_NAME, self.runtime_definition(), registry=registry)
 
     def provision_environment(self) -> Environment:
         """A fresh environment from the initial state; the episode keeps none of it."""
@@ -233,7 +242,7 @@ class Episode:
         spec = getattr(self, name)
         if spec is None:
             return None
-        check = parse_check(thaw(spec))
+        check = parse_check(thaw(spec), registry=self.verifiers)
         if not self._on_openshell() and reads_openshell_observations(check.parsed):
             raise ValueError(f"The {name} check uses OpenShell predicates, which require the openshell agent_runtime")
         return check

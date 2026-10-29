@@ -47,7 +47,6 @@ from midojo.delivery import EXPOSURE_BOUNDARIES, DeliveryFact, Exposure, Exposur
 from midojo.episode import Episode
 from midojo.episode_context import EpisodeContext, EpisodeStep, open_episode
 from midojo.runtimes import AgentRuntime, attempt_isolation, is_disposable
-from midojo.runtimes.openshell import SANDBOX_HOST, OpenShellRuntime
 from midojo.suite_tools import host_tools_reference, import_suite_module
 from midojo.suites import get_suite, list_suites
 from midojo.tool_endpoint import bare_host, tool_url
@@ -55,8 +54,126 @@ from midojo.yaml_task_suite import YAMLTaskSuite
 
 if TYPE_CHECKING:
     from midojo.interception_host import HostInterception, HostTools
+    from midojo.runtimes.openshell import SANDBOX_HOST, OpenShellRuntime
 
 console = Console()
+
+
+def _openshell_runtime(runtime: object) -> OpenShellRuntime | None:
+    """``runtime`` if it is an OpenShell runtime, else None.
+
+    The OpenShell runtime's module is imported only when one is built, so a
+    runtime can be one only once that module is loaded: until then nothing
+    here imports it.
+    """
+    module = sys.modules.get("midojo.runtimes.openshell")
+    if module is not None and isinstance(runtime, module.OpenShellRuntime):
+        return cast("OpenShellRuntime", runtime)
+    return None
+
+
+# Names this module imported from the OpenShell runtime up front, still importable from it, loaded on first use.
+_FROM_OPENSHELL = frozenset({"OpenShellRuntime", "SANDBOX_HOST"})
+
+
+def __getattr__(name: str) -> Any:
+    if name in _FROM_OPENSHELL:
+        from midojo import runtimes
+
+        return getattr(runtimes.openshell, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    return sorted({*globals(), *_FROM_OPENSHELL})
+
+
+# What ``from midojo.orchestrator import *`` exports: every public name it exported when this module imported the
+# OpenShell runtime up front. ``OpenShellRuntime`` and ``SANDBOX_HOST`` stay lazy for a named import or an attribute
+# read; a star import loads the runtime (and without its dependencies raises MissingCapabilityError).
+__all__ = [
+    "ATTACK_OUTCOME",
+    "CONTROL_TOKEN_ENV",
+    "EXIT_ALL_FAILED",
+    "EXIT_SOME_FAILED",
+    "EXPOSURE_BOUNDARIES",
+    "SANDBOX_HOST",
+    "TYPE_CHECKING",
+    "A2AAgentClient",
+    "AgentClient",
+    "AgentRuntime",
+    "Any",
+    "Attacker",
+    "AttackerFactory",
+    "AttemptIsolation",
+    "AttemptOutcome",
+    "AttemptRun",
+    "BenchmarkOutcome",
+    "Callable",
+    "Console",
+    "ControlClient",
+    "ControlPlaneClient",
+    "DeliveryFact",
+    "Episode",
+    "EpisodeContext",
+    "EpisodeRun",
+    "EpisodeStep",
+    "Exchange",
+    "Exposure",
+    "ExposureStatus",
+    "GradeResponse",
+    "NamedTuple",
+    "OGXResponsesClient",
+    "OpenAIResponsesAgentClient",
+    "OpenShellAgentClient",
+    "OpenShellRuntime",
+    "OutOfSurfaceError",
+    "PIAgentClient",
+    "PairFailure",
+    "Panel",
+    "Path",
+    "Sequence",
+    "SimpleHTTPAgentClient",
+    "Snapshot",
+    "StaticAttacker",
+    "Table",
+    "TaskPair",
+    "TaskResult",
+    "Text",
+    "YAMLTaskSuite",
+    "annotations",
+    "asdict",
+    "asyncio",
+    "attempt_isolation",
+    "bare_host",
+    "cast",
+    "check_plan_within",
+    "click",
+    "console",
+    "contextlib",
+    "delivery_facts",
+    "exit_status",
+    "exposure",
+    "get_suite",
+    "host_tools_reference",
+    "httpx",
+    "import_suite_module",
+    "importlib",
+    "ipaddress",
+    "is_adaptive",
+    "is_disposable",
+    "json",
+    "list_suites",
+    "main",
+    "math",
+    "open_episode",
+    "os",
+    "permitted_injections",
+    "run_benchmark",
+    "run_task",
+    "sys",
+    "tool_url",
+]
 
 
 def _resolve_system_message(suite_name: str) -> str:
@@ -1237,7 +1354,7 @@ def main(
             bind=interceptor_bind,
             port=interceptor_port,
             advertise=interceptor_advertise_host,
-            openshell=isinstance(runtime, OpenShellRuntime),
+            openshell=_openshell_runtime(runtime) is not None,
             tools=_load_host_tools(host_tools) if host_tools is not None else None,
         )
         if host_mode
@@ -1246,7 +1363,7 @@ def main(
     if not host_mode and (interceptor_port or interceptor_advertise_host):
         raise click.UsageError("The --interceptor-* options apply only to --interception host.")
 
-    if isinstance(runtime, OpenShellRuntime):
+    if (openshell := _openshell_runtime(runtime)) is not None:
         if agent_uri or protocol:
             raise click.UsageError(
                 f"Suite {suite_name!r} runs its agent in OpenShell; pass --gateway instead of --agent-uri/--protocol."
@@ -1257,10 +1374,10 @@ def main(
             # The sandbox never gets the control plane's URL in host mode, only the interceptor's.
             assert host_interception.advertise_host is not None
             advertised = tool_url(host_interception.advertise_host, host_interception.port)
-            runtime.configure(cluster=gateway, interceptor_url=advertised)
+            openshell.configure(cluster=gateway, interceptor_url=advertised)
         else:
-            runtime.configure(cluster=gateway, control_url=control_url)
-        agent_client = OpenShellAgentClient(runtime, timeout=agent_timeout)
+            openshell.configure(cluster=gateway, control_url=control_url)
+        agent_client = OpenShellAgentClient(openshell, timeout=agent_timeout)
         agent_uri, protocol = gateway, "openshell"
     elif gateway:
         raise click.UsageError(
@@ -1377,6 +1494,8 @@ def _host_interception(
                 "An OpenShell sandbox can't reach an interceptor on the host's loopback: pass --interceptor-bind "
                 "with an address the sandbox reaches (e.g. 0.0.0.0)."
             )
+        from midojo.runtimes.openshell import SANDBOX_HOST  # an OpenShell runtime was built, so it is loaded
+
         advertise = advertise or SANDBOX_HOST
         if _is_loopback(advertise) or _is_unspecified(advertise):
             raise click.UsageError(
