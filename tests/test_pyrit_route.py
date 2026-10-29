@@ -50,7 +50,7 @@ from midojo.suites import get_suite
 from midojo.yaml_task_suite import YAMLTaskSuite
 from suites import weather
 from suites.weather.host_tools import register
-from tests.judge_service import FakeJudge
+from tests.judge_service import ANSWERS, FakeJudge
 
 SURFACE = InjectionPlan((InjectionInstruction(Channel.TOOL_OUTPUT, "", InjectionTarget(tool="read_note")),))
 
@@ -693,24 +693,28 @@ async def test_campaign_feedback_never_exposes_failure_details(float_threshold, 
         assert secret in metadata["midojo.reason"]
 
 
-async def ticking(until: asyncio.Event) -> int:
-    """How many times the event loop ran this task until ``until`` was set: none while something blocked it."""
-    ticks = 0
-    while not until.is_set():
-        ticks += 1
-        await asyncio.sleep(0.01)
-    return ticks
+# How long the stub judge waits for the event loop to answer it. Only a bound: off the loop it answers at once, and
+# grading on the loop would hold the loop for the whole wait, so the judge would answer unreleased.
+LOOP_HANDSHAKE_BOUND = 5.0
 
 
-async def responsive(awaitable):
-    """``awaitable``'s result, and how often the event loop ran another task meanwhile."""
-    done = asyncio.Event()
-    ticker = asyncio.create_task(ticking(done))
-    try:
-        result = await awaitable
-    finally:
-        done.set()
-    return result, await ticker
+def loop_handshake(monkeypatch, loop: asyncio.AbstractEventLoop, path: str) -> list[bool]:
+    """Make the stub judge's ``path`` answer only once ``loop`` has run a callback since the request arrived.
+
+    Returns, per request, whether the loop ran it: False when something held the loop while the judge was asked.
+    """
+    answer = ANSWERS[path]
+    released: list[bool] = []
+
+    def handshake(request, headers):
+        ran = threading.Event()
+        loop.call_soon_threadsafe(ran.set)
+        released.append(ran.wait(LOOP_HANDSHAKE_BOUND))
+        return answer(request, headers)
+
+    handshake_path = f"/loop-handshake{path}"
+    monkeypatch.setitem(ANSWERS, handshake_path, handshake)
+    return released
 
 
 @pytest.mark.parametrize("verdict,expected", [("supported", True), ("contradicted", False), ("unresolved", None)])
@@ -728,22 +732,23 @@ async def test_a_reply_judge_never_blocks_the_loop_and_a_success_is_still_replay
 
     # The control plane's own grading, in its worker thread: the target grades nowhere else.
     monkeypatch.setattr(ControlPlane, "grade", recording_grade)
-    judge = FakeJudge(delay=0.5)
+    released = loop_handshake(monkeypatch, asyncio.get_running_loop(), f"/{verdict}")
+    judge = FakeJudge()
     try:
-        security = {"reply_judge": {"claim": "The reply says it is broken", "url": judge.url(f"/{verdict}")}}
+        url = judge.url(f"/loop-handshake/{verdict}")
+        security = {"reply_judge": {"claim": "The reply says it is broken", "url": url}}
         target, _, contexts = make_target(replies=("broken", "broken"), security=security)
-        response, ticks = await responsive(send(target))
-        assert ticks >= 10  # the loop ran while the judge took half a second
-        result, ticks = await responsive(score(response, MidojoVerdictScorer(target=target), memory))
+        response = await send(target)
+        result = await score(response, MidojoVerdictScorer(target=target), memory)
         if expected is None:
             assert result.status == ScoreStatus.UNDETERMINED
         else:
             assert result.get_value() is expected
-        if expected:
-            assert ticks >= 10  # the replay's judge too
 
         evaluations = [ep.evaluation_id for ep in contexts]
         assert len(evaluations) == (2 if expected else 1)  # only a discovered success is replayed
+        # The loop ran while the judge was asked, for the send and for the replay alike.
+        assert released == [True] * len(evaluations)
         assert graded == [(evaluation, True) for evaluation in evaluations]
         assert len(judge.requests) == len(evaluations)
         receipt = target.verdict_of(response)
