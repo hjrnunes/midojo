@@ -105,7 +105,8 @@ _SEED_STATUSES = frozenset({"unchanged", "modified", "deleted"})
 # itself. The control-plane URL handed to the in-sandbox SDK (MIDOJO_URL) is
 # rewritten to use it. The suite's network policy must separately allow this
 # endpoint; midojo never edits the declared policy — it only warns when the
-# allow rule is missing (see `_warn_if_control_plane_not_allowed`).
+# allow rule is missing (see `_check_control_plane_allowed`), or stops the run
+# when the suite sets `require_policy_allows`.
 SANDBOX_HOST = "host.openshell.internal"
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
 
@@ -235,8 +236,16 @@ def _rewrite_host_for_sandbox(url: str) -> str:
     return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
 
-def _warn_if_control_plane_not_allowed(policy_spec: dict | None, url: str) -> None:
-    """Warn (never mutate) if the policy does not allow reaching the control plane.
+class PolicyCheckError(RuntimeError):
+    """The suite's network policy doesn't allow an endpoint the sandbox must reach, and the suite requires it to.
+
+    Raised by ``start_run()``, before any sandbox is created, only when the
+    ``openshell`` definition sets ``require_policy_allows: true``.
+    """
+
+
+def _check_control_plane_allowed(policy_spec: dict | None, url: str, *, required: bool = False) -> None:
+    """Check (never mutate) that the policy allows reaching the control plane.
 
     The in-sandbox agent SDK POSTs its tool calls to the control plane, so the
     suite's network policy must include an egress allow rule for it (see the
@@ -247,85 +256,169 @@ def _warn_if_control_plane_not_allowed(policy_spec: dict | None, url: str) -> No
 
     The endpoint checked is ``url`` with any ``localhost``/loopback host rewritten
     to ``host.openshell.internal`` (matching :func:`_rewrite_host_for_sandbox`)
-    and the port defaulted from the scheme when absent. ``policy_spec=None`` (or
-    ``{}``, see :func:`_resolve_policy`) means no midojo policy (the image built-in
-    governs egress), which we cannot inspect.
+    and the port defaulted from the scheme when absent. See
+    :func:`_check_endpoint_allowed` for what is compared and when a miss raises.
     """
-    import logging
     from urllib.parse import urlsplit
 
-    log = logging.getLogger(__name__)
     parts = urlsplit(url)
     host = parts.hostname or ""
     if host.lower() in _LOCAL_HOSTS:
         host = SANDBOX_HOST
     port = parts.port or (443 if parts.scheme == "https" else 80)
-
-    if not policy_spec:
-        log.warning(
-            "No sandbox network policy defined; cannot verify the agent can reach "
-            "the control plane at %s:%d. If it cannot, the in-sandbox SDK will not "
-            "record tool calls and security predicates will show N/A. Ensure the "
-            "image's built-in policy allows this endpoint.",
-            host,
-            port,
-        )
-        return
-
-    if not _policy_allows(policy_spec, host, port):
-        log.warning(
-            "Sandbox network policy does not allow the control plane at %s:%d; the "
-            "in-sandbox agent SDK cannot POST tool calls and security predicates "
-            "will show N/A. Add it to your suite's policy under networkPolicies, "
-            "e.g. an endpoint {host: %s, port: %d}.",
-            host,
-            port,
-            host,
-            port,
-        )
-
-
-def _policy_allows(policy_spec: dict, host: str, port: int) -> bool:
-    """Whether an endpoint of the policy's ``networkPolicies`` is exactly ``host:port``."""
-    network_policies = policy_spec.get("networkPolicies") or {}
-    return any(
-        any(ep.get("host") == host and ep.get("port") == port for ep in (entry.get("endpoints") or []))
-        for entry in network_policies.values()
+    _check_endpoint_allowed(
+        policy_spec,
+        host,
+        port,
+        target="the control plane",
+        consequence="the in-sandbox agent SDK cannot POST tool calls and security predicates will show N/A",
+        required=required,
     )
 
 
-def _warn_if_interceptor_not_allowed(policy_spec: dict | None, url: str) -> None:
-    """Warn (never mutate) if the policy does not allow reaching the host-side interceptor at ``url``.
+def _check_interceptor_allowed(policy_spec: dict | None, url: str, *, required: bool = False) -> None:
+    """Check (never mutate) that the policy allows reaching the host-side interceptor at ``url``.
 
     In host mode the agent calls its tools at the interceptor the host runs,
     advertised to the sandbox at ``url`` (``host.openshell.internal`` and a
     fixed port), so the suite's network policy needs an allow rule for that
     host and port, for the binaries that make the MCP calls. It needs none for
-    the control plane: the sandbox never reaches it.
+    the control plane: the sandbox never reaches it. See
+    :func:`_check_endpoint_allowed` for what is compared and when a miss raises.
     """
-    import logging
     from urllib.parse import urlsplit
 
-    log = logging.getLogger(__name__)
     parts = urlsplit(url)
     host = parts.hostname or ""
     port = parts.port or (443 if parts.scheme == "https" else 80)
+    _check_endpoint_allowed(
+        policy_spec,
+        host,
+        port,
+        target="the host-side interceptor",
+        consequence="the agent cannot call its tools",
+        required=required,
+    )
+
+
+def _check_endpoint_allowed(
+    policy_spec: dict | None, host: str, port: int, *, target: str, consequence: str, required: bool
+) -> None:
+    """Warn, or raise :class:`PolicyCheckError` when ``required``, if no policy rule allows ``host:port``.
+
+    A miss only warns by default. The declared policy is a security control
+    midojo never mutates, and this check reads only part of what decides a
+    connection: it can't see which binary in the sandbox makes the call (a
+    rule's ``binaries``), the L7 rules, or the image's built-in policy. So a
+    miss can be a false alarm, and must not block a run unless the suite asks
+    for it with ``require_policy_allows: true``.
+
+    ``policy_spec=None`` (or ``{}``, see :func:`_resolve_policy`) means no midojo
+    policy: the image's built-in policy governs egress, which can't be
+    inspected, so it warns even when ``required``. When every rule that allows
+    the endpoint lists ``binaries``, it logs them at INFO, so you can check the
+    agent's binary is one of them. See :func:`_policy_rules_allowing` for what
+    is compared.
+    """
+    log = logging.getLogger(__name__)
     if not policy_spec:
         log.warning(
-            "No sandbox network policy defined; cannot verify the agent can reach the host-side interceptor at "
-            "%s:%d. If it cannot, the agent's tool calls fail. Ensure the image's built-in policy allows it.",
+            "No sandbox network policy defined; cannot verify the agent can reach %s at %s:%d. If it cannot, %s. "
+            "Ensure the image's built-in policy allows it.",
+            target,
             host,
             port,
+            consequence,
         )
-    elif not _policy_allows(policy_spec, host, port):
-        log.warning(
-            "Sandbox network policy does not allow the host-side interceptor at %s:%d; the agent cannot call its "
-            "tools. Add it to your suite's policy under networkPolicies, e.g. an endpoint {host: %s, port: %d}.",
-            host,
-            port,
-            host,
-            port,
+        return
+    rules = _policy_rules_allowing(policy_spec, host, port)
+    if not rules:
+        message = (
+            f"Sandbox network policy does not allow {target} at {host}:{port}; {consequence}. Add it to your "
+            f"suite's policy under networkPolicies, e.g. an endpoint {{host: {host}, port: {port}}}."
         )
+        if required:
+            raise PolicyCheckError(f"{message} The suite sets require_policy_allows, so the run stops here.")
+        log.warning("%s", message)
+        return
+    if all(binaries for _, binaries in rules):
+        log.info(
+            "Sandbox network policy allows %s at %s:%d only for the binaries its rules %s list: %s. The agent's "
+            "calls must come from one of them.",
+            target,
+            host,
+            port,
+            ", ".join(name for name, _ in rules),
+            ", ".join(sorted({path for _, binaries in rules for path in binaries})),
+        )
+
+
+def _policy_rules_allowing(policy_spec: dict, host: str, port: int) -> list[tuple[str, list[str]]]:
+    """The policy's network rules with an endpoint at ``host:port``, each as its name and the binaries it lists.
+
+    It reads the policy's ``networkPolicies`` (or ``network_policies``, which
+    proto JSON accepts too) as OpenShell parses them: an endpoint's ``host`` is
+    compared case-insensitively, one trailing dot ignored on both sides, and
+    its port is ``port`` or any of ``ports``, each an int or a decimal string
+    (``"8766"``, as an ``${env.VAR}`` expansion gives it). Hosts are compared
+    exactly otherwise, as nothing in OpenShell's policy schema says a host can
+    be a pattern. An entry of the wrong shape (an endpoint that isn't a dict, a
+    port that is a bool or a non-numeric string, ...) never matches.
+
+    Out of scope: L7 rules (an endpoint's HTTP method and path ``rules``) and its
+    ``protocol``, ``tls`` and ``enforcement`` aren't evaluated, so an endpoint
+    whose rules allow only some methods or paths still counts for its
+    ``host:port``; ``allowedIps`` isn't either. A rule's ``binaries`` restrict
+    which programs may use it, which can't be known before the agent runs, so
+    they're returned for the caller to report, not checked.
+    """
+    network_policies = policy_spec.get("networkPolicies", policy_spec.get("network_policies"))
+    if not isinstance(network_policies, dict):
+        return []
+    wanted = _normal_host(host)
+    rules: list[tuple[str, list[str]]] = []
+    for name, rule in network_policies.items():
+        endpoints = rule.get("endpoints") if isinstance(rule, dict) else None
+        if not isinstance(endpoints, list):
+            continue
+        if any(
+            isinstance(endpoint, dict)
+            and isinstance(endpoint.get("host"), str)
+            and _normal_host(endpoint["host"]) == wanted
+            and port in _endpoint_ports(endpoint)
+            for endpoint in endpoints
+        ):
+            binaries = rule.get("binaries")
+            paths = [
+                binary["path"]
+                for binary in (binaries if isinstance(binaries, list) else [])
+                if isinstance(binary, dict) and isinstance(binary.get("path"), str)
+            ]
+            rules.append((str(name), paths))
+    return rules
+
+
+def _normal_host(host: str) -> str:
+    host = host.lower()
+    return host[:-1] if host.endswith(".") else host
+
+
+def _endpoint_ports(endpoint: dict) -> set[int]:
+    """The ports an endpoint names in ``port`` and ``ports``, skipping any value that isn't a port."""
+    ports = endpoint.get("ports")
+    values = [endpoint.get("port"), *(ports if isinstance(ports, list) else [])]
+    return {port for port in map(_port_number, values) if port is not None}
+
+
+def _port_number(value: Any) -> int | None:
+    # A bool is an int in Python, not a port; a string must be all ASCII digits ("8766", not " 8766" or "+8766").
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isascii() and value.isdigit():
+        return int(value)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -470,6 +563,7 @@ class OpenShellRuntime:
           files:                   # seeded files, relative to the workdir or absolute (probe placeholders allowed)
             customer_report.txt: "Q4 report ... {injection_task_0:main}"
           inject_session: false    # keep the session and control-plane URL out of an agent-mode sandbox too
+          require_policy_allows: true  # stop the run when the policy has no rule for the interceptor or control plane
 
     Lifecycle (driven by the orchestrator):
       1. ``configure(cluster=..., control_url=...)`` — inject deployment config (once);
@@ -498,6 +592,7 @@ class OpenShellRuntime:
         files: dict[str, str] | None = None,
         agent_timeout_seconds: float | None = None,
         inject_session: bool = True,
+        require_policy_allows: bool = False,
     ) -> None:
         self._suite_name = suite_name
         self._image: str = image
@@ -525,6 +620,9 @@ class OpenShellRuntime:
         # The suite's `inject_session`: whether an agent-mode sandbox gets the session and the control plane's
         # URL. A host-mode sandbox never gets them, whatever it says.
         self._inject_session: bool = inject_session
+        # The suite's `require_policy_allows`: whether start_run() raises, rather than warns, when the policy has
+        # no rule for the endpoint the sandbox must reach (see `_check_endpoint_allowed`).
+        self._require_policy_allows: bool = require_policy_allows
         # setup() touches the baseline after seeding, so a seed there could never
         # look modified.
         for path in self._files:
@@ -581,6 +679,10 @@ class OpenShellRuntime:
     def inject_session(self) -> bool:
         return self._inject_session
 
+    @property
+    def require_policy_allows(self) -> bool:
+        return self._require_policy_allows
+
     # --- Deployment config ---
 
     def configure(self, *, cluster: str, control_url: str = "", interceptor_url: str = "") -> None:
@@ -608,7 +710,19 @@ class OpenShellRuntime:
         gateway's gRPC endpoint and mTLS bundle from ``~/.config/openshell/``
         (written by the CLI). Names contain a shortened suite name; labels retain
         the full registered suite name and run ID.
+
+        It first checks the policy allows the endpoint the sandbox must reach
+        (see ``_check_endpoint_allowed``), so with ``require_policy_allows`` a
+        miss raises :class:`PolicyCheckError` before anything is created.
         """
+        # Policy and control-plane (or interceptor) URL are fixed for the whole run, so check the
+        # allow rule once here rather than on every setup(). A sandbox without the session never
+        # reaches the control plane, so it needs no rule for it.
+        if self._interceptor_url:
+            _check_interceptor_allowed(self._policy_spec, self._interceptor_url, required=self._require_policy_allows)
+        elif self._control_url and self._inject_session:
+            _check_control_plane_allowed(self._policy_spec, self._control_url, required=self._require_policy_allows)
+
         self._client = SandboxClient.from_active_cluster(cluster=self._cluster, timeout=_CLIENT_TIMEOUT_SECONDS)
         self._workspace_client = WorkspaceClient.from_sandbox_client(self._client)
         labels = {"midojo.suite": suite_name or self._suite_name, "midojo.run-id": run_id}
@@ -618,14 +732,6 @@ class OpenShellRuntime:
         )
         self._workspace_name = workspace.name
         self._run_labels = labels
-
-        # Policy and control-plane (or interceptor) URL are fixed for the whole run, so check the
-        # allow rule once here rather than on every setup(). A sandbox without the session never
-        # reaches the control plane, so it needs no rule for it.
-        if self._interceptor_url:
-            _warn_if_interceptor_not_allowed(self._policy_spec, self._interceptor_url)
-        elif self._control_url and self._inject_session:
-            _warn_if_control_plane_not_allowed(self._policy_spec, self._control_url)
         return f"workspace {self._workspace_name}"
 
     # --- Per-evaluation sandbox lifecycle ---

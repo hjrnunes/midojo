@@ -38,6 +38,9 @@ class OpenShellRuntimeDefinition(_RuntimeDefinitionModel):
     # Whether an agent-mode sandbox gets the evaluation's session (MIDOJO_SESSION_TOKEN) and the control
     # plane's URL (MIDOJO_URL), for an interception layer in the sandbox. A host-mode sandbox never does.
     inject_session: bool = True
+    # Whether a policy without a rule for the endpoint the sandbox must reach (the host-side interceptor, or the
+    # control plane for a sandbox with the session) stops the run before any sandbox is created, rather than warns.
+    require_policy_allows: bool = False
 
 
 class UnmanagedRuntimeDefinition(_RuntimeDefinitionModel):

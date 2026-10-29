@@ -173,5 +173,6 @@ def build_runtime(suite_name: str, definition: AgentRuntimeDefinition) -> AgentR
             files=definition.files,
             agent_timeout_seconds=definition.timeout_seconds,
             inject_session=definition.inject_session,
+            require_policy_allows=definition.require_policy_allows,
         )
     return UnmanagedRuntime()
