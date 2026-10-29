@@ -292,6 +292,10 @@ class MidojoEpisodeTarget(PromptTarget):
             reason = f"{type(error).__name__}: {error}"
             return MidojoVerdict("failed", evaluation_id, snapshot_id, run_id, reason=reason), UNDETERMINED_REPLY
 
+    def receipts(self) -> list[tuple[str, MidojoVerdict]]:
+        """Every send's receipt in send order, with its response piece ID; a confirmed success carries its replay."""
+        return [(response_id, attempt.verdict) for response_id, attempt in self._attempts.items()]
+
     def verdict_of(self, message: Message) -> MidojoVerdict | None:
         """Resolve exactly one response by identity; ignore response text and metadata."""
         if len(message.message_pieces) != 1 or message.message_pieces[0].role != "assistant":

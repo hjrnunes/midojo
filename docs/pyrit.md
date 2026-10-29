@@ -209,7 +209,8 @@ uv run --frozen python -m examples.pyrit_weather \
   --gateway YOUR_GATEWAY \
   --attacker-model YOUR_ATTACKER_MODEL \
   --attacker-endpoint https://YOUR_MODEL_HOST/v1 \
-  --max-turns 3
+  --max-turns 3 \
+  --output pyrit-runs/first
 ```
 
 `--attacker-endpoint` is the OpenAI-compatible base URL, ending in `/v1`:
@@ -219,9 +220,62 @@ ends in `/chat/completions` doesn't work.
 
 That command calls real models; it is not part of the tests. The example
 binds the host interceptor on port 8766, as the weather policy requires,
-and keeps the control-plane session out of the sandbox. PyRIT persists
-messages and scores in its SQLite memory, including replay identities in
-the score metadata.
+and keeps the control-plane session out of the sandbox.
+
+Its other options:
+
+- `--output DIR` (required): where the run's evidence goes. It must be new
+  or empty: an existing file or non-empty directory is refused before
+  anything runs, so no earlier run's evidence is overwritten. The target's
+  receipts and the in-process control plane's sealed snapshots otherwise
+  live only as long as the process.
+- `--memory-db PATH`: PyRIT's SQLite memory (messages, scores, and replay
+  identities in the score metadata), passed as
+  `initialize_pyrit_async(SQLITE, db_path=PATH)`, which PyRIT 1.1.0 hands to
+  `SQLiteMemory(db_path=...)`. The default is `DIR/pyrit.db`, not PyRIT's
+  shared default database (`dbdata/pyrit.db` under the user data directory,
+  e.g. `~/Library/Application Support/dbdata/pyrit.db` on macOS). PyRIT
+  still keeps its results path, for files a multimodal target would save,
+  under that shared directory; this text-only campaign writes none.
+- `--attacker-max-retries N` (default 0): how often a failed attacker
+  request is retried, at both of its retry layers. The openai client gets
+  `max_retries=N` (through `OpenAIChatTarget`'s `httpx_client_kwargs`, which
+  PyRIT 1.1.0 passes to `AsyncOpenAI`; the SDK's own default is 2), and
+  PyRIT's retry around each send (`pyrit_target_retry`: rate limits and
+  empty responses) gets `RETRY_MAX_NUM_ATTEMPTS=N+1` attempts (PyRIT's
+  default is 10). PyRIT reads that variable from the process environment
+  at retry time, and has no constructor argument for it; the example sets
+  it after `initialize_pyrit_async`, so a `.env.local` file PyRIT loads
+  can't override it. The same variable bounds PyRIT's retries of an
+  attacker reply that isn't valid JSON. With 0, a failed request fails the
+  turn at once rather than spending more attacker calls.
+
+When the campaign ends, or stops with an error, the example writes
+(`midojo.pyrit.write_receipts`, from the target's receipts):
+
+- `summary.json`: the run summary (`attack_summary`): the objective, PyRIT's
+  `outcome`, `outcome_reason`, `conversation_id`, `attack_result_id`,
+  `executed_turns`, `execution_time_ms` and `last_response_id`, or the
+  `error` that stopped the campaign; the `memory_db` path; and the counts
+  of `sends`, `replays` and `snapshots` written;
+- `receipts.json`: one record per target send, in send order: its
+  `response_id` (the PyRIT response piece the scorer resolved), `broke`,
+  and per evaluation (the send's, and its `replay` record when the scorer
+  confirmed a success) its `status`, `evaluation_id`, `run_id`,
+  `snapshot_id`, `reason`, `security`, `utility`, `utility_reason`,
+  `security_reason`, `grade_validity`, the whole `grade`, and its
+  `snapshot_file` (or a `snapshot_error` for an evaluation never sealed);
+- `snapshots/<evaluation_id>.json`: each sealed snapshot, a failed
+  episode's interrupted seal included, as
+  `GET /runs/{run_id}/evaluations/{eval_id}/snapshot` returns it:
+  `midojo.control_plane.client.snapshot_from_response` rebuilds it with the
+  suite's environment type and checks its digest against its `snapshot_id`;
+- `pyrit.db`, PyRIT's memory, unless `--memory-db` put it elsewhere.
+
+A refused send has no evaluation, so no snapshot. `write_receipts`,
+`prepare_output_dir` and `attack_summary` are part of `midojo.pyrit`, for
+any campaign over a `MidojoEpisodeTarget`; `target.receipts()` lists the
+receipts they read.
 
 ## Other attack strategies
 

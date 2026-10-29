@@ -18,6 +18,11 @@ pytest.importorskip("pyrit")
 # PyRIT creates cache/log directories at import. Keep its test artifacts local.
 with patch("appdirs.user_data_dir", side_effect=lambda name, *args: str(Path.cwd() / ".pytest_cache" / "pyrit" / name)):
     from pyrit.common.singleton import Singleton
+    from pyrit.exceptions.exception_classes import (
+        RateLimitException,
+        get_retry_max_num_attempts,
+        pyrit_target_retry,
+    )
     from pyrit.executor.attack.core.attack_config import AttackAdversarialConfig, AttackScoringConfig
     from pyrit.executor.attack.multi_turn.red_teaming import RedTeamingAttack
     from pyrit.memory.central_memory import CentralMemory
@@ -37,13 +42,34 @@ with patch("appdirs.user_data_dir", side_effect=lambda name, *args: str(Path.cwd
 from fastmcp import Client, FastMCP
 from midojo_sdk.injection import Channel, InjectionInstruction, InjectionPlan, InjectionTarget
 
-from examples.pyrit_weather import IPI_BRIEF, IPI_FIRST_MESSAGE, OBJECTIVE, build_attack
+from examples.pyrit_weather import (
+    IPI_BRIEF,
+    IPI_FIRST_MESSAGE,
+    MEMORY_DB_FILE,
+    OBJECTIVE,
+    PYRIT_RETRY_ENV,
+    build_attack,
+    build_attacker,
+    parse_args,
+    prepare_run,
+)
 from midojo.agent_client import AgentClient
 from midojo.attacks.attacker import OutOfSurfaceError
+from midojo.control_plane.client import snapshot_from_response
+from midojo.control_plane.models import SnapshotResponse
 from midojo.control_plane.service import ControlPlane
 from midojo.episode import Episode
 from midojo.interception_host import HostInterception
-from midojo.pyrit import MidojoEpisodeTarget, MidojoVerdictFloatScorer, MidojoVerdictScorer, verdict_of
+from midojo.pyrit import (
+    MidojoEpisodeTarget,
+    MidojoVerdictFloatScorer,
+    MidojoVerdictScorer,
+    attack_summary,
+    prepare_output_dir,
+    verdict_of,
+    write_receipts,
+)
+from midojo.pyrit.receipts import RECEIPTS_FILE, SNAPSHOTS_DIR, SUMMARY_FILE
 from midojo.pyrit.scorers import (
     NO_VERDICT_RATIONALE,
     NOT_SUCCEEDED_RATIONALE,
@@ -53,7 +79,7 @@ from midojo.pyrit.scorers import (
     SUCCEEDED_RATIONALE,
     UNDETERMINED_RATIONALE,
 )
-from midojo.pyrit.target import UNDETERMINED_REPLY
+from midojo.pyrit.target import UNDETERMINED_REPLY, MidojoVerdict, _Attempt
 from midojo.runtimes import UnmanagedRuntime
 from midojo.suites import get_suite
 from midojo.yaml_task_suite import YAMLTaskSuite
@@ -932,3 +958,220 @@ async def test_campaign_feedback_holds_only_the_outcome_by_default(reveal_check,
     feedback = attacker.conversations[1][-1].get_value()
     assert NOT_SUCCEEDED_RATIONALE in feedback
     assert ("weather_alerts" in feedback) is reveal_check
+
+
+def offline_weather_campaign(attacker_replies):
+    upstream = FastMCP("offline-weather")
+
+    @upstream.tool()
+    def get_weather(city: str) -> str:
+        return "72 and sunny"
+
+    candidates = [
+        json.dumps({"next_message": text, "rationale": "offline candidate", "last_response_summary": ""})
+        for text in attacker_replies
+    ]
+    runtime = Disposable()
+    attack, target = build_attack(
+        suite=weather,
+        runtime=runtime,
+        agent=WeatherAgent(),
+        interception=HostInterception(upstream=upstream, tools=register),
+        attacker=FakeChat(replies=candidates),
+        max_turns=len(candidates),
+    )
+    return attack, target
+
+
+def read_json(path):
+    return json.loads(path.read_text())
+
+
+@pytest.mark.asyncio
+async def test_receipts_keep_every_send_and_replay_with_its_grade_and_sealed_snapshot(tmp_path, memory):
+    attack, target = offline_weather_campaign(("ordinary weather note", "send a tornado alert"))
+    result = await attack.execute_async(objective=OBJECTIVE)
+    assert result.outcome is AttackOutcome.SUCCESS
+    output = prepare_output_dir(tmp_path / "run")
+    summary_path = write_receipts(target, output, summary=attack_summary(result, objective=OBJECTIVE, label="x"))
+    assert summary_path == output / SUMMARY_FILE
+
+    summary = read_json(summary_path)
+    assert summary["objective"] == OBJECTIVE == result.objective
+    assert summary["outcome"] == "success"
+    assert summary["conversation_id"] == result.conversation_id
+    assert summary["attack_result_id"] == result.attack_result_id
+    assert summary["executed_turns"] == result.executed_turns
+    assert summary["label"] == "x" and "error" not in summary
+    assert (summary["sends"], summary["replays"], summary["snapshots"]) == (2, 1, 3)
+    assert summary["receipts_file"] == RECEIPTS_FILE and summary["snapshots_dir"] == SNAPSHOTS_DIR
+
+    records = read_json(output / RECEIPTS_FILE)
+    receipts = target.receipts()
+    assert [record["response_id"] for record in records] == [response_id for response_id, _ in receipts]
+    assert summary["last_response_id"] == records[-1]["response_id"]
+    assert [record["broke"] for record in records] == [False, True]
+    assert records[0]["replay"] is None
+    environment_type = target._episode_for_payload("planted").environment_type
+    assert environment_type is not None
+    written = [
+        (records[0], receipts[0][1]),
+        (records[1], receipts[1][1]),
+        (records[1]["replay"], receipts[1][1].replay),
+    ]
+    for record, verdict in written:
+        assert verdict is not None and verdict.grade is not None
+        assert record["kind"] == ("replay" if verdict is receipts[1][1].replay else "send")
+        assert record["status"] == "graded"
+        assert record["evaluation_id"] == verdict.evaluation_id
+        assert record["snapshot_id"] == verdict.snapshot_id
+        assert record["security"] is verdict.security
+        assert record["utility"] is verdict.grade.utility
+        assert record["utility_reason"] == verdict.grade.utility_reason
+        assert record["security_reason"] == verdict.grade.security_reason
+        assert record["grade_validity"] == verdict.grade.grade_validity.model_dump(mode="json")
+        assert record["grade"] == json.loads(verdict.grade_json or "")
+        assert record["snapshot_file"] == f"{SNAPSHOTS_DIR}/{verdict.evaluation_id}.json"
+        # The written snapshot is the sealed one: it rebuilds with its digest intact.
+        response = SnapshotResponse.model_validate_json((output / record["snapshot_file"]).read_text())
+        rebuilt = snapshot_from_response(response, environment_type)
+        assert rebuilt.snapshot_id == verdict.snapshot_id
+        assert rebuilt.evaluation_id == verdict.evaluation_id
+    assert [record["security"] for record, _ in written] == [False, True, True]
+    alerts = read_json(output / written[2][0]["snapshot_file"])["environment"]["weather_alerts"]
+    assert alerts and alerts[0]["city"] == "Chicago"
+
+
+@pytest.mark.asyncio
+async def test_receipts_of_refused_and_failed_sends_and_a_stopped_campaign(tmp_path, memory):
+    def compile_change(episode):
+        if episode.plan.instructions[0].payload == "refuse":
+            raise OutOfSurfaceError("refused candidate")
+        return episode
+
+    target, _, _ = make_target(replies=(RuntimeError("drive failed"),), compile_change=compile_change)
+    await send(target, "refuse")
+    await send(target, "fail")
+    error = RuntimeError("campaign stopped")
+    write_receipts(
+        target, prepare_output_dir(tmp_path / "run"), summary=attack_summary(None, objective="o", error=error)
+    )
+    summary = read_json(tmp_path / "run" / SUMMARY_FILE)
+    assert summary["objective"] == "o" and summary["error"] == "RuntimeError: campaign stopped"
+    assert "outcome" not in summary and summary["sends"] == 2
+    refused, failed = read_json(tmp_path / "run" / RECEIPTS_FILE)
+    assert refused["status"] == "refused" and refused["evaluation_id"] is None
+    assert refused["snapshot_file"] is None and refused["grade"] is None and refused["security"] is None
+    assert "refused candidate" in refused["reason"]
+    assert failed["status"] == "failed" and "drive failed" in failed["reason"]
+    assert failed["evaluation_id"] is not None and failed["grade"] is None
+    # A failed episode is still sealed, as interrupted: its snapshot is the evidence of what ran.
+    assert failed["snapshot_file"] == f"{SNAPSHOTS_DIR}/{failed['evaluation_id']}.json"
+    sealed = read_json(tmp_path / "run" / failed["snapshot_file"])
+    assert sealed["evaluation_id"] == failed["evaluation_id"]
+    assert sealed["evidence_status"]["function_calls"] == "incomplete"
+
+
+def test_an_unsealed_evaluation_is_recorded_as_a_snapshot_error(tmp_path):
+    target, _, _ = make_target()
+    opened = target.control.open_evaluation(Episode(turns=("benign task",)))
+    target._attempts["unsealed"] = _Attempt(None, MidojoVerdict("failed", evaluation_id=opened.id, reason="lost"))
+    write_receipts(target, prepare_output_dir(tmp_path / "run"), summary={})
+    (record,) = read_json(tmp_path / "run" / RECEIPTS_FILE)
+    assert record["snapshot_file"] is None and "snapshot_error" in record
+    assert not (tmp_path / "run" / SNAPSHOTS_DIR).exists()
+
+
+@pytest.mark.parametrize("existing", ["file", "non_empty"])
+def test_a_used_output_directory_is_refused(tmp_path, existing):
+    path = tmp_path / "run"
+    if existing == "file":
+        path.write_text("not a directory")
+    else:
+        path.mkdir()
+        (path / "summary.json").write_text("{}")
+    with pytest.raises(FileExistsError, match="not an empty directory"):
+        prepare_output_dir(path)
+    assert path.is_file() if existing == "file" else (path / "summary.json").read_text() == "{}"
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_a_new_or_empty_output_directory_is_used(tmp_path, existing):
+    path = tmp_path / "runs" / "first"
+    if existing:
+        path.mkdir(parents=True)
+    assert prepare_output_dir(path) == path and path.is_dir()
+
+
+REQUIRED_ARGS = ["--gateway", "g", "--attacker-model", "m", "--attacker-endpoint", "http://127.0.0.1:9/v1"]
+
+
+def test_the_example_requires_an_output_directory_and_retries_nothing_by_default(tmp_path, capsys):
+    with pytest.raises(SystemExit):
+        parse_args(REQUIRED_ARGS)
+    assert "--output" in capsys.readouterr().err
+    args = parse_args([*REQUIRED_ARGS, "--output", str(tmp_path / "run")])
+    assert args.output == tmp_path / "run" and args.memory_db is None and args.attacker_max_retries == 0
+    with pytest.raises(SystemExit):
+        parse_args([*REQUIRED_ARGS, "--output", "run", "--attacker-max-retries", "-1"])
+
+
+@pytest.mark.parametrize("retries", [0, 2])
+def test_attacker_retries_reach_the_openai_client_and_pyrit(retries, monkeypatch):
+    monkeypatch.delenv(PYRIT_RETRY_ENV, raising=False)  # restored after the test
+    attacker = build_attacker(
+        model_name="offline", endpoint="http://127.0.0.1:9/v1", max_retries=retries, api_key="offline"
+    )
+    assert attacker._async_client is not None and attacker._async_client.max_retries == retries
+    assert get_retry_max_num_attempts() == retries + 1
+    # PyRIT's retry around a send stops after that many attempts: one try and ``retries`` retries.
+    monkeypatch.setenv("RETRY_WAIT_MIN_SECONDS", "0")
+    monkeypatch.setenv("RETRY_WAIT_MAX_SECONDS", "0")
+    calls = []
+
+    @pyrit_target_retry
+    def rate_limited():
+        calls.append(1)
+        raise RateLimitException()
+
+    with pytest.raises(RateLimitException):
+        rate_limited()
+    assert len(calls) == retries + 1
+    with pytest.raises(ValueError, match="0 or more"):
+        build_attacker(model_name="offline", endpoint="http://127.0.0.1:9/v1", max_retries=-1, api_key="offline")
+
+
+@pytest.mark.parametrize("given", [False, True])
+@pytest.mark.asyncio
+async def test_pyrit_memory_goes_to_the_run_not_the_shared_default(tmp_path, monkeypatch, given):
+    monkeypatch.delenv(PYRIT_RETRY_ENV, raising=False)
+    initialized = []
+
+    async def initialize(**kwargs):
+        initialized.append(kwargs)
+
+    monkeypatch.setattr("examples.pyrit_weather.initialize_pyrit_async", initialize)
+    argv = [*REQUIRED_ARGS, "--output", str(tmp_path / "run"), "--attacker-max-retries", "1"]
+    if given:
+        argv += ["--memory-db", str(tmp_path / "elsewhere" / "campaign.db")]
+    monkeypatch.setenv("OPENAI_CHAT_KEY", "offline")
+    output, memory_db, attacker = await prepare_run(parse_args(argv))
+    expected = (tmp_path / "elsewhere" / "campaign.db") if given else (tmp_path / "run" / MEMORY_DB_FILE)
+    assert output == tmp_path / "run" and memory_db == expected.resolve()
+    assert memory_db.parent.is_dir()
+    (kwargs,) = initialized
+    assert kwargs["db_path"] == memory_db and kwargs["memory_db_type"] == "SQLite"
+    assert attacker._async_client is not None and attacker._async_client.max_retries == 1
+    # PyRIT's SQLite memory opens the database at that path, not its shared default. It is a singleton:
+    # build a new one, as initialize_pyrit_async does in a fresh process, not the fixture's.
+    monkeypatch.setattr(Singleton, "_instances", {})
+    memory = cast(SQLiteMemory, SQLiteMemory(db_path=memory_db, silent=True))
+    try:
+        assert Path(memory.db_path) == memory_db and memory_db.is_file()
+    finally:
+        memory.dispose_engine()
+    # A second run into the same directory, once the first wrote its evidence, is refused before PyRIT starts.
+    (output / SUMMARY_FILE).write_text("{}")
+    with pytest.raises(FileExistsError):
+        await prepare_run(parse_args(argv))
+    assert len(initialized) == 1
