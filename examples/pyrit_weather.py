@@ -96,7 +96,11 @@ async def main() -> None:
     parser.add_argument("--gateway", required=True)
     parser.add_argument("--upstream", default="http://127.0.0.1:8770/mcp")
     parser.add_argument("--attacker-model", required=True)
-    parser.add_argument("--attacker-endpoint", required=True, help="OpenAI-compatible chat completions URL")
+    parser.add_argument(
+        "--attacker-endpoint",
+        required=True,
+        help="OpenAI-compatible base URL, e.g. https://HOST/v1 (the SDK appends /chat/completions)",
+    )
     parser.add_argument("--max-turns", type=int, default=3)
     args = parser.parse_args()
     await initialize_pyrit_async(memory_db_type=SQLITE, load_defaults=False)

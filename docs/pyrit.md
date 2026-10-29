@@ -180,9 +180,14 @@ export OPENAI_CHAT_KEY=...  # attacker model credential
 uv run --frozen python -m examples.pyrit_weather \
   --gateway YOUR_GATEWAY \
   --attacker-model YOUR_ATTACKER_MODEL \
-  --attacker-endpoint https://YOUR_MODEL_HOST/v1/chat/completions \
+  --attacker-endpoint https://YOUR_MODEL_HOST/v1 \
   --max-turns 3
 ```
+
+`--attacker-endpoint` is the OpenAI-compatible base URL, ending in `/v1`:
+PyRIT 1.1.0's `OpenAIChatTarget` passes it to the `openai` SDK as
+`base_url`, which appends `/chat/completions` itself, so a URL that already
+ends in `/chat/completions` doesn't work.
 
 That command calls real models; it is not part of the tests. The example
 binds the host interceptor on port 8766, as the weather policy requires,
