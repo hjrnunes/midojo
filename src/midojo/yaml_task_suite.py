@@ -23,7 +23,7 @@ from midojo.control_plane.config import CONTROL_TOKEN_ENV
 from midojo.env_inference import infer_environment_type
 from midojo.episode import Episode, UnknownTaskError, freeze
 from midojo.probes import PROBE_PLACEHOLDER_RE, substitute_probes, substitute_probes_deep
-from midojo.runtimes import AgentRuntime, build_runtime
+from midojo.runtimes import AgentRuntime, RuntimeRegistry, build_runtime
 from midojo.suite_definition import OpenShellRuntimeDefinition, ProbeDefinition, SuiteDefinition
 from midojo.types import Environment, FunctionCallRecord, SuiteName
 from midojo.verifier import Check, parse_check
@@ -137,7 +137,9 @@ class YAMLTaskSuite:
 
     A suite is a catalogue: :meth:`episode` compiles one of its user task x
     injection task pairs into an :class:`~midojo.episode.Episode`. Parsing it
-    builds no runtime; :meth:`new_runtime` builds a fresh one each time.
+    builds no runtime and imports no runtime provider: the suite records the
+    runtime definition its ``agent_runtime`` asks for, and :meth:`new_runtime`
+    builds a fresh runtime from it each time.
     """
 
     def __init__(self, name: SuiteName, suite_yaml_path: Path) -> None:
@@ -165,9 +167,13 @@ class YAMLTaskSuite:
         """The suite.yaml this suite was loaded from."""
         return self._suite_yaml_path
 
-    def new_runtime(self) -> AgentRuntime:
-        """A fresh runtime for the suite's ``agent_runtime``: it shares no state with any other."""
-        return build_runtime(self.name, self.definition.agent_runtime)
+    def new_runtime(self, *, registry: RuntimeRegistry | None = None) -> AgentRuntime:
+        """A fresh runtime for the suite's ``agent_runtime``: it shares no state with any other.
+
+        It is built by ``registry`` (the default runtime registry when None);
+        see :func:`midojo.runtimes.build_runtime`.
+        """
+        return build_runtime(self.name, self.definition.agent_runtime, registry=registry)
 
     def episode(
         self,

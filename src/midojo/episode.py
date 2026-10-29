@@ -36,7 +36,7 @@ from midojo.delivery import exposure
 from midojo.env_inference import infer_environment_type
 from midojo.observations import FUNCTION_CALLS, EvidenceStatus, evidence_status
 from midojo.observations.openshell import OBSERVATIONS_SOURCE, OpenShellObservations
-from midojo.runtimes import AgentRuntime, build_runtime
+from midojo.runtimes import AgentRuntime, RuntimeRegistry, build_runtime
 from midojo.suite_definition import AgentRuntimeDefinition
 from midojo.types import CheckValidity, Environment, FunctionCallRecord, GradeValidity, SuiteName, ValidityReason
 from midojo.verifier import Check, VerificationContext, VerificationResult, parse_check
@@ -216,9 +216,13 @@ class Episode:
         """A fresh copy of the runtime definition the episode needs."""
         return _RUNTIME_DEFINITION.validate_python(thaw(self.runtime))
 
-    def new_runtime(self) -> AgentRuntime:
-        """A fresh runtime for one run of this episode: it shares no state with any other."""
-        return build_runtime(self.suite_name or DEFAULT_EPISODE_NAME, self.runtime_definition())
+    def new_runtime(self, *, registry: RuntimeRegistry | None = None) -> AgentRuntime:
+        """A fresh runtime for one run of this episode: it shares no state with any other.
+
+        It is built by ``registry`` (the default runtime registry when None);
+        see :func:`midojo.runtimes.build_runtime`.
+        """
+        return build_runtime(self.suite_name or DEFAULT_EPISODE_NAME, self.runtime_definition(), registry=registry)
 
     def provision_environment(self) -> Environment:
         """A fresh environment from the initial state; the episode keeps none of it."""
