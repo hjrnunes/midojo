@@ -316,9 +316,10 @@ def _check_endpoint_allowed(
     ``policy_spec=None`` (or ``{}``, see :func:`_resolve_policy`) means no midojo
     policy: the image's built-in policy governs egress, which can't be
     inspected, so it warns even when ``required``. When every rule that allows
-    the endpoint lists ``binaries``, it logs them at INFO, so you can check the
-    agent's binary is one of them. See :func:`_policy_rules_allowing` for what
-    is compared.
+    the endpoint lists ``binaries``, it warns (never raises) that the calling
+    binary isn't verified, naming those rules and binaries, so you can check
+    the agent's binary is one of them. See :func:`_policy_rules_allowing` for
+    what is compared.
     """
     log = logging.getLogger(__name__)
     if not policy_spec:
@@ -342,9 +343,9 @@ def _check_endpoint_allowed(
         log.warning("%s", message)
         return
     if all(binaries for _, binaries in rules):
-        log.info(
-            "Sandbox network policy allows %s at %s:%d only for the binaries its rules %s list: %s. The agent's "
-            "calls must come from one of them.",
+        log.warning(
+            "Sandbox network policy allows %s at %s:%d, but its rules %s allow only the binaries %s, and which "
+            "binary makes the agent's calls isn't verified: make sure it is one of them.",
             target,
             host,
             port,
@@ -357,13 +358,17 @@ def _policy_rules_allowing(policy_spec: dict, host: str, port: int) -> list[tupl
     """The policy's network rules with an endpoint at ``host:port``, each as its name and the binaries it lists.
 
     It reads the policy's ``networkPolicies`` (or ``network_policies``, which
-    proto JSON accepts too) as OpenShell parses them: an endpoint's ``host`` is
-    compared case-insensitively, one trailing dot ignored on both sides, and
-    its port is ``port`` or any of ``ports``, each an int or a decimal string
-    (``"8766"``, as an ``${env.VAR}`` expansion gives it). Hosts are compared
-    exactly otherwise, as nothing in OpenShell's policy schema says a host can
-    be a pattern. An entry of the wrong shape (an endpoint that isn't a dict, a
-    port that is a bool or a non-numeric string, ...) never matches.
+    proto JSON accepts too; given both, the last in the dict wins, as protobuf's
+    ``ParseDict`` does, and a null one leaves no rules) as OpenShell parses
+    them: an endpoint's ``host`` is compared case-insensitively, one trailing
+    dot ignored on both sides, and its port is ``port`` or any of ``ports``,
+    each an int or a string of ASCII digits (``"8766"``, as an ``${env.VAR}``
+    expansion gives it) from 1 to 65535. Hosts are compared exactly otherwise,
+    as nothing in OpenShell's policy schema says a host can be a pattern. An
+    entry of the wrong shape (an endpoint that isn't a dict; a ``port`` or any
+    of ``ports`` that is a bool, a non-numeric string or out of range; a
+    ``ports`` that isn't a list) never matches and never raises; its siblings
+    are still read.
 
     Out of scope: L7 rules (an endpoint's HTTP method and path ``rules``) and its
     ``protocol``, ``tls`` and ``enforcement`` aren't evaluated, so an endpoint
@@ -372,7 +377,10 @@ def _policy_rules_allowing(policy_spec: dict, host: str, port: int) -> list[tupl
     which programs may use it, which can't be known before the agent runs, so
     they're returned for the caller to report, not checked.
     """
-    network_policies = policy_spec.get("networkPolicies", policy_spec.get("network_policies"))
+    network_policies = None
+    for key, value in policy_spec.items():
+        if key in ("networkPolicies", "network_policies"):
+            network_policies = value
     if not isinstance(network_policies, dict):
         return []
     wanted = _normal_host(host)
@@ -385,7 +393,7 @@ def _policy_rules_allowing(policy_spec: dict, host: str, port: int) -> list[tupl
             isinstance(endpoint, dict)
             and isinstance(endpoint.get("host"), str)
             and _normal_host(endpoint["host"]) == wanted
-            and port in _endpoint_ports(endpoint)
+            and port in (_endpoint_ports(endpoint) or ())
             for endpoint in endpoints
         ):
             binaries = rule.get("binaries")
@@ -403,21 +411,31 @@ def _normal_host(host: str) -> str:
     return host[:-1] if host.endswith(".") else host
 
 
-def _endpoint_ports(endpoint: dict) -> set[int]:
-    """The ports an endpoint names in ``port`` and ``ports``, skipping any value that isn't a port."""
-    ports = endpoint.get("ports")
-    values = [endpoint.get("port"), *(ports if isinstance(ports, list) else [])]
-    return {port for port in map(_port_number, values) if port is not None}
+def _endpoint_ports(endpoint: dict) -> set[int] | None:
+    """The ports an endpoint names in ``port`` and ``ports``, or None when any value given isn't a port.
+
+    A null ``port`` or ``ports`` is unset, as in proto JSON.
+    """
+    port, ports = endpoint.get("port"), endpoint.get("ports")
+    if ports is not None and not isinstance(ports, list):
+        return None
+    values = ([] if port is None else [port]) + (ports or [])
+    numbers = {_port_number(value) for value in values}
+    return None if None in numbers else {number for number in numbers if number is not None}
 
 
 def _port_number(value: Any) -> int | None:
-    # A bool is an int in Python, not a port; a string must be all ASCII digits ("8766", not " 8766" or "+8766").
+    # A bool is an int in Python, not a port; a string must be all ASCII digits ("8766", not " 8766" or "+8766"),
+    # and short enough to convert (int() refuses a string of thousands of digits).
     if isinstance(value, bool):
         return None
-    if isinstance(value, int):
-        return value
     if isinstance(value, str) and value.isascii() and value.isdigit():
-        return int(value)
+        try:
+            value = int(value)
+        except ValueError:
+            return None
+    if isinstance(value, int) and 1 <= value <= 65535:
+        return value
     return None
 
 

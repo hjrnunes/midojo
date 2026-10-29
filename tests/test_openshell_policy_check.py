@@ -11,11 +11,13 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from google.protobuf.json_format import MessageToDict
+from openshell._proto import openshell_pb2
 from pydantic import ValidationError
 
 import midojo.runtimes.openshell as openshell_runtime
 from midojo.runtimes import build_runtime
-from midojo.runtimes.openshell import OpenShellRuntime, PolicyCheckError, _policy_rules_allowing
+from midojo.runtimes.openshell import OpenShellRuntime, PolicyCheckError, _policy_rules_allowing, _resolve_policy
 from midojo.suite_definition import OpenShellRuntimeDefinition
 
 HOST = "host.openshell.internal"
@@ -89,20 +91,90 @@ def test_another_host_or_port_does_not_match(endpoint):
         _policy({"host": HOST, "port": None}),
         _policy({"host": HOST, "port": [8766]}),
         _policy({"host": HOST, "ports": "8766"}),
+        _policy({"host": HOST, "port": "9" * 5000}),
+        _policy({"host": HOST, "ports": ["9" * 5000]}),
+        _policy({"host": HOST, "port": 0}),
+        _policy({"host": HOST, "port": -8766}),
+        _policy({"host": HOST, "port": 65536}),
+        _policy({"host": HOST, "port": "70000"}),
+        _policy({"host": HOST, "port": 8766 + 2**32}),
     ],
 )
 def test_a_malformed_entry_never_raises_and_never_matches(policy):
     assert _policy_rules_allowing(policy, HOST, 8766) == []
 
 
-def test_a_malformed_entry_does_not_hide_a_well_formed_one_beside_it():
-    policy = _policy("garbage", {"host": HOST, "port": "x"}, {"host": HOST, "port": 8766})
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        {"host": HOST, "port": 8766, "ports": "garbage"},
+        {"host": HOST, "port": 8766, "ports": 8766},
+        {"host": HOST, "port": 8766, "ports": [8765, "x"]},
+        {"host": HOST, "port": 8766, "ports": [True]},
+        {"host": HOST, "port": "x", "ports": [8766]},
+        {"host": HOST, "port": 70000, "ports": [8766]},
+        {"host": HOST, "port": "9" * 5000, "ports": [8766]},
+    ],
+)
+def test_an_endpoint_with_any_malformed_port_field_never_matches_even_beside_a_valid_one(endpoint):
+    assert _policy_rules_allowing(_policy(endpoint), HOST, 8766) == []
+
+
+def test_a_null_port_field_is_unset_as_in_proto_json():
+    assert _policy_rules_allowing(_policy({"host": HOST, "port": None, "ports": [8766]}), HOST, 8766)
+    assert _policy_rules_allowing(_policy({"host": HOST, "port": 8766, "ports": None}), HOST, 8766)
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        "garbage",
+        {"host": HOST, "port": "x"},
+        {"host": HOST, "port": "9" * 5000},
+        {"host": HOST, "ports": ["9" * 5000]},
+        {"host": HOST, "port": 8766, "ports": "garbage"},
+    ],
+)
+def test_a_malformed_entry_does_not_hide_a_well_formed_one_beside_it(malformed):
+    policy = _policy(malformed, {"host": HOST, "port": 8766})
     assert _policy_rules_allowing(policy, HOST, 8766) == [("tools", [])]
 
 
 def test_the_proto_field_name_network_policies_is_read_too():
     policy = {"network_policies": {"tools": {"endpoints": [{"host": HOST, "port": 8766}]}}}
     assert _policy_rules_allowing(policy, HOST, 8766) == [("tools", [])]
+
+
+_CAMEL = {"camel": {"endpoints": [{"host": HOST, "port": 8766}]}}
+_SNAKE = {"snake": {"endpoints": [{"host": HOST, "port": 8766}]}}
+
+
+@pytest.mark.parametrize(
+    "policy,rules",
+    [
+        # protobuf's ParseDict, which fills the sandbox's policy, keeps the last of the two names it is given.
+        ({"networkPolicies": _CAMEL, "network_policies": _SNAKE}, [("snake", [])]),
+        ({"network_policies": _SNAKE, "networkPolicies": _CAMEL}, [("camel", [])]),
+        ({"networkPolicies": _CAMEL, "network_policies": None}, []),
+        ({"network_policies": None, "networkPolicies": _CAMEL}, [("camel", [])]),
+    ],
+)
+def test_given_both_names_for_the_network_policies_the_last_wins(policy, rules):
+    assert _policy_rules_allowing(policy, HOST, 8766) == rules
+
+
+@pytest.mark.parametrize(
+    "policy,camel",
+    [
+        ({"networkPolicies": _CAMEL, "network_policies": _SNAKE}, False),
+        ({"network_policies": _SNAKE, "networkPolicies": _CAMEL}, True),
+    ],
+)
+def test_the_last_name_wins_in_the_policy_the_sandbox_gets_too(policy, camel):
+    # The check follows what _resolve_policy (protobuf's ParseDict) does with the installed proto.
+    spec = openshell_pb2.SandboxSpec()
+    _resolve_policy(policy, spec)
+    assert set(MessageToDict(spec.policy)["networkPolicies"]) == ({"camel"} if camel else {"snake"})
 
 
 def test_each_matching_rule_comes_with_the_binaries_it_lists():
@@ -162,12 +234,22 @@ def test_the_binaries_a_matching_rule_is_restricted_to_are_logged(monkeypatch, c
     policy = _policy({"host": HOST, "port": 8766}, binaries=["/usr/bin/pi", "/usr/bin/node"])
     runtime = OpenShellRuntime("shell_suite", image="pi", policy=policy)
     runtime.configure(cluster="test", interceptor_url=INTERCEPTOR_URL)
-    with caplog.at_level(logging.INFO, logger=openshell_runtime.__name__):
+    with caplog.at_level(logging.WARNING, logger=openshell_runtime.__name__):
         _start(monkeypatch, runtime)
-    assert _messages(caplog, "WARNING") == []
-    [info] = [m for m in _messages(caplog, "INFO") if "binaries" in m]
-    assert f"host-side interceptor at {HOST}:8766" in info
-    assert "tools" in info and "/usr/bin/node, /usr/bin/pi" in info
+    [warning] = _messages(caplog, "WARNING")
+    assert f"allows the host-side interceptor at {HOST}:8766" in warning
+    assert "tools" in warning and "/usr/bin/node, /usr/bin/pi" in warning and "isn't verified" in warning
+
+
+def test_a_rule_restricted_to_binaries_only_warns_even_with_require_policy_allows(monkeypatch, caplog):
+    policy = _policy({"host": HOST, "port": 8766}, binaries=["/usr/bin/pi"])
+    runtime = OpenShellRuntime("shell_suite", image="pi", policy=policy, require_policy_allows=True)
+    runtime.configure(cluster="test", interceptor_url=INTERCEPTOR_URL)
+    with caplog.at_level(logging.WARNING, logger=openshell_runtime.__name__):
+        connect = _start(monkeypatch, runtime)
+    connect.assert_called_once()
+    [warning] = _messages(caplog, "WARNING")
+    assert "/usr/bin/pi" in warning
 
 
 def test_no_binaries_are_reported_when_a_matching_rule_lists_none(monkeypatch, caplog):
@@ -181,7 +263,7 @@ def test_no_binaries_are_reported_when_a_matching_rule_lists_none(monkeypatch, c
     runtime.configure(cluster="test", interceptor_url=INTERCEPTOR_URL)
     with caplog.at_level(logging.INFO, logger=openshell_runtime.__name__):
         _start(monkeypatch, runtime)
-    assert [m for m in _messages(caplog, "INFO") if "binaries" in m] == []
+    assert _messages(caplog, "WARNING") == []
 
 
 @pytest.mark.parametrize(
