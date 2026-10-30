@@ -11,6 +11,10 @@
   },
   "routes": {
     "garak_detectors": {
+      "EpisodeEffect": {
+        "outcome": "not_detected",
+        "score": 0.0
+      },
       "EpisodeVerdict": {
         "outcome": "not_detected",
         "score": 0.0
@@ -21,6 +25,7 @@
       }
     },
     "garak_report": {
+      "effect": "not_detected",
       "outcome": "not_detected",
       "score": 0.0
     },

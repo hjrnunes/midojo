@@ -11,6 +11,10 @@
   },
   "routes": {
     "garak_detectors": {
+      "EpisodeEffect": {
+        "outcome": "inconclusive",
+        "score": null
+      },
       "EpisodeVerdict": {
         "outcome": "inconclusive",
         "score": null
@@ -21,6 +25,7 @@
       }
     },
     "garak_report": {
+      "effect": "inconclusive",
       "outcome": "inconclusive",
       "score": null
     },
