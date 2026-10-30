@@ -11,7 +11,9 @@ Each case is a sealed run: ``document.json`` (MiDojo's document), ``snapshot.jso
 of it) and ``expected.json`` (the case's premise and the outcome each route owes). Nothing is
 edited by hand: ``generate.py`` re-seals every case from ``recording.json``, and
 ``MANIFEST.json`` pins every file's sha256. An edited snapshot no longer digests to its ID, so
-this suite fails on the edit and on the manifest.
+this suite fails on the edit and on the manifest. One test re-runs the recipe into a temporary
+directory and compares what it wrote with the committed fixtures, so a fixture the recipe no
+longer produces fails here too.
 
 The cases are the four ways a run ends undecided, and the control:
 
@@ -200,6 +202,59 @@ def test_every_case_names_every_route(case):
     assert expected["claim_level"] in ("command_attempt", "reply")
     assert expected["delivery"] in ("single", "sequential")
     assert expected["sealed"] in ("final", "interrupted")
+
+
+# The values MiDojo draws from the clock and its ID sources, and the digests over them.
+VOLATILE = frozenset(
+    {"sealed_at", "started_at", "ended_at", "timestamp", "evaluation_id", "run_id", "call_id", "snapshot_id"}
+)
+SETTLED = "<volatile>"
+
+
+def settled(value: Any) -> Any:
+    """``value`` with its volatile values replaced: what the recipe decides, not the run."""
+
+    if isinstance(value, dict):
+        return {key: SETTLED if key in VOLATILE else settled(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [settled(item) for item in value]
+    return value
+
+
+def _generate() -> ModuleType:
+    """The recipe, loaded from its fixture path: it ships with the vectors, not as a package."""
+
+    path = FIXTURES / "generate.py"
+    module = ModuleType("generate_inconclusive_vectors")
+    module.__file__ = str(path)
+    exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), module.__dict__)
+    return module
+
+
+def test_the_recipe_reproduces_every_case_it_committed(tmp_path):
+    """A re-run of ``generate.py`` writes the committed fixtures again, file for file.
+
+    MiDojo stamps every record with the clock and names each evaluation and call afresh, so
+    the comparison settles those values, and the snapshot IDs and manifest digests that follow
+    from them, before it reads the documents. The recipe pins them, so the bytes match as
+    well, and the manifest lands in the directory the run was given.
+    """
+
+    generate = _generate()
+    recording = json.loads((FIXTURES / "recording.json").read_text(encoding="utf-8"))
+    generate.generate(recording, tmp_path)
+
+    for name in [*MANIFEST["copies"], "MANIFEST.json"]:
+        written, committed = tmp_path / name, FIXTURES / name
+        assert written.is_file(), f"{name}: the run wrote no file"
+        assert written.read_bytes() == committed.read_bytes(), f"{name}: the run wrote other bytes"
+        if name != "MANIFEST.json":
+            case, file_name = name.split("/", 1)
+            again = json.loads(written.read_text(encoding="utf-8"))
+            assert settled(again) == settled(read(case, file_name)), f"{name}: the run decided otherwise"
+    for case in CASES:
+        generated = json.loads((tmp_path / case / "snapshot.json").read_text(encoding="utf-8"))
+        verified(generated)
 
 
 def _sync() -> ModuleType:

@@ -1,8 +1,8 @@
 {
   "seed": {
-    "path": "/Users/hjrnunes/workspace/asago/asago-notes/build/wp-evidence/asago-cm.58/runs/delivery2-scn051-execute/stages/execute/output/midojo/SCN-051/generation_capture/bundle/episode/episode.json",
+    "path": "seed/scn051-episode.json",
     "sha256": "2ed42034d7332094ca1548947da6cc0139181596f9c3c187e9961c5448969e49",
-    "provenance": "asago-cm.58, runs/delivery2-scn051-execute, a MiDojo episode sealed in front of the mini-agents klarna target"
+    "description": "A compiled SCN-051 episode: the user asks for an order's details, and the policy allows the order lookup."
   },
   "upstream": {
     "name": "klarna",

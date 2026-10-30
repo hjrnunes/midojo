@@ -13,9 +13,9 @@ Garak's ``ipi_episode`` probe and detectors read a copy from their own suites, a
 reads MiDojo's tree at run time.
 
 ``--check`` verifies the owner's tree against its own manifest and each copy it is given
-against the same manifest, writes nothing, and exits 1 on drift. ``--write`` replaces a copy
-with the pinned files and then verifies it; it never edits the owner. Without a checkout
-argument the script reads no directory outside MiDojo.
+against the same manifest, the manifest's own bytes included, writes nothing, and exits 1 on
+drift. ``--write`` replaces a copy with the pinned files and then verifies it; it never edits
+the owner. Without a checkout argument the script reads no directory outside MiDojo.
 
 The script needs only the standard library. Run it from any interpreter.
 """
@@ -132,7 +132,8 @@ def copy_problems(name: str, checkout: Path, *, root: Path = ROOT) -> list[str]:
     reference = copy / REFERENCE
     if not reference.is_file():
         problems.append(f"the reference is missing: {REFERENCE} is not in the copy")
-    elif _read_manifest(reference) != document:
+    elif _sha256(reference) != _sha256(root / REFERENCE):
+        # Byte for byte, not document for document: a copy of the manifest is its bytes.
         problems.append(f"the reference {REFERENCE} differs from the owner's manifest")
     expected = {file: recorded[file] for file in _copied(document)}
     present = _files(copy)

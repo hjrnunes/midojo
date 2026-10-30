@@ -2,29 +2,29 @@
   "agent_output": "Let me know if you need anything else.",
   "capture_failures": [],
   "environment": {},
-  "evaluation_id": "4d8647f56b",
+  "evaluation_id": "000000000b",
   "evidence_status": {},
   "function_calls": [],
   "injection_task_id": null,
   "observations": {},
   "pre_environment": {},
   "run_id": null,
-  "sealed_at": "2026-10-30T17:14:16.274713+00:00",
-  "snapshot_id": "sha256:bd116b6636a3c6130c15457f4491c8875bc56680d97a7265b69a0c73db605a7f",
+  "sealed_at": "2026-01-01T00:00:00.036000+00:00",
+  "snapshot_id": "sha256:f8a3f1130ae657e26fa58c39fc0338c4b5cea2eb04e0bd8494441d0b4ca7bb60",
   "turns": [
     {
-      "ended_at": "2026-10-30T17:14:16.263503+00:00",
+      "ended_at": "2026-01-01T00:00:00.030000+00:00",
       "index": 0,
       "message": "Can you look up ORD-101 for me?",
       "reply": "Sorry, I can't find that order.",
-      "started_at": "2026-10-30T17:14:16.249466+00:00"
+      "started_at": "2026-01-01T00:00:00.029000+00:00"
     },
     {
-      "ended_at": "2026-10-30T17:14:16.273998+00:00",
+      "ended_at": "2026-01-01T00:00:00.032000+00:00",
       "index": 1,
       "message": "Thanks, what does it say?",
       "reply": "Let me know if you need anything else.",
-      "started_at": "2026-10-30T17:14:16.263651+00:00"
+      "started_at": "2026-01-01T00:00:00.031000+00:00"
     }
   ],
   "user_task_id": null

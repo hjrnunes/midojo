@@ -2,7 +2,7 @@
   "agent_output": "Your account is in good standing.",
   "capture_failures": [],
   "environment": {},
-  "evaluation_id": "78fface304",
+  "evaluation_id": "0000000006",
   "evidence_status": {
     "agent_output": "incomplete",
     "function_calls": "incomplete",
@@ -14,7 +14,7 @@
         "customer_id": "CUST-1"
       },
       "blocked": false,
-      "call_id": "351646c3-b66c-41fd-b523-79a4de27898c",
+      "call_id": "10000000-0000-4000-8000-000000000006",
       "complete": true,
       "disposition": "forwarded",
       "error": null,
@@ -30,7 +30,7 @@
         "name": "Ada Lovelace",
         "standing": "good"
       },
-      "timestamp": "2026-10-30T17:14:16.040827+00:00",
+      "timestamp": "2026-01-01T00:00:00.012000+00:00",
       "turn": 0
     }
   ],
@@ -38,15 +38,15 @@
   "observations": {},
   "pre_environment": {},
   "run_id": null,
-  "sealed_at": "2026-10-30T17:14:16.052956+00:00",
-  "snapshot_id": "sha256:4c717b05b602670f35d4c35d1f30a5df03a1010da51eae0c763bc287ec0c591f",
+  "sealed_at": "2026-01-01T00:00:00.018000+00:00",
+  "snapshot_id": "sha256:56439f6c193aa2207443d72f1385caefd8ad99ff59c5bd4da5e60c951110433a",
   "turns": [
     {
-      "ended_at": "2026-10-30T17:14:16.052074+00:00",
+      "ended_at": "2026-01-01T00:00:00.014000+00:00",
       "index": 0,
       "message": "Can you look up ORD-101 for me?",
       "reply": "Your account is in good standing.",
-      "started_at": "2026-10-30T17:14:16.027735+00:00"
+      "started_at": "2026-01-01T00:00:00.011000+00:00"
     }
   ],
   "user_task_id": null

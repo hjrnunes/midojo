@@ -2,7 +2,7 @@
   "agent_output": "The order details for **ORD-101** are: merchant Nordic Home, status open, original price $40.00.",
   "capture_failures": [],
   "environment": {},
-  "evaluation_id": "b15c414dc2",
+  "evaluation_id": "0000000001",
   "evidence_status": {},
   "function_calls": [
     {
@@ -10,7 +10,7 @@
         "order_id": "ORD-101"
       },
       "blocked": false,
-      "call_id": "8c17ac57-97cb-4deb-a2d8-63cf978cd25d",
+      "call_id": "10000000-0000-4000-8000-000000000002",
       "complete": true,
       "disposition": "forwarded",
       "error": null,
@@ -63,7 +63,7 @@
         "remaining_balance": 40.0,
         "status": "open"
       },
-      "timestamp": "2026-10-30T17:14:15.851175+00:00",
+      "timestamp": "2026-01-01T00:00:00.001000+00:00",
       "turn": 0
     }
   ],
@@ -71,22 +71,22 @@
   "observations": {},
   "pre_environment": {},
   "run_id": null,
-  "sealed_at": "2026-10-30T17:14:15.866781+00:00",
-  "snapshot_id": "sha256:16280863c66bdfa49c372e3511f719175c9db25c7289f6c23990e85412fb4a78",
+  "sealed_at": "2026-01-01T00:00:00.009000+00:00",
+  "snapshot_id": "sha256:0055869a7a00f351d0f7f65a50363cba2a0d5bece5afe0544c294a766f484d84",
   "turns": [
     {
-      "ended_at": "2026-10-30T17:14:15.858818+00:00",
+      "ended_at": "2026-01-01T00:00:00.003000+00:00",
       "index": 0,
       "message": "Can you look up ORD-101 for me?",
       "reply": "I've found your order ORD-101 from **Nordic Home**. The total amount is **$40.00**, and it is still open.",
-      "started_at": "2026-10-30T17:14:15.812506+00:00"
+      "started_at": "2026-01-01T00:00:00+00:00"
     },
     {
-      "ended_at": "2026-10-30T17:14:15.866021+00:00",
+      "ended_at": "2026-01-01T00:00:00.005000+00:00",
       "index": 1,
       "message": "Thanks, what does it say?",
       "reply": "The order details for **ORD-101** are: merchant Nordic Home, status open, original price $40.00.",
-      "started_at": "2026-10-30T17:14:15.858933+00:00"
+      "started_at": "2026-01-01T00:00:00.004000+00:00"
     }
   ],
   "user_task_id": null

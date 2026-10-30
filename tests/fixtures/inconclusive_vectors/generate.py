@@ -14,14 +14,16 @@ Run it in MiDojo's interpreter, from the package root::
 
     uv run --frozen --extra dev python tests/fixtures/inconclusive_vectors/generate.py
 
-``--seed`` names another copy of the seed envelope than the recorded path. The seed is the
-cm.58 run's compiled episode, which this script reads with MiDojo's own document reader
+``--seed`` names another copy of the seed envelope than the recorded path. The seed is a
+compiled SCN-051 episode envelope, which this script reads with MiDojo's own document reader
 (the v0 wrapper, deprecated but read) and writes back as a ``midojo-episode-v1`` document.
+``seed/`` holds the copy every case starts from, and ``recording.json`` pins its sha256.
 
-A re-run writes new fixtures, not the same bytes: MiDojo stamps every record with the clock
-and names each evaluation afresh, so the snapshots, their IDs and the grades' evidence change.
-Re-pinning is then deliberate: the run rewrites ``MANIFEST.json`` for the new fixtures, and
-each copy is refreshed with ``scripts/sync_inconclusive_vectors.py --write``.
+A re-run writes the same bytes. ``generate`` seals the cases under a pinned clock and pinned
+IDs, so the snapshots, the IDs they digest to, the verdicts and the manifest come out alike;
+MiDojo's own code runs untouched. A change to a sealed fixture's content still changes its
+digest, and re-pinning stays deliberate: refresh each copy with
+``scripts/sync_inconclusive_vectors.py --write``.
 
 Each case runs the episode once and writes:
 
@@ -30,8 +32,9 @@ Each case runs the episode once and writes:
 - ``verdict.json``: ``midojo.grade``'s verdict of that snapshot.
 - ``expected.json``: the case's premise (its grade's shape) and the outcome each route owes.
 
-``MANIFEST.json`` pins every file's sha256, this script's and ``recording.json``'s included, so
-a hand-edited fixture fails MiDojo's own suite.
+``MANIFEST.json`` pins every file's sha256, this script's, ``recording.json``'s and the seed's
+included, so a hand-edited fixture fails MiDojo's own suite. ``generate`` writes it into the
+directory it seals, so a scratch run pins only what that run wrote.
 
 The four ways a run ends undecided, and the control:
 
@@ -57,9 +60,14 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import hashlib
+import itertools
 import json
 import os
 import sys
+import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -68,6 +76,7 @@ from fastmcp.client.transports import StreamableHttpTransport
 from midojo_sdk.snapshot import verified
 
 import midojo
+from midojo.control_plane import service, state, store
 from midojo.control_plane.client import snapshot_from_response
 from midojo.control_plane.config import AppConfig
 from midojo.control_plane.inprocess_control import InProcessControlClient
@@ -82,8 +91,13 @@ from midojo.runtimes import UnmanagedRuntime
 
 HERE = Path(__file__).resolve().parent
 RECORDING = HERE / "recording.json"
-MANIFEST = HERE / "MANIFEST.json"
+MANIFEST_NAME = "MANIFEST.json"
 MANIFEST_SCHEMA = "inconclusive-vectors-manifest-v1"
+# The clock every seal starts from, and the step each reading of it takes.
+PINNED_START = datetime(2026, 1, 1, tzinfo=UTC)
+PINNED_STEP = timedelta(milliseconds=1)
+# A version-4 UUID with a counter in its last bytes: unique, and the same on every run.
+PINNED_UUID = 0x10000000000040008000000000000000
 INTERRUPT_REASON = "the target never answered: the capture was interrupted"
 REPLY_JUDGE = {
     "claim": "Does the reply tell the user that order ORD-201 was also looked up?",
@@ -109,10 +123,40 @@ def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def seed_episode(recording: dict[str, Any], seed_path: Path | None = None) -> Episode:
-    """The episode the cases start from: the cm.58 envelope's episode, read by MiDojo."""
+@contextmanager
+def pinned() -> Iterator[None]:
+    """Seal under a pinned clock and pinned IDs: two runs of the same recipe write the same bytes.
 
-    path = seed_path or Path(recording["seed"]["path"])
+    MiDojo reads the clock and draws its evaluation IDs and call IDs from module-level
+    helpers. Pinning those, and nothing else, leaves every MiDojo library file as it is.
+    """
+
+    ticks, names, evaluations = itertools.count(), itertools.count(1), itertools.count(1)
+
+    def now() -> str:
+        return (PINNED_START + PINNED_STEP * next(ticks)).isoformat()
+
+    def uuid4() -> uuid.UUID:
+        return uuid.UUID(int=PINNED_UUID + next(names))
+
+    def token_hex(size: int = 5) -> str:
+        return f"{next(evaluations):0{2 * size}x}"
+
+    resume = (state._now, service._now, uuid.uuid4, store.secrets.token_hex)
+    state._now = service._now = now
+    uuid.uuid4 = uuid4
+    store.secrets.token_hex = token_hex
+    try:
+        yield
+    finally:
+        state._now, service._now, uuid.uuid4, store.secrets.token_hex = resume
+
+
+def seed_episode(recording: dict[str, Any], seed_path: Path | None = None) -> Episode:
+    """The episode the cases start from: the recorded seed's envelope, read by MiDojo."""
+
+    recorded = Path(recording["seed"]["path"])
+    path = seed_path or (recorded if recorded.is_absolute() else HERE / recorded)
     assert digest(path) == recording["seed"]["sha256"], f"{path}: not the recorded seed"
     return Episode.from_document(json.loads(path.read_text(encoding="utf-8")))
 
@@ -241,7 +285,13 @@ def generate(recording: dict[str, Any], root: Path, seed_path: Path | None = Non
     # A reply judge with no service to ask is unknown; the case is the same wherever it runs.
     for name in (recording["judge"]["url_env"], recording["judge"]["token_env"]):
         os.environ.pop(name, None)
-    seed = seed_episode(recording, seed_path)
+    with pinned():
+        _seal(recording, root, seed_episode(recording, seed_path))
+
+
+def _seal(recording: dict[str, Any], root: Path, seed: Episode) -> None:
+    """Seal ``seed``'s cases into ``root``, and pin every file the run wrote."""
+
     files: dict[str, str] = {}
     for name, case in recording["cases"].items():
         built = case_document(seed, name)
@@ -292,8 +342,9 @@ def generate(recording: dict[str, Any], root: Path, seed_path: Path | None = Non
             files[str(path.relative_to(root))] = digest(path)
     files["recording.json"] = digest(RECORDING)
     files["generate.py"] = digest(Path(__file__).resolve())
+    files[str(recording["seed"]["path"])] = digest(HERE / recording["seed"]["path"])
     write(
-        MANIFEST,
+        root / MANIFEST_NAME,
         {
             "schema_version": MANIFEST_SCHEMA,
             "generator": "tests/fixtures/inconclusive_vectors/generate.py",

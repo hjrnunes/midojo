@@ -1,5 +1,5 @@
 {
-  "evaluation_id": "b15c414dc2",
+  "evaluation_id": "0000000001",
   "grade": {
     "attempted": null,
     "blocked": null,
@@ -79,5 +79,5 @@
     "utility": false,
     "utility_reason": null
   },
-  "snapshot_id": "sha256:16280863c66bdfa49c372e3511f719175c9db25c7289f6c23990e85412fb4a78"
+  "snapshot_id": "sha256:0055869a7a00f351d0f7f65a50363cba2a0d5bece5afe0544c294a766f484d84"
 }
