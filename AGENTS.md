@@ -106,6 +106,8 @@ for additional examples refer to [README.md](./README.md).
 
 **Add a vendored payload set** — drop a JSON file in `src/midojo/attacks/data/`. It's auto-loaded at import time (`src/midojo/attacks/registry.py`). Use MiDojo's `PayloadSet` shape.
 
+**Change the shared inconclusive vectors** — the five sealed runs every route grades live in `tests/fixtures/inconclusive_vectors/`, with `recording.json` naming the seed, the scripted upstream and each case's turns and expectation. Change `recording.json` and re-run `uv run --frozen --extra dev python tests/fixtures/inconclusive_vectors/generate.py`; never edit a sealed fixture, since a re-seal changes every digest. A re-run stamps new clock times and evaluation IDs, so it is a re-pin: the run rewrites `MANIFEST.json`, and `scripts/sync_inconclusive_vectors.py --write --consumer ../asago-artifact-generator --garak ../garak` refreshes the consumer's and Garak's byte copies. `--check` verifies the owner's tree and every copy given, and the consumer and Garak each check their copy's digests in their own suite.
+
 ## Conventions
 
 - Python code uses type annotations; pyright runs in `basic` mode
