@@ -3,6 +3,7 @@
 The light path must import neither the OpenShell runtime nor gRPC, protobuf
 or the OpenShell SDK: the verifiers, the observation models, suite reading,
 the episode, its context and result (:mod:`midojo.episode_context`), the
+synchronous handle over that context (:mod:`midojo.episode_handle`), the
 sealed snapshot (:mod:`midojo.control_plane.state`), grading
 (:mod:`midojo.control_plane.grading`), the evaluation address
 (:class:`~midojo.control_plane.service.ById`) and the in-process control
@@ -55,6 +56,8 @@ LIGHT_MODULES = (
     "midojo.episode",
     "midojo.episode_document",
     "midojo.episode_context",
+    # The synchronous handle over that context.
+    "midojo.episode_handle",
     "midojo.control_plane.state",
     "midojo.control_plane.grading",
     # The in-process control plane open_episode uses by default, which holds ById, and what it imports.
@@ -215,6 +218,7 @@ import socket
 import sys
 import threading
 
+from midojo import episode_handle
 from midojo.capabilities import MissingCapabilityError
 from midojo.control_plane.service import ControlPlane
 from midojo.episode import Episode
@@ -252,6 +256,9 @@ attempts = {
         episode,
         control=plane,
         interception=HostInterception(upstream="http://127.0.0.1:9/mcp", port=port),
+    ),
+    "episode_handle.open": lambda: episode_handle.open(
+        episode, interception=HostInterception(upstream="http://127.0.0.1:9/mcp", port=port)
     ),
 }
 for label, attempt in attempts.items():
@@ -294,11 +301,28 @@ asyncio.run(eight())
 print("ok")
 """
 
+# The same eight, one turn each, through the synchronous handle: each close frees the live-episode slot it took.
+EIGHT_UNMANAGED_HANDLES = """
+from midojo import episode_handle
+from midojo.episode import Episode
+from tests.fixtures.scripted_target.upstream import scripted_upstream
+
+
+for _ in range(8):
+    with episode_handle.open(
+        Episode(runtime={"type": "unmanaged"}, turns=["hi"]), upstream=scripted_upstream()
+    ) as handle:
+        handle.start_turn("hi")
+        handle.record_reply(0, "ok")
+        handle.seal()
+print("ok")
+"""
+
 
 def test_an_openshell_episode_without_its_package_is_a_named_gap_before_anything_binds():
-    result = _run(BLOCKER + RUNTIME_GAP_REFUSAL + EIGHT_UNMANAGED_EPISODES)
+    result = _run(BLOCKER + RUNTIME_GAP_REFUSAL + EIGHT_UNMANAGED_EPISODES + EIGHT_UNMANAGED_HANDLES)
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "ok"
+    assert result.stdout.strip() == "ok\nok"
 
 
 def test_the_gap_comes_before_anything_binds_even_with_fastapi_unimportable():

@@ -632,7 +632,7 @@ class MidojoMCP:
         self._outcomes.extend(outcomes)
         return outcomes
 
-    async def mirror_upstream(self) -> list[str]:
+    async def mirror_upstream(self, *, allowed: Collection[str] | None = None) -> list[str]:
         """Expose every upstream tool not already defined here, forwarded and recorded; return their names.
 
         Each mirrored tool is listed exactly as the upstream lists it: name,
@@ -640,17 +640,21 @@ class MidojoMCP:
         A call is forwarded with its arguments as sent, and the agent gets the
         upstream's result as it was sent: content blocks, structured content,
         _meta and error flag. A JSON-RPC error from the upstream reaches the
-        agent as the same JSON-RPC error. Raises when there's no upstream or it
-        can't be listed: a mirror never starts empty by accident.
+        agent as the same JSON-RPC error. ``allowed`` mirrors only the tools it
+        names, and a name the upstream doesn't have is not an error (the
+        policy may name a tool this upstream version dropped); None mirrors
+        every one. Raises when there's no upstream or it can't be listed: a
+        mirror never starts empty by accident.
         """
         if self._upstream is None:
             raise RuntimeError("Cannot mirror: no upstream is configured.")
         defined = {tool.name for tool in await self._fastmcp.list_tools()}
         definitions = await self._upstream.list_tools()
         self._validate_plan(tools={definition.name for definition in definitions if definition.name not in defined})
+        exposed = set(allowed) if allowed is not None else {definition.name for definition in definitions}
         mirrored = []
         for definition in definitions:
-            if definition.name in defined:
+            if definition.name in defined or definition.name not in exposed:
                 continue
             tool = _ForwardingTool(
                 name=definition.name,
@@ -665,6 +669,10 @@ class MidojoMCP:
             self._fastmcp.add_tool(tool)
             mirrored.append(definition.name)
         return mirrored
+
+    async def tool_names(self) -> list[str]:
+        """The tools this server lists, in name order: its own, then the mirrored ones."""
+        return sorted(tool.name for tool in await self._fastmcp.list_tools())
 
     async def _forward_call(self, name: str, arguments: dict[str, Any]) -> ToolResult:
         assert self._upstream is not None

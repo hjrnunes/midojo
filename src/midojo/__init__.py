@@ -39,7 +39,17 @@ _EXPORTS = {
 # access. Their own descendants it loaded are reachable from each child however it was imported: a child that doesn't
 # import them itself makes them lazy attributes of its own (``control_plane.config``, ``runtimes.openshell``).
 _SUBMODULES = frozenset(
-    {"control_plane", "observations", "probes", "runtimes", "suite_definition", "tool_endpoint", "types", "verifiers"}
+    {
+        "control_plane",
+        "episode_handle",
+        "observations",
+        "probes",
+        "runtimes",
+        "suite_definition",
+        "tool_endpoint",
+        "types",
+        "verifiers",
+    }
 )
 
 
