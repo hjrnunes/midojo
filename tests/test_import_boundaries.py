@@ -73,6 +73,8 @@ LIGHT_MODULES = (
     "midojo_sdk.snapshot",
     # The SDK's episode schema accessor and the plan codec it names: stdlib only.
     "midojo_sdk.episode_schema",
+    # The SDK's placement engine: decides a plan's placements, and the plan codec it names, stdlib only.
+    "midojo_sdk.placement",
     # midojo-run's module, home of run_task, a client of the episode context.
     "midojo.orchestrator",
 )

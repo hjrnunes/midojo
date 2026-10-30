@@ -57,13 +57,25 @@ Each outcome is also the instruction's delivery fact for the call: what MidojoMC
 
 A placement (`applied`, `partial`, `fallback`) also says what it placed and where, so a generated payload is identifiable from the sealed record without the plan: `payload_digest` is `sha256:<hex>` of the UTF-8 bytes of the instruction's payload before its transformation (`payload_digest(text)`), `placed_digest` the same of the transformed text it wrote (equal for `identity`), and `slot` the instruction's `InjectionSlot`, sent as `InjectionSlot.to_data()`: `{"id", "target", "mode"}`, the target in the plan codec's form (as `InjectionPlan.to_data()` gives an instruction's `target`) and `id` `sha256:<hex>` of that target's sorted-key compact JSON, one per place whatever the mode. `InjectionSlot.of(instruction)` gives the same data for an instruction of a fixed plan. Any other outcome leaves them out: `InjectionOutcome` refuses them there, and so does the control plane.
 
-Matching calls are numbered per evaluation under a lock after `start_call` returns and before forwarding. Concurrent calls therefore use interceptor-admission order, not arrival, recorded-start, or completion order: two recorder starts can be stored in one order and return in another. Blocked and denied calls are never admitted; an upstream exception or cancellation consumes the admitted occurrence and reports `no_result`. A cancelled call remains unfinished in the recorder.
+Matching calls are numbered per evaluation under a lock after `start_call` returns and before forwarding, by the default engine's first `decide`. Concurrent calls therefore use interceptor-admission order, not arrival, recorded-start, or completion order: two recorder starts can be stored in one order and return in another. Blocked and denied calls are never admitted; an upstream exception or cancellation consumes the admitted occurrence and reports `no_result`. A cancelled call remains unfinished in the recorder.
 
 When `recorder=` is injected, a non-empty plan also requires `evaluation_id=`. That binds the interceptor and all its counters to one evaluation; build a separate `MidojoMCP` for another evaluation. Without an injected recorder, the incoming evaluation session is the scope.
 
-There is no session-end hook that both identifies the scope and leaves outcomes available for inspection. A long-lived MidojoMCP serving many session-backed evaluations therefore retains each seen scope's counters and outcomes until process exit. Prefer one interceptor per evaluation where the deployment permits it.
+There is no session-end hook that both identifies the scope and leaves outcomes available for inspection. A long-lived MidojoMCP serving many session-backed evaluations therefore retains its engine's counters and outcomes for each seen scope until process exit. Prefer one interceptor per evaluation where the deployment permits it.
 
 Automated generator output should go through `instruction_from_generator_for_plan(output, episode.plan)`. It accepts only tools, structured-content field paths, and modes listed in that plan's `generator_permissions`.
+
+## Placement engines
+
+`midojo_sdk.placement` holds the plan logic: matching a call's arguments or result to an instruction, counting occurrences, transforming the payload, applying size limits and the mismatch policy, and building the placed result, the text mirror included. `MidojoMCP` forwards the call, applies the finished result and records; it keeps no plan state, and `block()`/`deny()` stay on the server. The module uses the standard library only, so you can call it without FastMCP.
+
+The seam is `PlacementEngine`:
+
+- `decide(call, result)` runs once before the upstream call, with `result` `None`, and once on the result it returned. It returns a `PlacementDecision`: `leave(...)` or `replace(result, outcomes)`.
+- `settle(decision, emitted)` runs once the result as returned is known and gives the call's outcomes.
+- `outcomes()` lists every outcome so far, which `mcp.injection_outcomes` reports.
+
+`PlanPlacementEngine(plan, evaluation_id=...)` is the default: `MidojoMCP(..., plan=plan)` builds one. Pass `engine=` to place with an engine of your own. A server takes a plan or an engine, not both, and one given an engine holds no plan (`mcp.injection_plan` is empty unless that engine has one). `place_field(result, path, text, mode=...)` returns a result with one structured-content field placed, for an engine that places on its own; `mcp.injection_engine` is the engine in use.
 
 ## Recorder and WorldState
 
