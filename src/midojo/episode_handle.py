@@ -386,6 +386,25 @@ def _close_open_handles() -> None:
         _abandon(resource)
 
 
+def _reset_after_fork() -> None:
+    """Start a forked child's live-episode count from zero: it owns none of the parent's episodes.
+
+    Threads don't survive a fork, so the parent's interceptors aren't serving
+    in the child and its handles are unusable there (:class:`HandleOwnerError`).
+    Counting them would make the child refuse episodes it has room for, so the
+    child gets a fresh lock, an empty count and an empty session set.
+    """
+    global _live, _live_lock
+    _live_lock = threading.Lock()
+    _live = 0
+    _live_tokens.clear()
+    _sessions.clear()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_after_fork)
+
+
 # --- the sandbox reaper: a driver killed mid-run leaves no sandbox ---
 
 
