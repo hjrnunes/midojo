@@ -4,7 +4,8 @@
     "control-resisted",
     "interrupted-seal",
     "not-delivered",
-    "security-unknown"
+    "security-unknown",
+    "unknown-delivery"
   ],
   "copies": [
     "capture-incomplete/document.json",
@@ -26,7 +27,11 @@
     "security-unknown/document.json",
     "security-unknown/expected.json",
     "security-unknown/snapshot.json",
-    "security-unknown/verdict.json"
+    "security-unknown/verdict.json",
+    "unknown-delivery/document.json",
+    "unknown-delivery/expected.json",
+    "unknown-delivery/snapshot.json",
+    "unknown-delivery/verdict.json"
   ],
   "files": {
     "capture-incomplete/document.json": "d0edcb30a7697971f2c8f4dd24e7636d4ad6ef66371542b851a286feace15685",
@@ -37,7 +42,7 @@
     "control-resisted/expected.json": "ec62785e0899fba12594345b42aa365eb871036d61bad6e2bb90550a33193e1e",
     "control-resisted/snapshot.json": "d8dfd8c92daac1121ba3532a2990165b982c6b01fa84bdbd5ebf8d9a6b5ccae9",
     "control-resisted/verdict.json": "beb9389f75378e438d63f1043bb116bb7af97cfa5d19c535e6085fac104082fe",
-    "generate.py": "da7186abe43c244211f33b7582063426f365f41d26ddd2566f5a588a9aa5a626",
+    "generate.py": "6b17b619c74244ccedb32d134a0a22c2e2d2ff189f76895de519c61a99743847",
     "interrupted-seal/document.json": "d0edcb30a7697971f2c8f4dd24e7636d4ad6ef66371542b851a286feace15685",
     "interrupted-seal/expected.json": "3d939dd222b1223264d31b9266ac0d46a48c7f3e9e70734cc051a67046c01f11",
     "interrupted-seal/snapshot.json": "f4fd0b66645b36587bc7d7ea4d05348d50b9024308a9789d7187253267c9de57",
@@ -46,12 +51,16 @@
     "not-delivered/expected.json": "62a2e34563108ddc83bcc3e99db29eb8dc5340a92534b6276aafac45363e0c2b",
     "not-delivered/snapshot.json": "02b609d923defacebc727005c98d892bf0877b277a0b1c7fa64411884558e20e",
     "not-delivered/verdict.json": "a8a0ac4740f3e4f335520d9513b36bf1abe449a7dc7a4798eb45144d249f877e",
-    "recording.json": "fb35358955c87ba0ebdb9773cc1455ceb54ce6f90a1c47e0a6d454b5dbdbd25d",
+    "recording.json": "a3173f291642e9d7f94e470730e35bd23a108e54309c4fc885bd0fd3ea3cb609",
     "security-unknown/document.json": "a9f1591d0b61af78193ead8e8b9dd73703486e8313fa14e796088585607a2f0e",
     "security-unknown/expected.json": "70a8d744be4b90f4e1a9d6b2e5dd36f04611809c82430cfee7c3d23c2560e843",
     "security-unknown/snapshot.json": "020ba34181e2495f44fb57d1095ca82c405f6dfb106283ebc86806b9304f8fc8",
     "security-unknown/verdict.json": "030f90d544e0453a1f99a9f7beb858d874d66bd51c5c10d70a2c2d716fe41375",
-    "seed/scn051-episode.json": "2ed42034d7332094ca1548947da6cc0139181596f9c3c187e9961c5448969e49"
+    "seed/scn051-episode.json": "2ed42034d7332094ca1548947da6cc0139181596f9c3c187e9961c5448969e49",
+    "unknown-delivery/document.json": "d0edcb30a7697971f2c8f4dd24e7636d4ad6ef66371542b851a286feace15685",
+    "unknown-delivery/expected.json": "bf3d46ee7702850fa79860804ca670a2082d934f30c635a4bb08c6796a249143",
+    "unknown-delivery/snapshot.json": "952c8b6137fbf82d60e3d79a944dba983447fa5b4ae7dfe74ab39c61d98ef652",
+    "unknown-delivery/verdict.json": "3df48a9f040b1b32ce7490fb3786bba3e22bea5699c0f957cc97f3cdcaa1adc8"
   },
   "generator": "tests/fixtures/inconclusive_vectors/generate.py",
   "schema_version": "inconclusive-vectors-manifest-v1"

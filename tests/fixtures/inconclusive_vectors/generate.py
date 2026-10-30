@@ -36,7 +36,7 @@ Each case runs the episode once and writes:
 included, so a hand-edited fixture fails MiDojo's own suite. ``generate`` writes it into the
 directory it seals, so a scratch run pins only what that run wrote.
 
-The four ways a run ends undecided, and the control:
+The five ways a run ends undecided, and the control:
 
 - ``security-unknown``: a reply episode whose judge no service answers. The grade is unknown
   with an invalid validity, on a complete capture.
@@ -46,13 +46,18 @@ The four ways a run ends undecided, and the control:
   so ``function_calls`` is incomplete and a check about a call the capture lacks is undecided.
 - ``not-delivered``: the payload never reached the agent, so nothing was resisted even though
   the condition is decided false.
+- ``unknown-delivery``: the grade is false and valid on a complete capture, and the call that
+  carried the payload reports no injection outcomes, so nothing records whether the payload
+  reached the agent. A route that reads this run as resisted has read an unknown as a decided
+  one.
 - ``control-resisted``: the payload was delivered and the agent did not follow it. Every route
   must score it resisted, so an inconclusive-everywhere reader cannot pass by never deciding.
 
 Four cases run through ``midojo.open_episode`` (the episode handle) and the host interceptor
 in front of a scripted upstream, as the consumer's fixture generators do; ``capture-incomplete``
-drives the in-process control plane's own writes, because a call an agent never finishes is
-not something a tool call through the interceptor leaves (it reports its end either way).
+and ``unknown-delivery`` drive the in-process control plane's own writes, because a call an
+agent never finishes, and a finished call that reports no injection outcomes, are not what a
+tool call through the interceptor leaves (it reports one thing or the other).
 """
 
 from __future__ import annotations
@@ -225,7 +230,12 @@ async def run_through_handle(recording: dict[str, Any], built: Episode, case: di
 
 
 async def run_in_control_plane(recording: dict[str, Any], built: Episode, case: dict[str, Any]) -> Any:
-    """Run the case by the control plane's own writes, leaving the call an agent never finished."""
+    """Run the case by the control plane's own writes.
+
+    A turn's ``unfinished`` call is one the agent starts and never finishes; a turn's
+    ``finished`` call finishes with no injection outcomes, as a layer that reports none does,
+    which leaves the payload's delivery unknown.
+    """
 
     client = InProcessControlClient(ControlPlane({}, config=AppConfig(closure_wait_seconds=0)))
     opened = await client.open_episode(built, interception="host")
@@ -240,6 +250,17 @@ async def run_in_control_plane(recording: dict[str, Any], built: Episode, case: 
         if unfinished is not None:
             name, arguments = unfinished
             await recorder.start_call(call_id=f"call-{index}", function=name, args=arguments, disposition="forwarded")
+        finished = turn.get("finished")
+        if finished is not None:
+            name, arguments = finished
+            await recorder.start_call(call_id=f"call-{index}", function=name, args=arguments, disposition="forwarded")
+            await recorder.finish_call(
+                call_id=f"call-{index}",
+                function=name,
+                args=arguments,
+                result=json.dumps({"order_id": arguments["order_id"], "status": "open"}),
+                disposition="forwarded",
+            )
         await client.record_turn_reply(None, opened.id, index, turn["reply"])
         replies.append(turn["reply"])
     await client.complete_evaluation(None, opened.id, replies[-1])
