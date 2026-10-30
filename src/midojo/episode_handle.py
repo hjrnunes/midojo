@@ -51,7 +51,6 @@ import threading
 import uuid
 import weakref
 from collections.abc import Callable, Iterator, Sequence
-from contextlib import AbstractContextManager
 from types import TracebackType
 from typing import Any, Literal
 
@@ -282,6 +281,7 @@ class _Resource:
         runtime: AgentRuntime,
         ends_run: bool,
         reaper: subprocess.Popen[bytes] | None,
+        run_steps: _RunSteps,
     ) -> None:
         self.episode = episode
         self.context = context
@@ -290,6 +290,7 @@ class _Resource:
         self.runtime = runtime
         self.ends_run = ends_run
         self.reaper = reaper
+        self.run_steps = run_steps
         self.lock = threading.RLock()
         self.owner_pid = os.getpid()
         self.evaluation_id = context.evaluation_id
@@ -342,6 +343,8 @@ class _Resource:
                 if failure is not None
                 else _ClosedByCaller(f"handle {self.evaluation_id} closed before its seal")
             )
+            # Only a run whose end succeeded has deleted its workspace, so only then does its reaper stop.
+            ended = False
             if self.loop.thread.is_alive():
                 try:
                     self.loop.call(self.context.__aexit__(type(marker), marker, marker.__traceback__))
@@ -351,9 +354,14 @@ class _Resource:
                 if self.ends_run:
                     try:
                         self.loop.call(_in_thread(self.runtime.end_run))
+                        ended = True
                     except BaseException:
                         logger.info("Couldn't end the run of evaluation %s", self.evaluation_id, exc_info=True)
-            self._stop_reaper()
+                else:
+                    # The context ended the run it started, during the release above.
+                    ended = not self.run_steps.end_run_failed
+            if ended:
+                self._stop_reaper()
             self.loop.stop()
             _release_slot(self.token)
 
@@ -437,7 +445,7 @@ def _reaper(runtime: AgentRuntime) -> subprocess.Popen[bytes] | None:
 
 
 def _stop_reaper(process: subprocess.Popen[bytes] | None) -> None:
-    """Stop a reaper before it acts: the runtime's own teardown, or a failed open, freed the workspace."""
+    """Stop a reaper once the run's own end deleted the workspace; one left running does that job later."""
     if process is None or process.poll() is not None:
         return
     try:
@@ -449,23 +457,31 @@ def _stop_reaper(process: subprocess.Popen[bytes] | None) -> None:
             process.kill()
 
 
-def _reaper_after_start_run(start: Callable[[], None]) -> Callable[[EpisodeStep], AbstractContextManager[object]]:
-    """The context's progress steps, plus a ``start`` as soon as its own ``start_run`` made the workspace.
+class _RunSteps:
+    """The context's progress steps: the reaper's start, and whether the run the context ends was ended.
 
     A step's context manager leaves once the step returned or raised, so the
     reaper watches a run the context started before ``setup`` creates its
-    sandbox: a driver killed during setup still leaves nothing behind.
+    sandbox (a driver killed during setup still leaves nothing behind), and the
+    handle learns when the context's own ``end_run`` failed: only a run that
+    ended stops its reaper, because ``end_run`` is what deletes the workspace.
     """
 
+    def __init__(self, start: Callable[[], None]) -> None:
+        self._start = start
+        self.end_run_failed = False
+
     @contextlib.contextmanager
-    def progress(step: EpisodeStep) -> Iterator[None]:
+    def progress(self, step: EpisodeStep) -> Iterator[None]:
         try:
             yield
+        except BaseException:
+            if step == "end_run":
+                self.end_run_failed = True
+            raise
         finally:
             if step == "start_run":
-                start()
-
-    return progress
+                self._start()
 
 
 # --- the handle ---
@@ -792,6 +808,8 @@ def open(
         if reaper is None and context is not None:
             reaper = _reaper(context.runtime)
 
+    run_steps = _RunSteps(start_reaper)
+
     try:
         context = EpisodeContext(
             episode,
@@ -801,7 +819,7 @@ def open(
             run_id=run_id,
             reset=reset,
             # A context that builds the runtime starts its run itself: watch it as soon as start_run returns.
-            progress=_reaper_after_start_run(start_reaper),
+            progress=run_steps.progress,
         )
         loop = _Loop()
         if runtime is not None and hasattr(runtime, "start_run") and not _run_is_open(runtime):
@@ -817,14 +835,21 @@ def open(
             start_reaper()
         loop.call(context.__aenter__())
     except BaseException:
+        # Only a run whose end succeeded has deleted its workspace, so only then does its reaper stop.
+        ended = False
         if loop is not None:
             if context is not None and started_run and runtime is not None and loop.thread.is_alive():
                 try:
                     loop.call(_in_thread(runtime.end_run))
+                    ended = True
                 except BaseException:
                     logger.info("Couldn't end a run whose evaluation never opened", exc_info=True)
+            elif not started_run:
+                # The context ended the run it started while its own enter failed.
+                ended = not run_steps.end_run_failed
             loop.stop()
-        _stop_reaper(reaper)
+        if ended:
+            _stop_reaper(reaper)
         _release_slot(token)
         raise
     assert loop is not None and context is not None
@@ -837,6 +862,7 @@ def open(
         runtime=built,
         ends_run=started_run,
         reaper=reaper,
+        run_steps=run_steps,
     )
     handle = EpisodeHandle(resource)
     _sessions.add(resource)

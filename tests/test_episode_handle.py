@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import logging
 import os
 import socket
 import subprocess
@@ -174,6 +175,19 @@ class ReapingRuntime(AgentRuntime):
 
     def end_run(self):
         self.steps.append("end_run")
+        if self.fail == "end_run":
+            raise RuntimeError("end_run failed")
+
+
+class StuckOpen(ReapingRuntime):
+    """A runtime whose setup fails and whose run can't be ended: the failed open leaves a workspace behind."""
+
+    def __init__(self) -> None:
+        super().__init__("midojo-episo-pi-stuck-open", fail="setup")
+
+    def end_run(self) -> None:
+        self.steps.append("end_run")
+        raise RuntimeError("end_run failed")
 
 
 class FakeReaper:
@@ -705,6 +719,47 @@ def test_a_failed_open_stops_the_reaper_it_started(monkeypatch):
     assert runtime.reapers_at_setup == 1
     [reaper] = started
     assert reaper.terminated is True
+
+
+def test_a_failed_end_run_leaves_the_reaper_to_clean_the_workspace(monkeypatch, caplog):
+    started = record_reapers(monkeypatch)
+    runtime = ReapingRuntime("midojo-episo-pi-stuck", fail="end_run")
+    runtime.watched = lambda: len(started)
+    with caplog.at_level(logging.INFO, logger=episode_handle.__name__):
+        with episode_handle.open(weather_episode(), runtime=runtime, upstream=scripted_upstream()) as handle:
+            pass
+    [reaper] = started
+    # The run's own end failed, so its workspace may still be there: the reaper must outlive the close.
+    assert reaper.terminated is False and reaper.killed is False
+    assert handle.closed is True
+    assert runtime.steps == ["start_run", "setup", "observe", "teardown", "end_run"]
+    assert any("Couldn't end the run" in record.getMessage() for record in caplog.records)
+
+
+def test_a_failed_end_run_of_a_run_the_context_started_leaves_the_reaper_running(monkeypatch):
+    started = record_reapers(monkeypatch)
+    runtime = ReapingRuntime("midojo-episo-pi-built-stuck", fail="end_run")
+    runtime.watched = lambda: len(started)
+    monkeypatch.setattr(Episode, "new_runtime", lambda self, **kwargs: runtime)
+    with episode_handle.open(weather_episode(), upstream=scripted_upstream()) as handle:
+        pass
+    [reaper] = started
+    # The context ended its own run and its end_run failed: the reaper stays to remove what it left.
+    assert reaper.terminated is False and reaper.killed is False
+    assert handle.closed is True
+    assert runtime.steps == ["start_run", "setup", "observe", "teardown", "end_run"]
+
+
+def test_a_failed_open_whose_end_run_fails_leaves_the_reaper_running(monkeypatch):
+    started = record_reapers(monkeypatch)
+    runtime = StuckOpen()
+    runtime.watched = lambda: len(started)
+    with pytest.raises(RuntimeError, match="setup failed"):
+        episode_handle.open(weather_episode(), runtime=runtime, upstream=scripted_upstream())
+    [reaper] = started
+    # The open failed and couldn't end the run, so the workspace the reaper watches may still exist.
+    assert reaper.terminated is False and reaper.killed is False
+    assert runtime.steps == ["start_run", "setup", "teardown", "end_run"]
 
 
 def test_a_run_the_caller_started_is_neither_reaped_nor_ended(monkeypatch):
