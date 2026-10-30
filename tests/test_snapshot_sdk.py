@@ -326,6 +326,7 @@ print(outside_the_standard_library())
 """
 
 IMPORT_THE_SDK = """
+import midojo_sdk.episode_schema
 import midojo_sdk.injection
 import midojo_sdk.snapshot
 print(outside_the_standard_library())

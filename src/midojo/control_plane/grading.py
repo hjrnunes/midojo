@@ -15,13 +15,36 @@ what was asked and answered.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
+
+from pydantic import ValidationError
 
 from midojo.episode import Episode
 from midojo.verifiers import ConversationTurn
 
 from .models import GradeResponse
 from .state import Snapshot
+
+VERDICT_DOCUMENT_V1 = "midojo-verdict-v1"
+"""The verdict document version :meth:`Verdict.to_document` writes; a versionless document reads as v0."""
+
+
+class VerdictDocumentError(ValueError):
+    """A verdict document MiDojo refuses: a missing member, a wrong type, or a grade that does not validate."""
+
+
+class UnsupportedVerdictVersion(VerdictDocumentError):  # noqa: N818 - named by the document contract, not a lint choice.
+    """A verdict document whose ``schema_version`` MiDojo does not read. ``version`` names it."""
+
+    def __init__(self, version: object) -> None:
+        self.version = version
+        self.supported = (VERDICT_DOCUMENT_V1,)
+        super().__init__(
+            f"verdict document version {version!r} is not supported; supported: {VERDICT_DOCUMENT_V1}, "
+            "or no schema_version for the versionless v0 form"
+        )
 
 
 def grade_snapshot(episode: Episode, snapshot: Snapshot) -> GradeResponse:
@@ -58,6 +81,52 @@ class Verdict:
     evaluation_id: str
     snapshot_id: str
     grade: GradeResponse
+
+    def to_document(self) -> dict[str, Any]:
+        """This verdict as a ``midojo-verdict-v1`` document: the version, the two IDs, and the grade's fields."""
+        return {
+            "schema_version": VERDICT_DOCUMENT_V1,
+            "evaluation_id": self.evaluation_id,
+            "snapshot_id": self.snapshot_id,
+            "grade": self.grade.model_dump(mode="json"),
+        }
+
+    @classmethod
+    def from_document(cls, document: Mapping[str, object]) -> Verdict:
+        """A verdict from a v1 document, or from the versionless v0 form the cm.58 artifacts carry.
+
+        An unknown version raises :class:`UnsupportedVerdictVersion`, naming
+        it; anything else MiDojo cannot read raises :class:`VerdictDocumentError`.
+        """
+        if not isinstance(document, Mapping):
+            raise VerdictDocumentError(f"verdict document must be a JSON object, not {type(document).__name__}")
+        if "schema_version" in document:
+            version = document["schema_version"]
+            if type(version) is not str:
+                raise VerdictDocumentError(
+                    f"verdict document: schema_version must be a string, not {type(version).__name__}"
+                )
+            if version != VERDICT_DOCUMENT_V1:
+                raise UnsupportedVerdictVersion(version)
+        allowed = {"schema_version", "evaluation_id", "snapshot_id", "grade"}
+        if unknown := [key for key in document if key not in allowed]:
+            raise VerdictDocumentError(f"verdict document: unknown key {unknown[0]!r}")
+        for name in ("evaluation_id", "snapshot_id", "grade"):
+            if name not in document:
+                raise VerdictDocumentError(f"verdict document: {name} is required")
+        values: dict[str, str] = {}
+        for name in ("evaluation_id", "snapshot_id"):
+            value = document[name]
+            if type(value) is not str:
+                raise VerdictDocumentError(f"verdict document: {name} must be a string, not {type(value).__name__}")
+            values[name] = value
+        if not isinstance(document["grade"], Mapping):
+            raise VerdictDocumentError("verdict document: grade must be a JSON object")
+        try:
+            grade = GradeResponse.model_validate(document["grade"])
+        except ValidationError as exc:
+            raise VerdictDocumentError(f"verdict document: grade: {exc}") from None
+        return cls(values["evaluation_id"], values["snapshot_id"], grade)
 
 
 def grade(episode: Episode, snapshot: Snapshot) -> Verdict:

@@ -26,8 +26,9 @@ import dataclasses
 import datetime
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from types import MappingProxyType
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from midojo_sdk.injection import InjectionPlan
 from pydantic import BaseModel, TypeAdapter
@@ -129,6 +130,81 @@ def _runtime_data(runtime: AgentRuntimeDefinition | Mapping[str, Any]) -> Mappin
     return freeze(definition.model_dump())
 
 
+WRITE_DISPOSITIONS = frozenset({"forward", "block"})
+"""What the interception layer does with a write: forward it upstream, or block it."""
+
+
+def _disposition(value: object, what: str) -> str:
+    """``value`` when it is a write disposition; ValueError naming ``what`` otherwise."""
+    if type(value) is not str or value not in WRITE_DISPOSITIONS:
+        raise ValueError(f"{what} must be 'forward' or 'block', not {value!r}")
+    return value
+
+
+@dataclass(frozen=True)
+class InterceptionSettings:
+    """How the episode's interception layer is set up: where it listens and what it exposes.
+
+    ``mode`` is ``host``: the layer runs on the host between the agent and its
+    tools. ``upstream`` is the MCP endpoint the layer forwards to: None when
+    the driver supplies it at ``open()`` (a target's own URL, say), or a
+    literal URL. ``bind_host`` and ``advertise_host`` say where it listens and
+    the address the agent should use; ``port`` None or 0 means a free port.
+    ``observe_requests`` records the requests the layer sees.
+    """
+
+    mode: Literal["host"] = "host"
+    upstream: str | None = None
+    bind_host: str | None = None
+    advertise_host: str | None = None
+    port: int | None = None
+    observe_requests: bool = False
+
+    def __post_init__(self) -> None:
+        if type(self.mode) is not str or self.mode != "host":
+            raise ValueError(f"interception mode must be 'host', not {self.mode!r}")
+        for name in ("upstream", "bind_host", "advertise_host"):
+            value = getattr(self, name)
+            if value is not None:
+                _exact_str(value, f"interception {name}")
+        if self.port is not None:
+            if type(self.port) is not int:
+                raise TypeError(f"interception port must be an int or None, not {type(self.port).__name__}")
+            if not 0 <= self.port <= 65535:
+                raise ValueError("interception port must be between 0 and 65535")
+        if type(self.observe_requests) is not bool:
+            raise TypeError(f"observe_requests must be a bool, not {type(self.observe_requests).__name__}")
+
+
+@dataclass(frozen=True)
+class ToolPolicy:
+    """Which of the upstream's tools the agent may call, and what happens to its writes.
+
+    ``allowed`` names the tools the interception layer exposes. An empty tuple
+    exposes none, which is not the same as no policy at all (None mirrors every
+    upstream tool). ``write_disposition_default`` applies to a write the policy
+    does not name, and ``write_disposition`` overrides it per tool.
+    """
+
+    allowed: tuple[str, ...]
+    write_disposition_default: Literal["forward", "block"] = "forward"
+    write_disposition: Mapping[str, Literal["forward", "block"]] = dataclasses.field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if isinstance(self.allowed, str) or not isinstance(self.allowed, Sequence):
+            raise TypeError("allowed must be a sequence of tool names, not a string")
+        allowed = tuple(_exact_str(name, "an allowed tool name") for name in self.allowed)
+        if len(set(allowed)) != len(allowed):
+            raise ValueError("allowed tool names must not repeat")
+        object.__setattr__(self, "allowed", allowed)
+        _disposition(self.write_disposition_default, "the write disposition default")
+        overrides = {
+            _exact_str(name, "a tool name"): _disposition(value, f"the write disposition of {name!r}")
+            for name, value in self.write_disposition.items()
+        }
+        object.__setattr__(self, "write_disposition", MappingProxyType(overrides))
+
+
 @dataclass(frozen=True)
 class Episode:
     """What to run: immutable once built.
@@ -151,15 +227,20 @@ class Episode:
     ``suite_name``, ``user_task_id`` and ``injection_task_id`` are provenance:
     set when a suite compiled the episode, and None otherwise.
 
+    ``interception`` is how the episode's interception layer is set up (see
+    :class:`InterceptionSettings`) and ``tools`` is the tool policy the layer
+    enforces (see :class:`ToolPolicy`); None mirrors every upstream tool and
+    blocks no write.
+
     Every input is copied into frozen data at construction (see :func:`freeze`),
     so changing it afterwards changes nothing here, and none of the data the
     episode owns can be changed. Turns, plan strings, and the
     provenance IDs must be exactly ``str``; anything else raises TypeError.
     ``environment_type`` must be an :class:`~midojo.types.Environment` subclass
     (a class, not an instance); like the verifier registry the checks resolve
-    against, it is held by reference and treated as code, not data.
-    ``verifiers`` is that registry (the default one when None); it takes no
-    part in comparing episodes.
+    against, it is held by reference and treated as code, not data, and it takes
+    no part in comparing episodes. ``verifiers`` is that registry (the default
+    one when None); it takes no part in comparing episodes either.
     """
 
     runtime: AgentRuntimeDefinition | Mapping[str, Any] = dataclasses.field(
@@ -170,11 +251,13 @@ class Episode:
     security: Mapping[str, Any] | None = None
     utility: Mapping[str, Any] | None = None
     environment: Mapping[str, Any] | None = None
-    environment_type: type[Environment] | None = None
+    environment_type: type[Environment] | None = dataclasses.field(default=None, compare=False, repr=False)
     suite_name: SuiteName | None = None
     user_task_id: str | None = None
     injection_task_id: str | None = None
     verifiers: VerifierRegistry | None = dataclasses.field(default=None, compare=False, repr=False)
+    interception: InterceptionSettings = dataclasses.field(default_factory=InterceptionSettings)
+    tools: ToolPolicy | None = None
 
     def __post_init__(self) -> None:
         if self.turns is not None:
@@ -186,6 +269,10 @@ class Episode:
             object.__setattr__(self, "turns", turns)
         if type(self.plan) is not InjectionPlan:
             raise TypeError("plan must be an InjectionPlan")
+        if type(self.interception) is not InterceptionSettings:
+            raise TypeError(f"interception must be InterceptionSettings, not {type(self.interception).__name__}")
+        if self.tools is not None and type(self.tools) is not ToolPolicy:
+            raise TypeError(f"tools must be a ToolPolicy or None, not {type(self.tools).__name__}")
         if self.verifiers is not None and not isinstance(self.verifiers, VerifierRegistry):
             raise TypeError(f"verifiers must be a VerifierRegistry, not {type(self.verifiers).__name__}")
         for name in ("suite_name", "user_task_id", "injection_task_id"):
@@ -233,6 +320,32 @@ class Episode:
         """A fresh environment from the initial state; the episode keeps none of it."""
         assert self.environment_type is not None  # __post_init__ infers one.
         return self.environment_type.model_validate(thaw(self.environment or {}))
+
+    def to_document(self) -> dict[str, Any]:
+        """This episode as a closed v1 document: the data, without the trusted code (see :mod:`midojo.episode_document`)."""
+        from midojo.episode_document import to_document
+
+        return to_document(self)
+
+    @classmethod
+    def from_document(cls, document: Mapping[str, object]) -> Episode:
+        """An episode from a v1 document, or from the v0 consumer wrapper with a :class:`DeprecationWarning`."""
+        from midojo.episode_document import from_document
+
+        return from_document(cls, document)
+
+    @classmethod
+    def load_document(cls, path: str | Path) -> Episode:
+        """An episode from the JSON document at ``path``: :meth:`from_document` of its decoded contents."""
+        from midojo.episode_document import load_document
+
+        return load_document(cls, path)
+
+    def dump_document(self, path: str | Path) -> None:
+        """Write this episode's v1 document to ``path`` as canonical JSON: sorted keys, one trailing newline."""
+        from midojo.episode_document import dump_document
+
+        dump_document(self, path)
 
     def _on_openshell(self) -> bool:
         return cast(Mapping[str, Any], self.runtime)["type"] == "openshell"

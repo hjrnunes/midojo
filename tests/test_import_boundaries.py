@@ -53,6 +53,7 @@ LIGHT_MODULES = (
     "midojo.runtimes",
     # The episode, its context and result (the handle), the sealed snapshot and grading.
     "midojo.episode",
+    "midojo.episode_document",
     "midojo.episode_context",
     "midojo.control_plane.state",
     "midojo.control_plane.grading",
@@ -67,6 +68,8 @@ LIGHT_MODULES = (
     "midojo.control_plane.inprocess_control",
     # The SDK's snapshot codec, which names a sealed snapshot: stdlib only.
     "midojo_sdk.snapshot",
+    # The SDK's episode schema accessor and the plan codec it names: stdlib only.
+    "midojo_sdk.episode_schema",
     # midojo-run's module, home of run_task, a client of the episode context.
     "midojo.orchestrator",
 )
