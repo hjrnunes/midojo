@@ -44,9 +44,11 @@ The rules kept here:
 * the call capture: an evaluation intercepted in the agent that is sealed
   without any call record has its ``function_calls`` evidence ``incomplete``,
   since a hook that fails open records nothing; so does one sealed with a call
-  the session started and never finished once the session can no longer report
-  it (revoked, or expired), since the finish is then kept nowhere and a lost
-  report hides whatever the call did;
+  the session started that never finished, whether or not the session can
+  still report the finish, since a lost report hides whatever the call did. A
+  finish refused after the seal is kept as a late fact, which reaches only the
+  evaluation's evidence overlay: the sealed snapshot and its grade keep what
+  the seal recorded;
 * environment history: a record carries environment snapshots only when the
   evaluation was created to keep them, as what was observed when the call
   started and finished, never as what the call caused;
@@ -949,7 +951,7 @@ def _end_closure_wait(evaluation: Evaluation, event: EndClosureWait) -> Outcome:
     return Accepted(next_value, next_value)
 
 
-def _capture_status(evaluation: Evaluation, event: Seal) -> dict[str, EvidenceStatus]:
+def _capture_status(evaluation: Evaluation) -> dict[str, EvidenceStatus]:
     """The call capture's status, when the records alone can't show it is complete.
 
     An interceptor on the host sees every call the target makes through it, so
@@ -960,25 +962,22 @@ def _capture_status(evaluation: Evaluation, event: Seal) -> dict[str, EvidenceSt
 
     A call the session started whose finish never arrived is the same loss, and
     the records can't show it: the record reads a call, and only its result is
-    missing. A finish that arrives after the seal is refused and kept as a late
-    fact, which marks ``function_calls`` incomplete, so a live session loses
-    nothing the seal has to record. A revoked or expired session has no
-    standing to report a finish: the control plane keeps that write nowhere,
-    not even as a late fact, so the seal marks the capture incomplete itself.
+    missing. The seal marks the capture incomplete itself, whether or not the
+    session could still report the finish: a finish that arrives after the seal
+    is refused and kept as a late fact, and a late fact marks only the
+    evaluation's evidence overlay, never the sealed snapshot or its grade. So
+    the seal is the last point that can tell the snapshot the capture is
+    missing a report, and it tells it for every such call it holds.
+
+    A call the host started (provenance ``host``) doesn't mark the capture: the
+    host sends the seal and the call's finish alike, so an unfinished record is
+    its own report outstanding, not a lost one.
     """
     if evaluation.interception == "agent" and not evaluation.function_calls:
         return {"function_calls": "incomplete"}
-    if _session_can_report(evaluation, event.at):
-        return {}
     if any(not call.complete and call.provenance in SESSION_PROVENANCE for call in evaluation.function_calls):
         return {"function_calls": "incomplete"}
     return {}
-
-
-def _session_can_report(evaluation: Evaluation, at: str) -> bool:
-    """Whether the evaluation's session may still report a finish: it exists, and hasn't expired at ``at``."""
-    session = evaluation.session
-    return session is not None and session.expires_at > datetime.fromisoformat(at).timestamp()
 
 
 def _seal(evaluation: Evaluation, authority: Authority, event: Seal) -> Outcome:
@@ -1015,7 +1014,7 @@ def _seal(evaluation: Evaluation, authority: Authority, event: Seal) -> Outcome:
         observations=observations,
         evidence_status={
             **evidence_status(evaluation.observations),
-            **_capture_status(evaluation, event),
+            **_capture_status(evaluation),
             **late_evidence(evaluation.late_facts),
             **capture_evidence(evaluation.capture_failures),
             **{key: "incomplete" for key in event.incomplete},

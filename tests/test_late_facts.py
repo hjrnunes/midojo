@@ -9,6 +9,15 @@ revoked or expired session is no authority at all). Either way the call's
 record stays unfinished, and no snapshot that holds it may grade a check that
 depends on the capture as secure.
 
+The first matrix (:func:`test_a_finish_refused_after_the_cut_leaves_the_capture_incomplete`)
+lands the finish between the cut and the seal. The second
+(:func:`test_a_seal_that_holds_an_unfinished_call_reads_the_capture_incomplete`)
+covers the two orderings around a normal seal of a live session: the finish
+arrives after the seal, or it never arrives at all (:data:`LATE_TIMINGS`).
+Both matter because a late fact kept after the seal marks only the
+evaluation's evidence overlay: the snapshot and its grade stay what the seal
+made them, so the seal itself has to read the capture incomplete.
+
 Each cell of ``CUT_POINTS`` x ``BACKENDS`` is one test, and both backends of
 ``tests/backends.py`` must answer the same grade, evidence status and
 snapshot:
@@ -32,8 +41,10 @@ The fail-open these tests found: the seal marked ``function_calls`` incomplete
 only when an evaluation intercepted in the agent had no call record at all, so
 a record whose finish never arrived kept the capture looking complete, and a
 ``not:`` check over an absence graded True (secure) on a capture that lost a
-report. The seal now marks that key incomplete whenever a call the session
-started can no longer report its finish (see
+report. The seal now marks that key incomplete whenever it holds a call the
+session started that never finished, whether or not the session can still
+report its finish: a finish refused after the seal is only a late fact, and
+that leaves the snapshot and its grade alone (see
 :func:`midojo.control_plane.lifecycle._capture_status`).
 """
 
@@ -41,6 +52,7 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Mapping
+from datetime import UTC, datetime
 
 import pytest
 from midojo_sdk.recorder import ControlPlaneRejectedError, RejectionKind
@@ -121,6 +133,17 @@ CUT_POINTS: dict[str, Cut] = {
     "interrupted_seal": Cut(RejectionKind.SESSION_CLOSED, True),
 }
 """The four cut points: closing the window, revoking the session, expiry, and an interrupted seal."""
+
+LATE_TIMINGS = ("finish_after_seal", "finish_never")
+"""When the finish report lands relative to a normal seal of a live session: after it, or never at all."""
+
+AFTER_SEAL: dict[str, Cut] = {
+    "closing": Cut(RejectionKind.SESSION_CLOSED, True),
+    "revoked": Cut(RejectionKind.INVALID_SESSION, False),
+    "expired": Cut(RejectionKind.INVALID_SESSION, False),
+    "interrupted_seal": Cut(RejectionKind.SESSION_CLOSED, True),
+}
+"""How a finish that arrives after the seal is refused: the seal ends the stage, and a revoked or expired session is no authority."""
 
 
 def _suite(tmp_path) -> YAMLTaskSuite:
@@ -234,3 +257,71 @@ async def test_a_finish_refused_after_the_cut_leaves_the_capture_incomplete(cut,
     failed = await control.grade_evaluation(run.id, happened)
     assert (passed.security, passed.grade_validity.security.status) == (True, "valid")
     assert (failed.security, failed.grade_validity.security.status) == (False, "valid")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cut", list(CUT_POINTS))
+@pytest.mark.parametrize("timing", LATE_TIMINGS)
+async def test_a_seal_that_holds_an_unfinished_call_reads_the_capture_incomplete(
+    cut, timing, backend, monkeypatch, tmp_path
+):
+    """A normal seal over a live session and an unfinished call: the snapshot reads incomplete, whatever arrives next.
+
+    This is the fail-open the first matrix missed. With closure wait zero, the
+    call is admitted, the cut happens, and the evaluation seals with the call
+    still unfinished. The finish report then arrives after the seal (kept only
+    as a late fact, or refused whole once the session is revoked or has
+    expired) or never arrives. Either way the sealed snapshot must mark
+    ``function_calls`` incomplete itself: a post-seal late fact changes only
+    the evaluation's evidence overlay, never the snapshot or its grade.
+    """
+    now = [1_700_000_000.0]
+    monkeypatch.setattr("midojo.control_plane.service.time.time", lambda: now[0])
+    # The seal's ``at`` uses the same clock, so the session reads live until the expiry cut advances it.
+    monkeypatch.setattr("midojo.control_plane.service._now", lambda: datetime.fromtimestamp(now[0], UTC).isoformat())
+    suite = _suite(tmp_path)
+    app = create_app({"late": suite}, config=AppConfig(closure_wait_seconds=0, session_ttl_seconds=5))
+    control = backend.control(app)
+    run = await control.create_run("late")
+    opened = await control.create_evaluation(run.id, USER_TASK, INJECTION_TASK, {})
+    agent = backend.agent(opened.session_token, app)
+    await agent.start_call(**CALL, disposition="forwarded")
+
+    await _apply(cut, control, run.id, opened.id, now)
+    if cut != "interrupted_seal":
+        # The cut left the evaluation open or closing; a normal seal finishes it.
+        await control.complete_evaluation(run.id, opened.id, OUTPUT)
+    sealed = await control.snapshot(run.id, opened.id, environment_type=suite.environment_type)
+
+    late_fact = False
+    if timing == "finish_after_seal":
+        with pytest.raises(ControlPlaneRejectedError) as refused:
+            await agent.finish_call(**CALL, result=RESULT, disposition="forwarded")
+        late_fact = refused.value.late_fact
+        assert (refused.value.kind, late_fact) == (AFTER_SEAL[cut].kind, AFTER_SEAL[cut].late_fact)
+
+    evaluation = await control.evaluation(run.id, opened.id)
+    grade = await control.grade_evaluation(run.id, opened.id)
+    snapshot = await control.snapshot(run.id, opened.id, environment_type=suite.environment_type)
+
+    # The seal holds the unfinished record and says so; the grade can't claim the call's absence.
+    assert [(call.complete, call.result) for call in evaluation.function_calls] == [(False, None)]
+    assert snapshot.evidence_status["function_calls"] == "incomplete"
+    assert (grade.security, grade.grade_validity.security.status) == (None, "invalid")
+    assert [reason.check for reason in grade.grade_validity.security.reasons] == ["tool_called"]
+    assert grade.evidence_status["function_calls"] == "incomplete"
+    assert (grade.utility, grade.grade_validity.utility.status) == (True, "valid")
+
+    # A finish after the seal is a late fact (or no authority at all) and changes neither the snapshot nor its id.
+    facts = [(fact.event, fact.call_id, list(fact.evidence)) for fact in evaluation.late_facts]
+    assert facts == ([("finish_call", CALL["call_id"], ["function_calls"])] if late_fact else [])
+    assert snapshot.snapshot_id == sealed.snapshot_id
+    assert snapshot.function_calls == sealed.function_calls
+    assert snapshot.evidence_status == sealed.evidence_status
+    assert snapshot.verified().snapshot_id == snapshot.snapshot_id
+
+    # The same checks as the first matrix: no absence over this capture is ever secure, and the condition is never True.
+    for check in (_NOTHING_TRANSFERRED, _NOTHING_TRANSFERRED_CONDITION):
+        absent = _regraded(suite, snapshot, check)
+        assert (absent.security, absent.grade_validity.security.status) == (None, "invalid"), check
+    assert _regraded(suite, snapshot, _TRANSFER_NOT_CALLED).security is not True
