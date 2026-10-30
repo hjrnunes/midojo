@@ -43,7 +43,10 @@ The rules kept here:
   caller sends sets it;
 * the call capture: an evaluation intercepted in the agent that is sealed
   without any call record has its ``function_calls`` evidence ``incomplete``,
-  since a hook that fails open records nothing;
+  since a hook that fails open records nothing; so does one sealed with a call
+  the session started and never finished once the session can no longer report
+  it (revoked, or expired), since the finish is then kept nowhere and a lost
+  report hides whatever the call did;
 * environment history: a record carries environment snapshots only when the
   evaluation was created to keep them, as what was observed when the call
   started and finished, never as what the call caused;
@@ -697,6 +700,10 @@ def provenance(evaluation: Evaluation, authority: Authority) -> CallProvenance:
     return "interceptor" if evaluation.interception == "host" else "agent"
 
 
+SESSION_PROVENANCE: frozenset[CallProvenance] = frozenset({"agent", "interceptor"})
+"""The provenances a write gets from an evaluation session: a finish it reports is the only one the plane accepts."""
+
+
 def _current_turn(evaluation: Evaluation) -> int | None:
     return evaluation.turns[-1].index if evaluation.turns else None
 
@@ -942,7 +949,7 @@ def _end_closure_wait(evaluation: Evaluation, event: EndClosureWait) -> Outcome:
     return Accepted(next_value, next_value)
 
 
-def _capture_status(evaluation: Evaluation) -> dict[str, EvidenceStatus]:
+def _capture_status(evaluation: Evaluation, event: Seal) -> dict[str, EvidenceStatus]:
     """The call capture's status, when the records alone can't show it is complete.
 
     An interceptor on the host sees every call the target makes through it, so
@@ -950,10 +957,28 @@ def _capture_status(evaluation: Evaluation) -> dict[str, EvidenceStatus]:
     when it can't reach the control plane, the tool still runs and nothing is
     recorded. So an evaluation intercepted in the agent with no record at all
     has an incomplete capture, never a clean one.
+
+    A call the session started whose finish never arrived is the same loss, and
+    the records can't show it: the record reads a call, and only its result is
+    missing. A finish that arrives after the seal is refused and kept as a late
+    fact, which marks ``function_calls`` incomplete, so a live session loses
+    nothing the seal has to record. A revoked or expired session has no
+    standing to report a finish: the control plane keeps that write nowhere,
+    not even as a late fact, so the seal marks the capture incomplete itself.
     """
     if evaluation.interception == "agent" and not evaluation.function_calls:
         return {"function_calls": "incomplete"}
+    if _session_can_report(evaluation, event.at):
+        return {}
+    if any(not call.complete and call.provenance in SESSION_PROVENANCE for call in evaluation.function_calls):
+        return {"function_calls": "incomplete"}
     return {}
+
+
+def _session_can_report(evaluation: Evaluation, at: str) -> bool:
+    """Whether the evaluation's session may still report a finish: it exists, and hasn't expired at ``at``."""
+    session = evaluation.session
+    return session is not None and session.expires_at > datetime.fromisoformat(at).timestamp()
 
 
 def _seal(evaluation: Evaluation, authority: Authority, event: Seal) -> Outcome:
@@ -990,7 +1015,7 @@ def _seal(evaluation: Evaluation, authority: Authority, event: Seal) -> Outcome:
         observations=observations,
         evidence_status={
             **evidence_status(evaluation.observations),
-            **_capture_status(evaluation),
+            **_capture_status(evaluation, event),
             **late_evidence(evaluation.late_facts),
             **capture_evidence(evaluation.capture_failures),
             **{key: "incomplete" for key in event.incomplete},

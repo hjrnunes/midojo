@@ -118,7 +118,8 @@ class Snapshot:
     ``evidence_status`` is the observations' own status, with every key a late
     fact recorded before the seal marked ``incomplete``, ``function_calls``
     marked ``incomplete`` when a capture failure was reported before the seal,
-    and every key the host named as incomplete at the seal.
+    when the seal holds a call the session started that can no longer report
+    its finish, and every key the host named as incomplete at the seal.
 
     ``evaluation_id`` and ``run_id`` name the evaluation it seals (``run_id``
     None outside a run), and ``snapshot_id`` this snapshot: a result graded
