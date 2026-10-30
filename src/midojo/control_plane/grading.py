@@ -10,12 +10,15 @@ A ``reply_judge`` check is the exception: it asks a judge service
 (:mod:`midojo.verifiers.judge`), so its grade is the service's answer as well
 as the snapshot's, and grading again may get another answer. The control
 plane grades once and keeps that grade; the grade's ``judgements`` record
-what was asked and answered.
+what was asked and answered. Passing those records back as ``judgements=``
+replays the grade offline: each request is answered by request id, no
+service is asked, and a request the records don't hold is unknown, never
+False (see :func:`grade`).
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -23,6 +26,7 @@ from pydantic import ValidationError
 
 from midojo.episode import Episode
 from midojo.verifiers import ConversationTurn
+from midojo.verifiers.judge import JudgeRecord
 
 from .models import GradeResponse
 from .state import Snapshot
@@ -47,7 +51,9 @@ class UnsupportedVerdictVersion(VerdictDocumentError):  # noqa: N818 - named by 
         )
 
 
-def grade_snapshot(episode: Episode, snapshot: Snapshot) -> GradeResponse:
+def grade_snapshot(
+    episode: Episode, snapshot: Snapshot, *, judgements: Sequence[JudgeRecord | Mapping[str, Any]] | None = None
+) -> GradeResponse:
     """Grade ``snapshot`` with ``episode``'s checks. Reads nothing else, and changes nothing in ``snapshot``.
 
     The checks see the snapshot's evidence status, so a check that depends on a
@@ -55,6 +61,10 @@ def grade_snapshot(episode: Episode, snapshot: Snapshot) -> GradeResponse:
     evidence status is the episode's, with every key the snapshot marks (a late
     fact or a capture failure recorded before the seal, or a call capture the
     seal found incomplete) taken from the snapshot.
+
+    ``judgements`` replays a judge-graded snapshot instead of asking a judge
+    service: it takes records an earlier grade kept (its ``judgements``) and
+    answers each judge request by request id (:class:`midojo.verifiers.judge.RecordedJudge`).
 
     It grades only the content ``snapshot.snapshot_id`` names, read once
     (:meth:`Snapshot.verified`): a snapshot changed after it was made (its
@@ -69,6 +79,7 @@ def grade_snapshot(episode: Episode, snapshot: Snapshot) -> GradeResponse:
         observations=dict(snapshot.observations),
         turns=[ConversationTurn(message=turn.message, reply=turn.reply) for turn in snapshot.turns],
         evidence=dict(snapshot.evidence_status),
+        judgements=judgements,
     )
     graded = GradeResponse.model_validate(result)
     return graded.model_copy(update={"evidence_status": {**graded.evidence_status, **snapshot.evidence_status}})
@@ -129,8 +140,19 @@ class Verdict:
         return cls(values["evaluation_id"], values["snapshot_id"], grade)
 
 
-def grade(episode: Episode, snapshot: Snapshot) -> Verdict:
+def grade(
+    episode: Episode, snapshot: Snapshot, *, judgements: Sequence[JudgeRecord | Mapping[str, Any]] | None = None
+) -> Verdict:
     """Grade ``snapshot`` with ``episode``'s checks: :func:`grade_snapshot`, naming what was graded.
+
+    ``judgements=`` replays a judge-graded snapshot offline from records an
+    earlier grade kept (``grade.judgements``, as :class:`JudgeRecord` objects
+    or their JSON): each judge request is answered by request id, no judge
+    service is asked, and a recorded failure replays as unknown. A request the
+    records don't hold makes its check unknown, with the reason
+    ``judge-replay-unrecorded:<id8>``, never False: the grade is then invalid
+    for that check, as a judge that gave no answer leaves it. Without
+    ``judgements``, grading is unchanged and asks the service.
 
     The verdict's ``evidence_status`` is the one fixed in the snapshot. The
     control plane grades the same snapshot with the same function, but its
@@ -144,4 +166,6 @@ def grade(episode: Episode, snapshot: Snapshot) -> Verdict:
     differs only in those facts' keys, which the control plane's response
     marks ``incomplete``.
     """
-    return Verdict(snapshot.evaluation_id, snapshot.snapshot_id, grade_snapshot(episode, snapshot))
+    return Verdict(
+        snapshot.evaluation_id, snapshot.snapshot_id, grade_snapshot(episode, snapshot, judgements=judgements)
+    )

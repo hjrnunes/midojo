@@ -28,7 +28,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from midojo_sdk.injection import InjectionPlan
 from pydantic import BaseModel, TypeAdapter
@@ -43,7 +43,11 @@ from midojo.types import CheckValidity, Environment, FunctionCallRecord, GradeVa
 from midojo.verifier import Check, VerificationContext, VerificationResult, parse_check
 from midojo.verifiers import ConversationTurn, VerifierRegistry
 from midojo.verifiers.builtin import EFFECTS_ONLY, BuiltinVerifier, attempt
+from midojo.verifiers.judge import RecordedJudge
 from midojo.verifiers.openshell import reads_openshell_observations
+
+if TYPE_CHECKING:
+    from midojo.verifiers.judge import JudgeRecord
 
 # The name a runtime is built under when the episode has no suite.
 DEFAULT_EPISODE_NAME = "episode"
@@ -369,6 +373,7 @@ class Episode:
         observations: Mapping[str, BaseModel] | None = None,
         turns: list[ConversationTurn] | None = None,
         evidence: Mapping[str, EvidenceStatus] | None = None,
+        judgements: Sequence[JudgeRecord | Mapping[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Grade one run of the episode with checks parsed fresh from its specs.
 
@@ -389,7 +394,15 @@ class Episode:
         the service's as well as the evidence's; ``judgements`` (present only
         when a judge was asked) records each request and answer
         (:class:`midojo.verifiers.judge.JudgeRecord`).
+
+        ``judgements=`` replays a grade instead of asking a service: it takes
+        records from an earlier grade (a grade's ``judgements``, as
+        :class:`~midojo.verifiers.judge.JudgeRecord` objects or their JSON) and
+        answers each judge request by request id. A request they don't hold
+        makes its check unknown with ``judge-replay-unrecorded:<id8>``, never
+        False, and no connection is opened. Without it, grading is unchanged.
         """
+        replay = None if judgements is None else RecordedJudge(judgements)
         observations = dict(observations or {})
         if self._on_openshell() and OBSERVATIONS_SOURCE not in observations:
             observations[OBSERVATIONS_SOURCE] = OpenShellObservations.not_collected()
@@ -401,6 +414,7 @@ class Episode:
             observations=observations,
             turns=turns or [],
             evidence_status={**evidence_status(observations), **(evidence or {})},
+            judge_replay=replay,
         )
         # One traversal per check grades it and names the criterion that decided it.
         utility, utility_reason, utility_validity = _assess(self._check("utility"), ctx)

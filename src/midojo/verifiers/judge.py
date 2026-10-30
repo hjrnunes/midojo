@@ -36,7 +36,7 @@ import json
 import logging
 import math
 import os
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -47,7 +47,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict
 from pydantic_core import to_jsonable_python
 
-from midojo.verifiers import VerificationContext, VerificationResult
+from midojo.verifiers import ValidityReason, VerificationContext, VerificationResult
 
 NAME = "reply_judge"
 SCHEMA = "midojo.judge.v1"
@@ -91,6 +91,55 @@ class JudgeRecord(BaseModel):
     failure: str | None = None
 
 
+class UnrecordedJudgeRequest(LookupError):  # noqa: N818 - named by the replay contract, not a lint choice.
+    """A replay was asked for a request its records don't hold: the check is unknown, never False.
+
+    ``request_id`` is the id that was asked for and ``id8`` its first eight
+    hex digits, which the check's reason names (``judge-replay-unrecorded:<id8>``).
+    """
+
+    def __init__(self, request: Mapping[str, Any]) -> None:
+        self.request_id = str(request["id"])
+        self.id8 = self.request_id.removeprefix("sha256:")[:8]
+        super().__init__(f"judge-replay-unrecorded:{self.id8}")
+
+
+class RecordedJudge:
+    """Answers ``reply_judge`` requests from records kept by an earlier grading, and never opens a connection.
+
+    ``records`` are :class:`JudgeRecord` instances, or their JSON mappings (as
+    a grade's ``judgements`` holds them), keyed by request id. Asking for a
+    request no record names raises :class:`UnrecordedJudgeRequest`, which the
+    check turns into unknown with ``judge-replay-unrecorded:<id8>``: a replay
+    never guesses a verdict. When the same request id was recorded more than
+    once (asked of more than one endpoint), the last record answers.
+
+    Pass one to :func:`midojo.grade` (or :meth:`midojo.Episode.grade`) as
+    ``judgements=``: the grading then reads its judgements from it instead of
+    asking a service. Records whose ``failure`` is set replay as unknown, as
+    they graded the first time.
+    """
+
+    def __init__(self, records: Iterable[JudgeRecord | Mapping[str, Any]]) -> None:
+        self._records: dict[str, JudgeRecord] = {}
+        for record in records:
+            kept = record if isinstance(record, JudgeRecord) else JudgeRecord.model_validate(record)
+            self._records[kept.request_id] = kept
+
+    def __len__(self) -> int:
+        return len(self._records)
+
+    def __contains__(self, request_id: object) -> bool:
+        return request_id in self._records
+
+    def ask(self, request: Mapping[str, Any]) -> JudgeRecord:
+        """The record for ``request``'s id, or :class:`UnrecordedJudgeRequest`."""
+        try:
+            return self._records[str(request["id"])]
+        except KeyError:
+            raise UnrecordedJudgeRequest(request) from None
+
+
 @dataclass(frozen=True)
 class ReplyJudge:
     """Passes when the judge service finds ``claim`` supported by the reply, fails when it finds it contradicted.
@@ -124,10 +173,31 @@ class ReplyJudge:
         progress = _Progress()
         try:
             record = self._judgement(ctx, progress)
+        except UnrecordedJudgeRequest as missing:
+            return self._unrecorded(ctx, missing, progress)
         except Exception as exc:
             record = progress.failed(self, exc)
             ctx.judgements.setdefault(progress.key or json.dumps(["failed", record.request_id]), record)
         return self.result(record)
+
+    def _unrecorded(
+        self, ctx: VerificationContext, missing: UnrecordedJudgeRequest, progress: _Progress
+    ) -> VerificationResult:
+        """A replay with no record for this request: unknown, naming the id, never a verdict.
+
+        The answer is kept on the context as a failed :class:`JudgeRecord`, as
+        every other unanswered request is, so the grade shows which request had
+        no record. The reason is exactly ``judge-replay-unrecorded:<id8>``.
+        """
+        why = str(missing)
+        request = progress.request or {"schema": SCHEMA, "id": missing.request_id}
+        record = JudgeRecord(
+            request_id=missing.request_id, endpoint=progress.endpoint, request=request, sent=False, failure=why
+        )
+        ctx.judgements.setdefault(progress.key or json.dumps(["replay", missing.request_id]), record)
+        return VerificationResult(
+            None, f"{self.label} (unknown: {why})", (ValidityReason(check=self.label, reason=why),)
+        )
 
     def _judgement(self, ctx: VerificationContext, progress: _Progress) -> JudgeRecord:
         try:
@@ -143,6 +213,9 @@ class ReplyJudge:
         progress.request = request
         progress.key = json.dumps([request["id"], self.url, self.url_env, self.token_env, self.timeout_seconds])
         record = ctx.judgements.get(progress.key)
+        if record is None and ctx.judge_replay is not None:
+            # A re-grade answers from its records, by request id; one they don't hold raises here, unsent.
+            record = ctx.judgements[progress.key] = ctx.judge_replay.ask(request)
         if record is None:
             record = ctx.judgements[progress.key] = self.ask(request, progress)
         return record
