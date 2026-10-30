@@ -63,6 +63,33 @@ logger = logging.getLogger(__name__)
 BLOCKED_REASON = "Tool execution was blocked"
 """What the agent is told when it calls a blocked tool, the same as with the PI and LangChain SDKs."""
 
+_EXPECTED_ERROR = "midojo_expected_error"
+"""Marks a tool error the agent is meant to see, which FastMCP logs without a traceback."""
+
+
+class _DropExpectedErrors(logging.Filter):
+    """Drop FastMCP's error record for a refused call.
+
+    FastMCP logs every tool error at ERROR with a traceback. A blocked or
+    denied call is the interception layer's outcome, not a fault: ``_refuse``
+    logs it at INFO and marks the error, and this filter keeps the traceback
+    off the driver's stderr. The error the agent gets is unchanged.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        error = record.exc_info[1] if record.exc_info else None
+        return not getattr(error, _EXPECTED_ERROR, False)
+
+
+def _quiet_refused_calls() -> None:
+    """Install the filter on FastMCP's tool-call logger, once."""
+    target = logging.getLogger("fastmcp.server.server")
+    if not any(isinstance(installed, _DropExpectedErrors) for installed in target.filters):
+        target.addFilter(_DropExpectedErrors())
+
+
+_quiet_refused_calls()
+
 Denial = Callable[[dict[str, Any]], str | None]
 """Checks a call's arguments: why the call is refused, or None to let it run."""
 
@@ -485,7 +512,11 @@ class MidojoMCP:
         await recorder.finish_call(
             call_id=str(uuid.uuid4()), function=name, args=args, result=reason, disposition=disposition
         )
-        raise ToolError(reason)
+        # The agent still gets the error; the driver gets one line, not FastMCP's traceback.
+        logger.info("Refused a call to %r as %s: %s", name, disposition, reason)
+        error = ToolError(reason)
+        setattr(error, _EXPECTED_ERROR, True)
+        raise error
 
     def _scope(self) -> str:
         """The counter scope of the request being handled: its evaluation, or the session it arrives in."""

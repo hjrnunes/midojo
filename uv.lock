@@ -2154,6 +2154,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "grpcio" },
     { name = "httpx" },
+    { name = "midojo-sdk", extra = ["mcp"] },
     { name = "openshell" },
     { name = "protobuf" },
     { name = "pydantic" },
@@ -2164,6 +2165,7 @@ dependencies = [
 
 [package.optional-dependencies]
 dev = [
+    { name = "jsonschema" },
     { name = "midojo-sdk", extra = ["langchain", "mcp"] },
     { name = "pyright" },
     { name = "pytest" },
@@ -2196,6 +2198,8 @@ requires-dist = [
     { name = "fastmcp", marker = "extra == 'suites'" },
     { name = "grpcio", specifier = ">=1.60" },
     { name = "httpx", specifier = ">=0.28" },
+    { name = "jsonschema", marker = "extra == 'dev'", specifier = ">=4.23" },
+    { name = "midojo-sdk", extras = ["mcp"], editable = "interception/python-sdk" },
     { name = "midojo-sdk", extras = ["mcp"], marker = "extra == 'pyrit'", editable = "interception/python-sdk" },
     { name = "midojo-sdk", extras = ["mcp"], marker = "extra == 'suites'", editable = "interception/python-sdk" },
     { name = "midojo-sdk", extras = ["mcp", "langchain"], marker = "extra == 'dev'", editable = "interception/python-sdk" },

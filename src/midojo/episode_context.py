@@ -42,7 +42,7 @@ from midojo_sdk.injection import Channel, InjectionOutcome
 
 from midojo.control_plane.client import ControlClient
 from midojo.control_plane.state import Snapshot
-from midojo.episode import DEFAULT_EPISODE_NAME, Episode
+from midojo.episode import DEFAULT_EPISODE_NAME, Episode, tool_policy
 from midojo.observations import FUNCTION_CALLS
 from midojo.runtimes import AgentRuntime, ResettableRuntime
 from midojo.tool_endpoint import ToolEndpoint
@@ -716,7 +716,20 @@ def open_episode(
 
     ``progress``, called with each :data:`EpisodeStep`, returns a context
     manager held around that step (a spinner, say).
+
+    Tool policy: ``open_episode`` has no interceptor of its own, so it never
+    applies ``episode.tools``; only
+    :func:`midojo.episode_handle.open` enforces a policy. An episode whose
+    policy blocks a tool is refused here unless the ``interception`` you pass
+    already blocks it too, rather than opening with the block silently
+    unenforced.
     """
+    _, blocked = tool_policy(episode.tools)
+    if blocked and not (interception is not None and set(blocked) <= set(interception.blocked)):
+        raise ValueError(
+            f"episode.tools blocks {', '.join(blocked)}, but open_episode has no interceptor to enforce it: "
+            "open the episode with midojo.episode_handle.open, or pass interception= that blocks the same tools"
+        )
     return EpisodeContext(
         episode,
         runtime=runtime,

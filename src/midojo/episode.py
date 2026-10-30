@@ -238,6 +238,20 @@ class ToolPolicy:
         object.__setattr__(self, "write_disposition", MappingProxyType(overrides))
 
 
+def tool_policy(tools: ToolPolicy | None) -> tuple[frozenset[str] | None, tuple[str, ...]]:
+    """The interceptor's view of a policy: the tools to mirror, and the tools to block.
+
+    ``None`` mirrors every upstream tool and blocks nothing. An empty
+    ``allowed`` mirrors no tool, which is the policy's own meaning.
+    """
+    if tools is None:
+        return None, ()
+    names = {*tools.allowed, *tools.write_disposition}
+    default = tools.write_disposition_default
+    blocked = tuple(sorted(name for name in names if tools.write_disposition.get(name, default) == "block"))
+    return frozenset(tools.allowed), blocked
+
+
 @dataclass(frozen=True)
 class Episode:
     """What to run: immutable once built.

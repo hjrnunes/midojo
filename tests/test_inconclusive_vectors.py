@@ -103,7 +103,7 @@ def test_the_manifest_pins_every_file_the_vectors_hold():
     holder = sorted(
         str(path.relative_to(FIXTURES))
         for path in FIXTURES.rglob("*")
-        if path.is_file() and path.name != "MANIFEST.json"
+        if path.is_file() and path.name != "MANIFEST.json" and "__pycache__" not in path.parts
     )
     assert sorted(MANIFEST["files"]) == holder
     assert MANIFEST["generator"].endswith("inconclusive_vectors/generate.py")

@@ -627,6 +627,18 @@ def test_a_block_default_blocks_every_allowed_write_and_an_explicit_interception
     assert explicit_calls == [] and upstream_calls == []
 
 
+@pytest.mark.parametrize("runtime", [None, UnmanagedRuntime()], ids=["own-runtime", "given-runtime"])
+def test_a_run_id_without_an_open_run_is_refused_before_a_slot(monkeypatch, runtime):
+    """run_id names a run that is already open: without one, the episode would fail after a sandbox exists."""
+
+    def no_slot(*args, **kwargs):
+        raise AssertionError("a refused open must not take a live-episode slot")
+
+    monkeypatch.setattr(episode_handle, "_acquire_slot", no_slot)
+    with pytest.raises(ValueError, match="run_id"):
+        episode_handle.open(weather_episode(), upstream=scripted_upstream(), runtime=runtime, run_id="run-1")
+
+
 def test_a_document_without_an_upstream_is_refused_before_anything_is_acquired():
     episode = weather_episode(interception=InterceptionSettings())
     with pytest.raises(EpisodeDocumentError, match="upstream not supplied"):

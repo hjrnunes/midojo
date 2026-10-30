@@ -57,7 +57,7 @@ from typing import Any, Literal
 from midojo.control_plane.grading import Verdict
 from midojo.control_plane.grading import grade as grade_snapshot
 from midojo.control_plane.state import Snapshot, Turn
-from midojo.episode import Episode, InterceptionSettings, ToolPolicy
+from midojo.episode import Episode, InterceptionSettings, ToolPolicy, tool_policy
 from midojo.episode_context import EpisodeContext, EpisodeResult, EpisodeStep
 from midojo.episode_document import EpisodeDocumentError
 from midojo.interception_host import HostInterception
@@ -727,12 +727,7 @@ def _resolve_upstream(episode: Episode, upstream: Any, interception: HostInterce
 
 def _tool_policy(tools: ToolPolicy | None) -> tuple[frozenset[str] | None, tuple[str, ...]]:
     """The episode's tool policy as the interceptor's allowlist and block list."""
-    if tools is None:
-        return None, ()
-    names = {*tools.allowed, *tools.write_disposition}
-    default = tools.write_disposition_default
-    blocked = tuple(sorted(name for name in names if tools.write_disposition.get(name, default) == "block"))
-    return frozenset(tools.allowed), blocked
+    return tool_policy(tools)
 
 
 def _interception(episode: Episode, upstream: Any, given: HostInterception | None) -> HostInterception:
@@ -787,6 +782,18 @@ def open(
     process. ``max_live`` lowers this process's cap (never raises it), and
     ``repeat_of`` is the key of the run this episode repeats, which a runtime
     that isolates neither by reset nor by a fresh target refuses.
+
+    ``run_id`` opens the evaluation in a run that is already open on a control
+    plane (a ``ControlPlaneClient``), and only with the runtime that run
+    already owns: pass a runtime whose run the caller started, and the handle
+    neither starts nor ends it. It is refused without that runtime, because
+    the episode would otherwise be compiled by the served control plane after
+    a sandbox exists.
+
+    ``open`` refuses in this order, before any live-episode slot, port or
+    sandbox: a missing upstream, a runtime the episode cannot build or whose
+    run ``run_id`` does not name, a repeat the runtime cannot isolate, the
+    live-episode cap, and a bind the interceptor cannot use.
     """
     if not isinstance(episode, Episode):
         raise TypeError(f"open expects an Episode, not {type(episode).__name__}")
@@ -795,6 +802,11 @@ def open(
         # Before a context, a runtime or a port exists: an uninstalled provider is a named gap.
         episode.check_runtime_available()
     capabilities = runtime_capabilities(episode.runtime if runtime is None else runtime)
+    if run_id is not None and (runtime is None or not _run_is_open(runtime)):
+        raise ValueError(
+            f"run_id {run_id!r} needs a runtime whose run is open: start the run and pass that runtime, "
+            "or leave run_id out and let the handle start the episode's own run"
+        )
     _check_repeat(repeat_of, capabilities, reset)
     token = _acquire_slot(_limit(max_live))
     loop: _Loop | None = None
