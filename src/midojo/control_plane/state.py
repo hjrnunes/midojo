@@ -23,6 +23,7 @@ from datetime import UTC, date, datetime, time, timedelta, timezone
 from types import MappingProxyType
 from typing import Any
 
+from midojo_sdk import snapshot as sdk_snapshot
 from pydantic import BaseModel
 from pydantic_core import TzInfo
 
@@ -210,21 +211,34 @@ class Snapshot:
         """The runtime observations by source (new copies)."""
         return {source: observed.model_copy(deep=True) for source, observed in self._observations.items()}
 
+    def snapshot_digest(self) -> str:
+        """This snapshot's content digest: what ``snapshot_id`` names, computed again from its content.
+
+        It is :func:`midojo_sdk.snapshot.snapshot_digest` of the JSON form
+        ``GET .../snapshot`` serves (:func:`snapshot_digest`), so a client
+        verifies the snapshot with the SDK alone.
+        """
+        return snapshot_digest(self)
+
     def verified(self) -> Snapshot:
         """A new snapshot of this one's content, shared with no one, once that content is what ``snapshot_id`` names.
 
         The content is read once, through the copying reads, and digested
         again: a snapshot whose content no longer has its ID (one of its
         private copies, or a field, was changed after it was made) raises
-        ValueError, and so does one whose content can't be read back at all
-        (a field deleted, or set to a value of another type). What is
-        returned is checked, and nothing else holds it.
+        :class:`midojo_sdk.snapshot.DigestFault`, and so does one whose content
+        can't be read back at all (a field deleted, or set to a value of
+        another type). What is returned is checked, and nothing else holds it.
         """
         changed = (
             f"Snapshot {getattr(self, 'snapshot_id', None)} of evaluation {getattr(self, 'evaluation_id', None)} "
             "was changed after it was made"
         )
         try:
+            data = _json_data(_snapshot_content(self))
+            if data is not _NOT_JSON:
+                # The SDK checks the ID its JSON form carries, the way a client does.
+                sdk_snapshot.verified({**data, "snapshot_id": self.snapshot_id})
             turns, capture_failures = copy.deepcopy((self.turns, self.capture_failures))
             held = Snapshot(
                 evaluation_id=self.evaluation_id,
@@ -241,10 +255,14 @@ class Snapshot:
                 sealed_at=self.sealed_at,
                 capture_failures=capture_failures,
             )
+        except sdk_snapshot.DigestFault as fault:
+            raise sdk_snapshot.DigestFault(f"{changed}: {fault}") from None
         except Exception as error:
-            raise ValueError(f"{changed}: its content can't be read back ({type(error).__name__}: {error})") from error
+            raise sdk_snapshot.DigestFault(
+                f"{changed}: its content can't be read back ({type(error).__name__}: {error})"
+            ) from error
         if held.snapshot_id != self.snapshot_id:
-            raise ValueError(f"{changed}: its content differs from its snapshot_id")
+            raise sdk_snapshot.DigestFault(f"{changed}: its content differs from its snapshot_id")
         return held
 
     def __hash__(self) -> int:
@@ -260,16 +278,36 @@ class Snapshot:
 def snapshot_digest(snapshot: Snapshot) -> str:
     """``sha256:<hex>`` of the snapshot's content, everything in it but its ID, in a lossless encoding.
 
-    Two snapshots share a digest only when their content is equal. The
-    encoding takes only the values :func:`unsupported_value` accepts, which is
-    all an evaluation holds: the control plane refuses any other where it
-    enters (a call's args, an environment, observations). An injection
-    outcome's ``payload_digest``, ``placed_digest`` and ``slot`` are encoded
-    only when set (:func:`_call_content`), and an observation's later fields
-    only when not empty (:func:`~midojo.observations.digest_content`), so a
-    snapshot without them has the digest it had before they existed.
+    Two snapshots share a digest only when their content is equal. The ID is
+    :func:`midojo_sdk.snapshot.snapshot_digest` of the snapshot's JSON form, the
+    one ``GET .../snapshot`` serves: a sealed snapshot holds only values JSON
+    carries back as the types it keeps, so one implementation names it.
+
+    A snapshot holding a value JSON does not carry back (``bytes``, a date, a
+    tuple or set, a non-finite float, a mapping with a key that is not text) is
+    the documented fallback: MiDojo encodes its Python values
+    (:func:`_canonical`), which keeps that value's type in the digest. Such a
+    snapshot's content is what a client rebuilding it from the served JSON
+    cannot reproduce (``control_plane.client.snapshot_from_response`` refuses
+    it), so no consumer reads its ID back. The fallback takes only the values
+    :func:`unsupported_value` accepts.
+
+    An injection outcome's ``payload_digest``, ``placed_digest`` and ``slot``
+    are encoded only when set (:func:`_call_content`), and an observation's
+    later fields only when not empty
+    (:func:`~midojo.observations.digest_content`), so a snapshot without them
+    has the digest it had before they existed.
     """
-    content = {
+    content = _snapshot_content(snapshot)
+    data = _json_data(content)
+    if data is not _NOT_JSON:
+        return sdk_snapshot.snapshot_digest(data)
+    return f"sha256:{hashlib.sha256(_dumps(_canonical(content)).encode()).hexdigest()}"
+
+
+def _snapshot_content(snapshot: Snapshot) -> dict[str, Any]:
+    """The snapshot's content as Python values, in the digest's order: everything in it but its ID."""
+    return {
         "evaluation_id": snapshot.evaluation_id,
         "run_id": snapshot.run_id,
         "user_task_id": snapshot.user_task_id,
@@ -286,7 +324,42 @@ def snapshot_digest(snapshot: Snapshot) -> str:
             {**dataclasses.asdict(failure), "stage": failure.stage.value} for failure in snapshot.capture_failures
         ],
     }
-    return f"sha256:{hashlib.sha256(_dumps(_canonical(content)).encode()).hexdigest()}"
+
+
+# What ``_json_data`` returns for a value JSON does not carry back as the type it is.
+_NOT_JSON = object()
+
+
+def _json_data(value: Any) -> Any:
+    """``value`` as JSON data, or ``_NOT_JSON`` when JSON does not carry it back as it is.
+
+    The digest's Python content of a sealed snapshot is JSON data exactly when
+    every value in it is None, a ``bool``, an ``int``, a finite ``float``, a
+    ``str``, a ``list``, or a ``dict`` with ``str`` keys: those are the values
+    ``json`` writes and reads back unchanged, so the snapshot's JSON form has
+    the content its ID names. Anything else (``bytes``, a date, a tuple, a set,
+    a non-finite float, a mapping with a key that is not text or is not a
+    ``dict``) takes the fallback encoder.
+    """
+    kind = type(value)
+    if value is None or kind in (str, int, bool):
+        return value
+    if kind is float:
+        return value if value == value and value not in (float("inf"), float("-inf")) else _NOT_JSON
+    if kind is list:
+        items = [_json_data(item) for item in value]
+        return _NOT_JSON if any(item is _NOT_JSON for item in items) else items
+    if kind is dict:
+        data = {}
+        for key, item in value.items():
+            if type(key) is not str:
+                return _NOT_JSON
+            item = _json_data(item)
+            if item is _NOT_JSON:
+                return _NOT_JSON
+            data[key] = item
+        return data
+    return _NOT_JSON
 
 
 # Fields an injection outcome gained after snapshots were first digested: each is encoded only when set.

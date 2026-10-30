@@ -65,6 +65,8 @@ LIGHT_MODULES = (
     "midojo.control_plane.client",
     "midojo.control_plane.inprocess",
     "midojo.control_plane.inprocess_control",
+    # The SDK's snapshot codec, which names a sealed snapshot: stdlib only.
+    "midojo_sdk.snapshot",
     # midojo-run's module, home of run_task, a client of the episode context.
     "midojo.orchestrator",
 )
