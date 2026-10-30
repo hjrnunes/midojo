@@ -38,7 +38,7 @@ from typing import Any
 from midojo_sdk.episode_schema import EPISODE_DOCUMENT_V1
 from midojo_sdk.injection import InjectionPlan
 
-from midojo.episode import Episode, InterceptionSettings, ToolPolicy, thaw
+from midojo.episode import Episode, InterceptionSettings, RuntimeCheckError, ToolPolicy, thaw
 
 SUPPORTED_DOCUMENT_VERSIONS = (EPISODE_DOCUMENT_V1,)
 """The document versions this module writes and reads."""
@@ -101,7 +101,16 @@ _V0_TOP_LEVEL = frozenset({"schema_version", "episode", "tools", "interception",
 
 
 class EpisodeDocumentError(ValueError):
-    """A document MiDojo refuses: an unknown key, a wrong type, or a check that does not fit the runtime."""
+    """A document MiDojo refuses: an unknown key, a wrong type, or a check that does not fit the runtime.
+
+    ``gap`` names why a check does not fit the runtime it declares
+    (``check:openshell-predicate-on-unmanaged-runtime``), for a caller that
+    reports what is missing; it is None for every other refusal.
+    """
+
+    def __init__(self, message: str, *, gap: str | None = None) -> None:
+        self.gap = gap
+        super().__init__(message)
 
 
 class UnsupportedDocumentVersion(EpisodeDocumentError):  # noqa: N818 - named by the document contract, not a lint choice.
@@ -221,6 +230,8 @@ def _read_v1(cls: type[Episode], data: Mapping[str, Any]) -> Episode:
             interception=_interception(data.get("interception")),
             tools=_tools(data.get("tools")),
         )
+    except RuntimeCheckError as exc:
+        raise EpisodeDocumentError(f"episode document: {exc}", gap=exc.gap) from None
     except (TypeError, ValueError) as exc:
         raise EpisodeDocumentError(f"episode document: {exc}") from None
     _environment_type(episode, _string(data.get("environment_type"), "environment_type"))

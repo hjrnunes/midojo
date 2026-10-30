@@ -19,9 +19,10 @@ from midojo_sdk.injection import (
 from pydantic import BaseModel, ValidationError
 
 from midojo.attacks import resolve_source, wrap_payload
+from midojo.capabilities import OPENSHELL_PREDICATE_ON_UNMANAGED_RUNTIME
 from midojo.control_plane.config import CONTROL_TOKEN_ENV
 from midojo.env_inference import infer_environment_type
-from midojo.episode import Episode, UnknownTaskError, freeze
+from midojo.episode import Episode, RuntimeCheckError, UnknownTaskError, freeze
 from midojo.probes import PROBE_PLACEHOLDER_RE, substitute_probes, substitute_probes_deep
 from midojo.runtimes import AgentRuntime, RuntimeRegistry, build_runtime
 from midojo.suite_definition import OpenShellRuntimeDefinition, ProbeDefinition, SuiteDefinition
@@ -275,7 +276,14 @@ class YAMLTaskSuite:
         if not isinstance(self.definition.agent_runtime, OpenShellRuntimeDefinition) and (
             reads_openshell_observations(check.parsed)
         ):
-            raise ValueError(f"Task {task_id!r} uses OpenShell predicates, which require the openshell agent_runtime")
+            runtime_type = self.definition.agent_runtime.type
+            raise RuntimeCheckError(
+                f"Task {task_id!r} uses OpenShell predicates, which require the openshell agent_runtime "
+                f"(the suite's agent_runtime is {runtime_type!r})",
+                check=f"task {task_id!r}",
+                runtime=runtime_type,
+                gap=OPENSHELL_PREDICATE_ON_UNMANAGED_RUNTIME,
+            )
         return check
 
     def _parse_probes(self, task_id: str, definitions: dict[str, ProbeDefinition]) -> dict[str, str]:

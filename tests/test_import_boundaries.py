@@ -79,11 +79,12 @@ SUITE_ENV = {"LITELLM_API_HOST": "models.invalid", "LITELLM_MODEL": "test-model"
 
 # Unimportable in the child: a meta path finder ahead of every other refuses them, after any copy already
 # imported at start-up is purged from sys.modules.
-BLOCKER = """
+BLOCKED_MODULES = ("grpc", "google.protobuf", "openshell")
+BLOCKER = f"""
 import importlib.abc
 import sys
 
-BLOCKED = ("grpc", "google.protobuf", "openshell")
+BLOCKED = {BLOCKED_MODULES!r}
 
 
 def blocked(name):
@@ -93,7 +94,7 @@ def blocked(name):
 class Unavailable(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
         if blocked(fullname):
-            raise ModuleNotFoundError(f"No module named {fullname!r} (blocked by the test)", name=fullname)
+            raise ModuleNotFoundError(f"No module named {{fullname!r}} (blocked by the test)", name=fullname)
         return None
 
 
@@ -101,6 +102,11 @@ for name in [name for name in sys.modules if blocked(name)]:
     del sys.modules[name]
 sys.meta_path.insert(0, Unavailable())
 """
+
+
+def _blocker(*names: str) -> str:
+    """The blocker refusing ``names``, on top of the OpenShell dependencies."""
+    return BLOCKER.replace(repr(BLOCKED_MODULES), repr((*BLOCKED_MODULES, *names)))
 
 
 def _run(code: str) -> subprocess.CompletedProcess[str]:
@@ -202,6 +208,102 @@ def test_with_the_openshell_dependencies_unavailable_a_suite_reads_and_a_scripte
     result = _run(BLOCKER + f"HEAVY = {HEAVY!r}\nLIGHT_MODULES = {LIGHT_MODULES!r}\n" + LIGHT_SCRIPTED_EPISODE)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip().endswith("ok")
+
+
+RUNTIME_GAP_REFUSAL = """
+import socket
+import sys
+import threading
+
+from midojo.capabilities import MissingCapabilityError
+from midojo.control_plane.service import ControlPlane
+from midojo.episode import Episode
+from midojo.episode_context import open_episode
+from midojo.interception_host import HostInterception
+from midojo.runtimes import runtime_capabilities
+
+HEAVY = ("grpc", "google.protobuf", "openshell", "midojo.runtimes.openshell")
+
+
+def loaded():
+    return sorted(name for name in HEAVY if name in sys.modules)
+
+
+# A capability query answers from the definition: no runtime built, no provider imported.
+openshell = runtime_capabilities({"type": "openshell"})
+assert openshell.requires_packages == ("openshell",), openshell
+assert (openshell.resettable, openshell.disposable, openshell.isolates_attempts) == (False, True, True)
+assert runtime_capabilities({"type": "unmanaged"}).isolates_attempts is False
+assert not loaded(), f"a capability query loaded {loaded()}"
+
+# A free port the refusal must leave free: the host interceptor would listen there before the runtime sets up.
+probe = socket.socket()
+probe.bind(("127.0.0.1", 0))
+port = probe.getsockname()[1]
+probe.close()
+
+episode = Episode(runtime={"type": "openshell", "image": "pi"}, turns=["hi"])
+plane = ControlPlane({})
+threads = threading.active_count()
+attempts = {
+    "check_runtime_available": episode.check_runtime_available,
+    "new_runtime": episode.new_runtime,
+    "open_episode": lambda: open_episode(
+        episode,
+        control=plane,
+        interception=HostInterception(upstream="http://127.0.0.1:9/mcp", port=port),
+    ),
+}
+for label, attempt in attempts.items():
+    try:
+        attempt()
+    except MissingCapabilityError as error:
+        assert error.gap == "runtime:openshell:missing-package", (label, error.gap)
+        assert error.capability == "the 'openshell' runtime", (label, error.capability)
+        assert "openshell" in error.packages, (label, error.packages)
+        assert "the 'openshell' runtime is not available" in str(error), (label, str(error))
+    else:
+        raise AssertionError(f"{label} should name the missing package")
+probe = socket.socket()
+probe.bind(("127.0.0.1", port))
+probe.close()
+assert threading.active_count() == threads, f"a refusal left a thread: {threading.enumerate()}"
+assert not loaded(), f"a refusal loaded {loaded()}"
+"""
+
+EIGHT_UNMANAGED_EPISODES = """
+import asyncio
+
+from midojo.control_plane.service import ControlPlane
+from midojo.episode import Episode
+from midojo.episode_context import open_episode
+
+
+async def eight():
+    for _ in range(8):
+        context = open_episode(Episode(runtime={"type": "unmanaged"}, turns=["hi"]), control=ControlPlane({}))
+
+        async def agent(message: str) -> str:
+            return "ok"
+
+        async with context:
+            await context.turn(context.turns[0], agent)
+
+
+asyncio.run(eight())
+print("ok")
+"""
+
+
+def test_an_openshell_episode_without_its_package_is_a_named_gap_before_anything_binds():
+    result = _run(BLOCKER + RUNTIME_GAP_REFUSAL + EIGHT_UNMANAGED_EPISODES)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "ok"
+
+
+def test_the_gap_comes_before_anything_binds_even_with_fastapi_unimportable():
+    result = _run(_blocker("fastapi") + RUNTIME_GAP_REFUSAL)
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.parametrize("module", LIGHT_MODULES)

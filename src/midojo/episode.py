@@ -33,11 +33,19 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from midojo_sdk.injection import InjectionPlan
 from pydantic import BaseModel, TypeAdapter
 
+from midojo.capabilities import OPENSHELL_PREDICATE_ON_UNMANAGED_RUNTIME
 from midojo.delivery import exposure
 from midojo.env_inference import infer_environment_type
 from midojo.observations import FUNCTION_CALLS, EvidenceStatus, evidence_status
 from midojo.observations.openshell import OBSERVATIONS_SOURCE, OpenShellObservations
-from midojo.runtimes import AgentRuntime, RuntimeRegistry, build_runtime
+from midojo.runtimes import (
+    DEFAULT_RUNTIMES,
+    AgentRuntime,
+    RuntimeCapabilities,
+    RuntimeRegistry,
+    build_runtime,
+    runtime_capabilities,
+)
 from midojo.suite_definition import AgentRuntimeDefinition
 from midojo.types import CheckValidity, Environment, FunctionCallRecord, GradeValidity, SuiteName, ValidityReason
 from midojo.verifier import Check, VerificationContext, VerificationResult, parse_check
@@ -71,6 +79,27 @@ class UnknownTaskError(KeyError):
     def __init__(self, detail: str) -> None:
         super().__init__(detail)
         self.detail = detail
+
+
+class RuntimeCheckError(ValueError):
+    """A check needs evidence the episode's runtime cannot collect, refused when the episode is built.
+
+    ``check`` names the role the check has (``security``, ``utility``),
+    ``runtime`` the ``agent_runtime`` type the episode declared, and ``gap``
+    why the check can't run there
+    (``check:openshell-predicate-on-unmanaged-runtime``). It is a
+    ValueError, so a caller that already refuses a check it can't run still
+    catches it, and unlike a bare ValueError it names the gap for a caller
+    that reports what is missing. ``midojo.episode_document`` carries the gap
+    onto the :class:`~midojo.episode_document.EpisodeDocumentError` it raises
+    for a document that asks for such a check.
+    """
+
+    def __init__(self, message: str, *, check: str, runtime: str, gap: str) -> None:
+        self.check = check
+        self.runtime = runtime
+        self.gap = gap
+        super().__init__(message)
 
 
 def freeze(value: Any) -> Any:
@@ -312,12 +341,34 @@ class Episode:
         """A fresh copy of the runtime definition the episode needs."""
         return _RUNTIME_DEFINITION.validate_python(thaw(self.runtime))
 
+    def runtime_requirements(self, *, registry: RuntimeRegistry | None = None) -> RuntimeCapabilities:
+        """What this episode's runtime can do, from its definition: no runtime built, no provider imported.
+
+        See :func:`midojo.runtimes.runtime_capabilities`; ``registry``
+        answers for the types it registers (:data:`midojo.runtimes.DEFAULT_RUNTIMES`
+        unless given).
+        """
+        return runtime_capabilities(self.runtime, registry=registry)
+
+    def check_runtime_available(self, *, registry: RuntimeRegistry | None = None) -> None:
+        """Raise :class:`~midojo.capabilities.MissingCapabilityError`, naming the gap, when the runtime isn't available.
+
+        It builds no runtime and binds nothing: a caller checks before a
+        handle exists, so an uninstalled provider is reported as
+        ``runtime:openshell:missing-package`` (the error's ``gap``) rather than
+        as a failed setup.
+        """
+        (registry if registry is not None else DEFAULT_RUNTIMES).check_available(self._runtime_type())
+
     def new_runtime(self, *, registry: RuntimeRegistry | None = None) -> AgentRuntime:
         """A fresh runtime for one run of this episode: it shares no state with any other.
 
         It is built by ``registry`` (the default runtime registry when None);
-        see :func:`midojo.runtimes.build_runtime`.
+        see :func:`midojo.runtimes.build_runtime`. The runtime's provider is
+        checked first (see :meth:`check_runtime_available`), so a missing
+        package is a named gap before anything is constructed.
         """
+        self.check_runtime_available(registry=registry)
         return build_runtime(self.suite_name or DEFAULT_EPISODE_NAME, self.runtime_definition(), registry=registry)
 
     def provision_environment(self) -> Environment:
@@ -351,17 +402,33 @@ class Episode:
 
         dump_document(self, path)
 
+    def _runtime_type(self) -> str:
+        return cast(Mapping[str, Any], self.runtime)["type"]
+
     def _on_openshell(self) -> bool:
-        return cast(Mapping[str, Any], self.runtime)["type"] == "openshell"
+        return self._runtime_type() == "openshell"
 
     def _check(self, name: str) -> Check | None:
-        """A fresh check parsed from the ``security`` or ``utility`` spec, or None without one."""
+        """A fresh check parsed from the ``security`` or ``utility`` spec, or None without one.
+
+        A check that reads OpenShell observations on a runtime that collects
+        none is refused here, when the episode is built, with the gap
+        ``check:openshell-predicate-on-unmanaged-runtime``: the run could never
+        decide it, and an invalid grade is worse than a refused episode.
+        """
         spec = getattr(self, name)
         if spec is None:
             return None
         check = parse_check(thaw(spec), registry=self.verifiers)
         if not self._on_openshell() and reads_openshell_observations(check.parsed):
-            raise ValueError(f"The {name} check uses OpenShell predicates, which require the openshell agent_runtime")
+            runtime_type = self._runtime_type()
+            raise RuntimeCheckError(
+                f"The {name} check uses OpenShell predicates, which require the openshell agent_runtime "
+                f"(the episode's agent_runtime is {runtime_type!r})",
+                check=name,
+                runtime=runtime_type,
+                gap=OPENSHELL_PREDICATE_ON_UNMANAGED_RUNTIME,
+            )
         return check
 
     def grade(

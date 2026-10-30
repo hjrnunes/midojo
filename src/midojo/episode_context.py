@@ -149,7 +149,11 @@ class EpisodeContext:
     ) -> None:
         self.episode = episode
         # A runtime the caller gives belongs to a run the caller started; one built here is started and ended here.
+        # Only one built here is checked first: an unavailable runtime must be a named gap before anything exists,
+        # not a failure partway through a run.
         self._owns_runtime = runtime is None
+        if self._owns_runtime:
+            episode.check_runtime_available()
         self.runtime: AgentRuntime = runtime if runtime is not None else episode.new_runtime()
         self.interception = interception
         self.run_id = run_id
