@@ -140,6 +140,86 @@ class AgentRuntime(UnmanagedRuntime):
         return SimpleNamespace(exit_code=0, stdout=f"  reply to {prompt}\n", stderr="")
 
 
+class ReapingRuntime(AgentRuntime):
+    """A disposable runtime that names its run's workspace, as OpenShell does, and records its steps."""
+
+    def __init__(self, workspace: str = "midojo-episo-pi-test", *, fail: str | None = None) -> None:
+        super().__init__()
+        self.workspace = workspace
+        self.workspace_name = ""
+        self.cluster = "the-gateway"
+        self.fail = fail
+        self.steps: list[str] = []
+        self.reapers_at_setup: int | None = None
+        # How many reaper processes exist: a test plugs its record in to see the workspace watched at setup.
+        self.watched: Callable[[], int] | None = None
+
+    def start_run(self, run_id, *, suite_name):
+        self.steps.append("start_run")
+        self.workspace_name = self.workspace
+        return f"workspace {self.workspace_name}"
+
+    def setup(self, injections, **kwargs):
+        self.steps.append("setup")
+        self.reapers_at_setup = self.watched() if self.watched is not None else 0
+        if self.fail == "setup":
+            raise RuntimeError("setup failed")
+
+    def observe(self):
+        self.steps.append("observe")
+        return {}
+
+    def teardown(self):
+        self.steps.append("teardown")
+
+    def end_run(self):
+        self.steps.append("end_run")
+
+
+class FakeReaper:
+    """The detached reaper process, as the handle sees it: the command and the calls that end it."""
+
+    def __init__(self, argv: list[str], **kwargs: object) -> None:
+        self.argv = list(argv)
+        self.kwargs = kwargs
+        self.returncode: int | None = None
+        self.terminated = False
+        self.killed = False
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.terminated = True
+        self.returncode = 0
+
+    def wait(self, timeout: float | None = None) -> int:
+        self.returncode = 0
+        return 0
+
+    def kill(self) -> None:
+        self.killed = True
+        self.returncode = -9
+
+
+def record_reapers(monkeypatch: pytest.MonkeyPatch) -> list[FakeReaper]:
+    """Record every reaper the handle starts, instead of starting one: the command is what the test reads."""
+    started: list[FakeReaper] = []
+
+    def popen(argv: list[str], **kwargs: object) -> FakeReaper:
+        process = FakeReaper(argv, **kwargs)
+        started.append(process)
+        return process
+
+    monkeypatch.setattr(episode_handle.subprocess, "Popen", popen)
+    return started
+
+
+def reaper_flag(process: FakeReaper, flag: str) -> str:
+    """The value the reaper command gives ``flag``."""
+    return process.argv[process.argv.index(flag) + 1]
+
+
 class FailingSeal(ControlPlane):
     """A control plane whose seal fails: the evaluation stays unsealed."""
 
@@ -576,6 +656,65 @@ def test_an_openshell_episode_without_its_package_is_refused_before_a_handle_exi
         episode_handle.open(episode, upstream=scripted_upstream())
     assert caught.value.gap == "runtime:openshell:missing-package"
     assert calls == []
+
+
+def test_a_reaper_watches_the_workspace_of_a_run_the_handle_started_for_the_caller(monkeypatch):
+    started = record_reapers(monkeypatch)
+    runtime = ReapingRuntime("midojo-episo-pi-caller")
+    runtime.watched = lambda: len(started)
+    with episode_handle.open(weather_episode(), runtime=runtime, upstream=scripted_upstream()) as handle:
+        assert handle.capabilities.name == "openshell"
+        # The workspace exists once start_run returns, so the reaper already covers setup's sandbox.
+        assert runtime.reapers_at_setup == 1
+        assert [reaper_flag(process, "--workspace") for process in started] == [runtime.workspace]
+    [reaper] = started
+    assert reaper.argv[1:3] == ["-m", "midojo._sandbox_reaper"]
+    assert reaper_flag(reaper, "--driver") == str(os.getpid())
+    assert reaper_flag(reaper, "--cluster") == "the-gateway"
+    assert reaper.kwargs == {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "start_new_session": True}
+    # A normal close stops the reaper before the runtime's own end_run deletes the workspace.
+    assert reaper.terminated is True and reaper.killed is False
+    assert runtime.steps == ["start_run", "setup", "observe", "teardown", "end_run"]
+
+
+def test_a_reaper_watches_the_workspace_of_the_runtime_the_context_built_for_the_episode(monkeypatch):
+    started = record_reapers(monkeypatch)
+    runtime = ReapingRuntime("midojo-episo-pi-built")
+    runtime.watched = lambda: len(started)
+    monkeypatch.setattr(Episode, "new_runtime", lambda self, **kwargs: runtime)
+    with episode_handle.open(weather_episode(), upstream=scripted_upstream()) as handle:
+        assert handle.capabilities.name == "openshell"
+        assert runtime.reapers_at_setup == 1
+        assert [reaper_flag(process, "--workspace") for process in started] == [runtime.workspace]
+    [reaper] = started
+    assert reaper.argv[1:3] == ["-m", "midojo._sandbox_reaper"]
+    assert reaper_flag(reaper, "--driver") == str(os.getpid())
+    assert reaper_flag(reaper, "--cluster") == "the-gateway"
+    assert reaper.terminated is True and reaper.killed is False
+    # The context owns the run it started, so its end_run deleted the workspace after the close stopped the reaper.
+    assert runtime.steps == ["start_run", "setup", "observe", "teardown", "end_run"]
+
+
+def test_a_failed_open_stops_the_reaper_it_started(monkeypatch):
+    started = record_reapers(monkeypatch)
+    runtime = ReapingRuntime("midojo-episo-pi-broken", fail="setup")
+    runtime.watched = lambda: len(started)
+    with pytest.raises(RuntimeError, match="setup failed"):
+        episode_handle.open(weather_episode(), runtime=runtime, upstream=scripted_upstream())
+    # The reaper covered setup, then the failed open stopped it: nothing outlives a handle that never existed.
+    assert runtime.reapers_at_setup == 1
+    [reaper] = started
+    assert reaper.terminated is True
+
+
+def test_a_run_the_caller_started_is_neither_reaped_nor_ended(monkeypatch):
+    started = record_reapers(monkeypatch)
+    runtime = ReapingRuntime("midojo-episo-pi-callers")
+    runtime.start_run("the-callers-run", suite_name="weather")
+    with episode_handle.open(weather_episode(), runtime=runtime, upstream=scripted_upstream()):
+        pass
+    assert started == []
+    assert runtime.steps == ["start_run", "setup", "observe", "teardown"]
 
 
 def test_a_killed_driver_leaves_no_listening_interceptor_or_process():

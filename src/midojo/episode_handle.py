@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import contextlib
 import dataclasses
 import logging
 import os
@@ -49,7 +50,8 @@ import sys
 import threading
 import uuid
 import weakref
-from collections.abc import Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import AbstractContextManager
 from types import TracebackType
 from typing import Any, Literal
 
@@ -57,7 +59,7 @@ from midojo.control_plane.grading import Verdict
 from midojo.control_plane.grading import grade as grade_snapshot
 from midojo.control_plane.state import Snapshot, Turn
 from midojo.episode import Episode, InterceptionSettings, ToolPolicy
-from midojo.episode_context import EpisodeContext, EpisodeResult
+from midojo.episode_context import EpisodeContext, EpisodeResult, EpisodeStep
 from midojo.episode_document import EpisodeDocumentError
 from midojo.interception_host import HostInterception
 from midojo.runtimes import AgentRuntime, RuntimeCapabilities, is_disposable, runtime_capabilities
@@ -358,15 +360,7 @@ class _Resource:
     def _stop_reaper(self) -> None:
         process = self.reaper
         self.reaper = None
-        if process is None or process.poll() is not None:
-            return
-        try:
-            process.terminate()
-            process.wait(timeout=_REAPER_STOP_SECONDS)
-        except BaseException:
-            logger.info("Couldn't stop the sandbox reaper", exc_info=True)
-            if process.poll() is None:
-                process.kill()
+        _stop_reaper(process)
 
 
 _sessions: weakref.WeakSet[_Resource] = weakref.WeakSet()
@@ -440,6 +434,38 @@ def _reaper(runtime: AgentRuntime) -> subprocess.Popen[bytes] | None:
     except OSError:
         logger.info("Couldn't start the sandbox reaper for %s", workspace, exc_info=True)
         return None
+
+
+def _stop_reaper(process: subprocess.Popen[bytes] | None) -> None:
+    """Stop a reaper before it acts: the runtime's own teardown, or a failed open, freed the workspace."""
+    if process is None or process.poll() is not None:
+        return
+    try:
+        process.terminate()
+        process.wait(timeout=_REAPER_STOP_SECONDS)
+    except BaseException:
+        logger.info("Couldn't stop the sandbox reaper", exc_info=True)
+        if process.poll() is None:
+            process.kill()
+
+
+def _reaper_after_start_run(start: Callable[[], None]) -> Callable[[EpisodeStep], AbstractContextManager[object]]:
+    """The context's progress steps, plus a ``start`` as soon as its own ``start_run`` made the workspace.
+
+    A step's context manager leaves once the step returned or raised, so the
+    reaper watches a run the context started before ``setup`` creates its
+    sandbox: a driver killed during setup still leaves nothing behind.
+    """
+
+    @contextlib.contextmanager
+    def progress(step: EpisodeStep) -> Iterator[None]:
+        try:
+            yield
+        finally:
+            if step == "start_run":
+                start()
+
+    return progress
 
 
 # --- the handle ---
@@ -758,6 +784,14 @@ def open(
     loop: _Loop | None = None
     context: EpisodeContext | None = None
     started_run = False
+    reaper: subprocess.Popen[bytes] | None = None
+
+    def start_reaper() -> None:
+        """Watch the run's workspace, wherever the run was started: the handle, or the context it gave none."""
+        nonlocal reaper
+        if reaper is None and context is not None:
+            reaper = _reaper(context.runtime)
+
     try:
         context = EpisodeContext(
             episode,
@@ -766,6 +800,8 @@ def open(
             control=control,
             run_id=run_id,
             reset=reset,
+            # A context that builds the runtime starts its run itself: watch it as soon as start_run returns.
+            progress=_reaper_after_start_run(start_reaper),
         )
         loop = _Loop()
         if runtime is not None and hasattr(runtime, "start_run") and not _run_is_open(runtime):
@@ -777,6 +813,8 @@ def open(
                 )
             )
             started_run = True
+            # The run's workspace exists now, before setup makes the sandbox: a driver killed from here on is reaped.
+            start_reaper()
         loop.call(context.__aenter__())
     except BaseException:
         if loop is not None:
@@ -786,6 +824,7 @@ def open(
                 except BaseException:
                     logger.info("Couldn't end a run whose evaluation never opened", exc_info=True)
             loop.stop()
+        _stop_reaper(reaper)
         _release_slot(token)
         raise
     assert loop is not None and context is not None
@@ -797,7 +836,7 @@ def open(
         token=token,
         runtime=built,
         ends_run=started_run,
-        reaper=_reaper(built) if started_run else None,
+        reaper=reaper,
     )
     handle = EpisodeHandle(resource)
     _sessions.add(resource)
