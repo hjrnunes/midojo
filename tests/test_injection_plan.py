@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 from fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult, TextContent
+from midojo_sdk import placement
 from midojo_sdk.injection import (
     CapabilityError,
     Channel,
@@ -557,6 +558,26 @@ def test_a_nonempty_plan_with_an_injected_recorder_requires_an_evaluation_bindin
             upstream_transport=object(),
             plan=InjectionPlan((_instruction(),)),
         )
+
+
+def test_a_plan_engine_with_a_nonempty_plan_requires_an_evaluation_binding():
+    with pytest.raises(ValueError, match="needs an evaluation_id"):
+        MidojoMCP(
+            "proxy",
+            recorder=CapturingRecorder(),
+            upstream_transport=object(),
+            engine=placement.PlanPlacementEngine(InjectionPlan((_instruction(),))),
+        )
+
+
+def test_a_plan_engine_with_a_nonempty_plan_accepts_an_evaluation_binding():
+    MidojoMCP(
+        "proxy",
+        recorder=CapturingRecorder(),
+        upstream_transport=object(),
+        engine=placement.PlanPlacementEngine(InjectionPlan((_instruction(),))),
+        evaluation_id="evaluation-1",
+    )
 
 
 def test_midojo_mcp_requires_an_exact_plan_and_an_upstream_to_deliver_it():

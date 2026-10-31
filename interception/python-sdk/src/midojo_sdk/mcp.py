@@ -307,7 +307,17 @@ class MidojoMCP:
             raise ValueError("evaluation_id must be a non-empty str or None.")
         if recorder is None and evaluation_id is not None:
             raise ValueError("evaluation_id is only used with an injected recorder.")
-        if recorder is not None and plan and evaluation_id is None:
+        placement_engine = (
+            placement.PlanPlacementEngine(plan, evaluation_id=evaluation_id) if engine is None else engine
+        )
+        if (
+            recorder is not None
+            and evaluation_id is None
+            and isinstance(placement_engine, placement.Planned)
+            and placement_engine.plan
+        ):
+            # A plan's own engine counts occurrences per evaluation, so a recorder needs the binding whether the
+            # plan arrived through ``plan=`` or through an engine built from it.
             raise ValueError("A non-empty plan with an injected recorder needs an evaluation_id.")
         self._fastmcp = FastMCP(name)
         self._control_plane_url = control_plane_url
@@ -320,9 +330,7 @@ class MidojoMCP:
         self._recorder = recorder
         self._world = world
         self._evaluation_id = evaluation_id
-        self._engine: placement.PlacementEngine = (
-            placement.PlanPlacementEngine(plan, evaluation_id=evaluation_id) if engine is None else engine
-        )
+        self._engine: placement.PlacementEngine = placement_engine
         self._validate_plan()
         if self.injection_plan and self._upstream is None:
             raise CapabilityError(
