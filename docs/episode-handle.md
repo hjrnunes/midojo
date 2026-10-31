@@ -32,7 +32,7 @@ Entering the handle starts the runtime, opens the evaluation, starts the interce
 | `max_live` | Lower this process's cap for open handles. It never raises the cap. |
 | `repeat_of` | The key of the run this episode repeats. A runtime that neither resets nor replaces its target refuses the repeat with `RepeatWithoutResetError`, since the two attempts would share one target. |
 
-`open` checks its arguments in a fixed order, before it binds a port, allocates a sandbox or takes a live-episode slot, so the first refusal names what to fix:
+`open` checks its arguments in a fixed order, so the first refusal names what to fix. Steps 1 to 5 allocate nothing, so they run before any sandbox, port or live-episode slot. The last two steps are the cap and the bind, and each refuses before it takes the slot or binds the port:
 
 1. The episode is an `Episode`; otherwise `TypeError`.
 2. The upstream: `upstream=` or the episode's `interception.upstream`; with neither, `EpisodeDocumentError`.

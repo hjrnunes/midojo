@@ -77,6 +77,8 @@ The seam is `PlacementEngine`:
 
 `PlanPlacementEngine(plan, evaluation_id=...)` is the default: `MidojoMCP(..., plan=plan)` builds one. Pass `engine=` to place with an engine of your own. A server takes a plan or an engine, not both, and one given an engine holds no plan (`mcp.injection_plan` is empty unless that engine has one). `place_field(result, path, text, mode=...)` returns a result with one structured-content field placed, for an engine that places on its own; `mcp.injection_engine` is the engine in use.
 
+A server checks the plan only when its engine declares one (`placement.Planned`). An engine without a plan skips the capability gaps, the mirrored-upstream requirement and the simulated-tool gaps, because each of those reads `mcp.injection_plan`; such an engine is responsible for the placements it makes. A `PlanPlacementEngine` counts occurrences per evaluation, so a server built from one with a recorder needs an `evaluation_id`, whether the plan arrives through `plan=` or through `engine=`.
+
 ## Recorder and WorldState
 
 `midojo_sdk.recorder` defines the two seams an interception layer talks to. A `Recorder` starts and finishes the calls of one evaluation, each with its disposition. A `WorldState` reads the evaluation's simulated environment (`read()`: its revision and fields) and changes it (`change(values, expected_revision=None)`: one atomic step, or `None` when `expected_revision` is stale). `midojo_sdk.client.AgentControlPlaneClient` implements both over HTTP for one session; `midojo.control_plane.inprocess.InProcessAgentClient` implements both in the control plane's own process, with no HTTP.
