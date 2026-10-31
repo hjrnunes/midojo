@@ -44,7 +44,6 @@ Issues = "https://github.com/asago-ai/midojo/issues"
 [project.optional-dependencies]
 # Dependencies for running the bundled suites' example agents (a2a, ogx, ...).
 suites = [
-    "midojo-sdk[mcp]",
     "fastmcp",
     "ogx>=0.8.0,<0.9.0",
     "ogx-client>=0.8.0,<0.9.0",
@@ -56,7 +55,6 @@ suites = [
 # The PyRIT route (midojo.pyrit): a PyRIT target and scorers over MiDojo
 # episodes. PyRIT's API broke at 0.10 and 1.0, so it is pinned to 1.1.
 pyrit = [
-    "midojo-sdk[mcp]",
     "pyrit>=1.1.0,<1.2",
 ]
 dev = [

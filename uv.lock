@@ -2174,14 +2174,12 @@ dev = [
     { name = "ruff" },
 ]
 pyrit = [
-    { name = "midojo-sdk", extra = ["mcp"] },
     { name = "pyrit" },
 ]
 suites = [
     { name = "chardet" },
     { name = "faiss-cpu" },
     { name = "fastmcp" },
-    { name = "midojo-sdk", extra = ["mcp"] },
     { name = "ogx" },
     { name = "ogx-client" },
     { name = "openai" },
@@ -2200,8 +2198,6 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28" },
     { name = "jsonschema", marker = "extra == 'dev'", specifier = ">=4.23" },
     { name = "midojo-sdk", extras = ["mcp"], editable = "interception/python-sdk" },
-    { name = "midojo-sdk", extras = ["mcp"], marker = "extra == 'pyrit'", editable = "interception/python-sdk" },
-    { name = "midojo-sdk", extras = ["mcp"], marker = "extra == 'suites'", editable = "interception/python-sdk" },
     { name = "midojo-sdk", extras = ["mcp", "langchain"], marker = "extra == 'dev'", editable = "interception/python-sdk" },
     { name = "ogx", marker = "extra == 'suites'", specifier = ">=0.8.0,<0.9.0" },
     { name = "ogx-client", marker = "extra == 'suites'", specifier = ">=0.8.0,<0.9.0" },
