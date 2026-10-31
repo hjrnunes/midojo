@@ -57,7 +57,7 @@ from typing import Any, Literal
 from midojo.control_plane.grading import Verdict
 from midojo.control_plane.grading import grade as grade_snapshot
 from midojo.control_plane.state import Snapshot, Turn
-from midojo.episode import Episode, InterceptionSettings, ToolPolicy, tool_policy
+from midojo.episode import Episode, InterceptionSettings, tool_policy
 from midojo.episode_context import EpisodeContext, EpisodeResult, EpisodeStep
 from midojo.episode_document import EpisodeDocumentError
 from midojo.interception_host import HostInterception
@@ -725,11 +725,6 @@ def _resolve_upstream(episode: Episode, upstream: Any, interception: HostInterce
     )
 
 
-def _tool_policy(tools: ToolPolicy | None) -> tuple[frozenset[str] | None, tuple[str, ...]]:
-    """The episode's tool policy as the interceptor's allowlist and block list."""
-    return tool_policy(tools)
-
-
 def _interception(episode: Episode, upstream: Any, given: HostInterception | None) -> HostInterception:
     """The host interception one evaluation runs: the given one, or the episode's settings, with its tool policy."""
     settings = given
@@ -745,7 +740,7 @@ def _interception(episode: Episode, upstream: Any, given: HostInterception | Non
         settings = HostInterception(**options)
     if settings is None:
         settings = HostInterception(upstream=upstream)
-    allowed, blocked = _tool_policy(episode.tools)
+    allowed, blocked = tool_policy(episode.tools)
     return dataclasses.replace(settings, allowed=allowed, blocked=blocked)
 
 
@@ -790,10 +785,11 @@ def open(
     the episode would otherwise be compiled by the served control plane after
     a sandbox exists.
 
-    ``open`` refuses in this order, before any live-episode slot, port or
-    sandbox: a missing upstream, a runtime the episode cannot build or whose
-    run ``run_id`` does not name, a repeat the runtime cannot isolate, the
-    live-episode cap, and a bind the interceptor cannot use.
+    ``open`` refuses in this order: a missing upstream, a runtime the episode
+    cannot build or whose run ``run_id`` does not name, and a repeat the
+    runtime cannot isolate, before any sandbox, port or live-episode slot;
+    then the live-episode cap and the interceptor's bind, each before it takes
+    the resource it names.
     """
     if not isinstance(episode, Episode):
         raise TypeError(f"open expects an Episode, not {type(episode).__name__}")

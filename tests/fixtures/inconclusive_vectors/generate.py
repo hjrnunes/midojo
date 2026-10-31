@@ -93,9 +93,8 @@ from midojo.control_plane.models import SnapshotResponse
 from midojo.control_plane.routers.runs import snapshot_response
 from midojo.control_plane.service import ControlPlane
 from midojo.control_plane.state import snapshot_digest
-from midojo.episode import Episode
+from midojo.episode import Episode, tool_policy
 from midojo.episode_document import dump_document
-from midojo.episode_handle import _tool_policy
 from midojo.interception_host import HostInterception
 from midojo.runtimes import UnmanagedRuntime
 
@@ -232,7 +231,7 @@ async def run_through_handle(recording: dict[str, Any], built: Episode, case: di
     control = ControlPlane({}, config=AppConfig(closure_wait_seconds=0))
     # The context takes an interception's policy as given, so the recipe reads the episode's tool
     # policy the way the episode handle does: the case's blocked call is the document's disposition.
-    allowed, blocked = _tool_policy(built.tools)
+    allowed, blocked = tool_policy(built.tools)
     context = midojo.open_episode(
         built,
         runtime=UnmanagedRuntime(),
