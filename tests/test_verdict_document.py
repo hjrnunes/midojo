@@ -51,7 +51,7 @@ def test_a_verdict_round_trips_through_its_v1_document() -> None:
 
 
 def test_the_v0_vector_is_the_cm58_artifact_byte_for_byte() -> None:
-    # Copied from asago-notes/build/wp-evidence/asago-cm.58/runs/delivery2-scn051-execute/stages/execute/output/midojo/SCN-051/generation_capture/bundle/verdict.json.
+    # Copied from the cm.58 delivery run's sealed verdict.json.
     data = (FIXTURES / "v0_cm58_verdict.json").read_bytes()
 
     assert hashlib.sha256(data).hexdigest() == "1bb55e5f91705c826a51823d2d885833335707dbd7ff75a02e81d045e980eaf7"

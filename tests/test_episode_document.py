@@ -377,7 +377,7 @@ def test_each_bundled_suite_compiles_every_pair_to_a_valid_document(suite_name: 
 
 
 def test_the_v0_vector_is_the_cm58_artifact_byte_for_byte() -> None:
-    # Copied from asago-notes/build/wp-evidence/asago-cm.58/runs/delivery2-scn051-compile/episode/episode.json.
+    # Copied from the cm.58 delivery run's compiled episode.json.
     data = (FIXTURES / "v0_cm58_episode.json").read_bytes()
 
     assert hashlib.sha256(data).hexdigest() == "2ed42034d7332094ca1548947da6cc0139181596f9c3c187e9961c5448969e49"

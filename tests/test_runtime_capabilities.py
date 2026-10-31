@@ -1,4 +1,4 @@
-"""An episode's runtime is a declared need: what it can do, and what is refused when it cannot (asago-90ji.3).
+"""An episode's runtime is a declared need: what it can do, and what is refused when it cannot.
 
 The capability query answers from the runtime's definition: no runtime built, no sandbox created, no
 provider imported. A missing package is a named gap raised before anything binds. A check that needs
