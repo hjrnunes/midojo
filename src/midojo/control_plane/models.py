@@ -49,7 +49,9 @@ _INTERCEPTION_DESCRIPTION = (
     "the evaluation's session, which the target may hold) or host (an interceptor the host runs outside the target "
     "records them; the target is given only its tool endpoint). It sets the provenance of the records the session "
     "makes. With agent, an evaluation sealed without any call record has function_calls evidence incomplete: a "
-    "hook that failed open records nothing, so no record is not evidence of no call."
+    "hook that failed open records nothing, so no record is not evidence of no call. An unfinished call the session "
+    "can no longer report marks function_calls incomplete too: revoked or expired, the session cannot finish it, "
+    "so the record keeps a call whose result is unknown."
 )
 
 

@@ -1,7 +1,9 @@
 """Validate and evaluate a tool-call condition as ``tool-call-condition-v2`` states it.
 
 Conformance is the contract's own vectors, copied unedited into
-``tests/fixtures/tool_call_condition/``; they must never be edited by hand.
+``tests/fixtures/tool_call_condition/`` under the contract's layout; they must
+never be edited by hand. ``CONTRACT.lock`` in that copy is the reference: it
+names the version and every file's digest.
 Validation is unchanged from ``tool-call-condition-v1``.
 
 Every comparison is true, false, or unknown (``None``). The vectors pin the

@@ -41,6 +41,24 @@ pin them.
 `../CONTRACT.lock` records the SHA-256 digest of each file. Consumers copy the
 directory byte for byte.
 
+## Vendoring
+
+To vendor this contract, copy `tool-call-condition-v2/` byte for byte (a
+consumer that keeps the whole contract copies `../VERSIONING.md` and
+`../CONTRACT.lock` too). A vendored version directory needs no other producer
+file.
+
+Verify a copy in one of two ways:
+
+- compare each file's SHA-256 with the digest `CONTRACT.lock` records for its
+  path, or
+- run the producer's `scripts/sync_tool_call_condition.py --check` with the
+  consumer's checkout (`--consumer`, `--midojo`, `--garak`).
+
+`--write` refreshes a copy from the producer. A copy that carries
+`CONTRACT.lock` references the contract: the lock names the version and every
+digest.
+
 ## Structure
 
 A condition is an object with exactly one key, `comparisons`: a non-empty

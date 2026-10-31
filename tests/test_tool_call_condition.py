@@ -19,16 +19,17 @@ from midojo.yaml_task_suite import YAMLTaskSuite
 FIXTURES = Path(__file__).parent / "fixtures" / "tool_call_condition"
 V1 = "tool-call-condition-v1"
 V2 = "tool-call-condition-v2"
-# The v1 vectors sit at the top of the fixture folder; the v2 kit keeps the contract's own layout.
-V1_FIXTURES = {f"{V1}/vectors/{name}": FIXTURES / name for name in ("evaluate.json", "validate.json")}
+# The copy keeps the contract's own layout; CONTRACT.lock is its reference to
+# the producer's contract: it names the version and records every digest.
+V1_FIXTURES = {f"{V1}/vectors/{name}": FIXTURES / V1 / "vectors" / name for name in ("evaluate.json", "validate.json")}
 
 
 def _vectors(path: Path) -> list[dict]:
     return json.loads(path.read_text())["vectors"]
 
 
-V1_VALIDATE = _vectors(FIXTURES / "validate.json")
-V1_EVALUATE = _vectors(FIXTURES / "evaluate.json")
+V1_VALIDATE = _vectors(FIXTURES / V1 / "vectors" / "validate.json")
+V1_EVALUATE = _vectors(FIXTURES / V1 / "vectors" / "evaluate.json")
 V2_VALIDATE = _vectors(FIXTURES / V2 / "vectors" / "validate.json")
 V2_EVALUATE = _vectors(FIXTURES / V2 / "vectors" / "evaluate.json")
 V2_EVALUATE_BY_ID = {vector["id"]: vector for vector in V2_EVALUATE}
@@ -52,15 +53,19 @@ def _evaluated(vector: dict) -> tuple:
 
 def test_every_fixture_file_matches_the_contract_lock():
     lock = json.loads((FIXTURES / "CONTRACT.lock").read_text())
-    assert (lock["contract"], lock["version"]) == ("tool-call-condition", V2)
-    v2_files = {name: FIXTURES / name for name in lock["files"] if name.startswith(f"{V2}/")}
-    assert set(v2_files) == {
-        f"{V2}/README.md",
-        f"{V2}/schema.json",
-        f"{V2}/vectors/evaluate.json",
-        f"{V2}/vectors/validate.json",
+    assert (lock["authority"], lock["contract"], lock["version"]) == (
+        "asago-scenario-generator",
+        "tool-call-condition",
+        V2,
+    )
+    assert V2 in (FIXTURES / V2 / "README.md").read_text()
+    on_disk = {
+        path.relative_to(FIXTURES).as_posix(): path
+        for path in FIXTURES.rglob("*")
+        if path.is_file() and path.name != "CONTRACT.lock"
     }
-    for name, path in {**V1_FIXTURES, **v2_files}.items():
+    assert set(on_disk) == set(lock["files"]), "the copy holds exactly the contract's files"
+    for name, path in on_disk.items():
         assert hashlib.sha256(path.read_bytes()).hexdigest() == lock["files"][name], name
 
 

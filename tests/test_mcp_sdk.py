@@ -213,6 +213,28 @@ async def test_midojo_mcp_records_and_simulates_on_the_control_plane(client, bac
 
 
 @pytest.mark.asyncio
+async def test_a_blocked_call_logs_no_traceback(client, backend, capfd):
+    """A blocked call is an outcome, not a fault: it is logged without FastMCP's error traceback."""
+    run, evaluation = _new_evaluation(client)
+    mcp = backend.mcp("test", evaluation["session_token"])
+    mcp.block("delete_city")
+
+    @mcp.tool()
+    async def delete_city(ctx: ToolContext, city: str) -> str:
+        """Delete a city."""
+        raise AssertionError("a blocked tool never runs")
+
+    with pytest.raises(ToolError, match=BLOCKED_REASON):
+        await mcp._fastmcp.call_tool("delete_city", {"city": "New York"})
+
+    printed = capfd.readouterr()
+    assert "Traceback" not in printed.out + printed.err
+    assert "ToolError" not in printed.out + printed.err
+    [call] = client.get(f"/runs/{run['id']}/evaluations/{evaluation['id']}/function-calls").json()
+    assert (call["function"], call["blocked"], call["complete"]) == ("delete_city", True, True)
+
+
+@pytest.mark.asyncio
 async def test_midojo_mcp_raises_the_same_rejection_on_both_implementations(client, backend):
     run, evaluation = _new_evaluation(client)
     mcp = backend.mcp("test", evaluation["session_token"])

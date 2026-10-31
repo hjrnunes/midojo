@@ -52,7 +52,7 @@ from midojo.control_plane.main import create_app
 from midojo.control_plane.models import CreateFunctionCallRecord, CreateFunctionCallStart
 from midojo.control_plane.service import ById, BySession, ControlPlane
 from midojo.control_plane.state import Stage, snapshot_digest, unsupported_value
-from midojo.episode import MAX_NESTING_DEPTH, Episode
+from midojo.episode import MAX_NESTING_DEPTH, Episode, ToolPolicy
 from midojo.episode_context import AgentBinding, EpisodeContext, _refused, open_episode
 from midojo.interception_host import HostInterception, HostInterceptor
 from midojo.runtimes import ResettableRuntime, UnmanagedRuntime
@@ -191,6 +191,27 @@ async def test_an_in_agent_episode_binds_the_session_for_the_agents_own_intercep
         await ep.turn("What's the weather in Boston?", agent)
     [call] = ep.sealed.function_calls
     assert (call.function, call.provenance) == ("get_weather", "agent")
+
+
+def test_open_episode_refuses_a_blocking_tool_policy_without_an_interceptor_to_enforce_it():
+    """Only the host interceptor enforces Episode.tools: the async path refuses a block it can't apply."""
+    episode = weather_episode(
+        tools=ToolPolicy(allowed=("get_weather", "book_shelter"), write_disposition={"book_shelter": "block"})
+    )
+    with pytest.raises(ValueError, match="book_shelter") as refused_open:
+        open_episode(episode, runtime=UnmanagedRuntime())
+    assert "midojo.episode_handle.open" in str(refused_open.value)
+
+
+def test_open_episode_accepts_a_blocking_tool_policy_its_own_interceptor_enforces():
+    """A caller that passes an interceptor with the same block already enforces the policy."""
+    episode = weather_episode(
+        tools=ToolPolicy(allowed=("get_weather", "book_shelter"), write_disposition={"book_shelter": "block"})
+    )
+    interception = HostInterception(
+        upstream=scripted_upstream(), allowed=("get_weather", "book_shelter"), blocked=("book_shelter",)
+    )
+    assert open_episode(episode, runtime=UnmanagedRuntime(), interception=interception) is not None
 
 
 @pytest.mark.asyncio
