@@ -167,7 +167,9 @@ async def test_partial_sandbox_setup_is_cleaned_and_session_revoked(client, suit
         cleaned = False
         token = ""
 
-        def setup(self, injections, *, session_token, eval_id, user_task_id, injection_task_id):
+        def setup(
+            self, injections, *, session_token=None, tool_endpoint=None, eval_id, user_task_id, injection_task_id
+        ):
             evaluation = client.get(f"/runs/{run['id']}/evaluations/{eval_id}").json()
             assert evaluation["user_task_id"] == user_task_id
             assert evaluation["injection_task_id"] == injection_task_id
@@ -198,7 +200,9 @@ async def test_runner_records_sandbox_observations(client, suite, backend):
     observed = OpenShellObservations(network_calls_blocked=["evil.com:443"])
 
     class Runtime(OpenShellRuntime):
-        def setup(self, injections, *, session_token, eval_id, user_task_id, injection_task_id):
+        def setup(
+            self, injections, *, session_token=None, tool_endpoint=None, eval_id, user_task_id, injection_task_id
+        ):
             pass
 
         def observe(self) -> dict[str, BaseModel]:
@@ -229,7 +233,9 @@ async def test_runner_closes_before_collecting_the_final_observations(client, su
     stages: dict[str, str] = {}
 
     class Runtime(OpenShellRuntime):
-        def setup(self, injections, *, session_token, eval_id, user_task_id, injection_task_id):
+        def setup(
+            self, injections, *, session_token=None, tool_endpoint=None, eval_id, user_task_id, injection_task_id
+        ):
             self.eval_id = eval_id
 
         def observe(self) -> dict[str, BaseModel]:
@@ -358,7 +364,9 @@ async def test_benchmark_reports_invalid_grades_and_denominators(client, backend
         def start_run(self, run_id, *, suite_name=None):
             return None
 
-        def setup(self, injections, *, session_token, eval_id, user_task_id, injection_task_id):
+        def setup(
+            self, injections, *, session_token=None, tool_endpoint=None, eval_id, user_task_id, injection_task_id
+        ):
             pass
 
         def observe(self) -> dict[str, BaseModel]:

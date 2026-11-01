@@ -1,13 +1,19 @@
+from typing import Any
+
 from midojo.env_inference import infer_environment_type
 from midojo.types import Environment
+
+# infer_environment_type builds the model's fields from the sample, so the checker
+# can't know them: the tests read the dynamic fields through an ``Any`` annotation.
 
 
 def test_scalar_fields():
     env_data = {"name": "test", "count": 5, "ratio": 3.14, "active": True}
-    EnvType = infer_environment_type("demo", env_data)  # noqa: N806 - type factory
+    EnvType: Any = infer_environment_type("demo", env_data)  # noqa: N806 - type factory
     assert issubclass(EnvType, Environment)
 
-    instance = EnvType.model_validate(env_data)
+    # The issubclass check narrows EnvType to Environment, whose fields are unknown here.
+    instance: Any = EnvType.model_validate(env_data)
     assert instance.name == "test"
     assert instance.count == 5
     assert instance.ratio == 3.14
@@ -17,7 +23,7 @@ def test_scalar_fields():
 
 def test_empty_list_defaults():
     env_data = {"items": []}
-    EnvType = infer_environment_type("demo", env_data)  # noqa: N806 - type factory
+    EnvType: Any = infer_environment_type("demo", env_data)  # noqa: N806 - type factory
     instance = EnvType.model_validate(env_data)
     assert instance.items == []
 
@@ -32,7 +38,7 @@ def test_dict_of_nested_dicts():
             "SF": {"name": "San Francisco", "pop": 800_000},
         }
     }
-    EnvType = infer_environment_type("demo", env_data)  # noqa: N806 - type factory
+    EnvType: Any = infer_environment_type("demo", env_data)  # noqa: N806 - type factory
     instance = EnvType.model_validate(env_data)
     assert instance.cities["NYC"].name == "New York"
     assert instance.cities["SF"].pop == 800_000
@@ -45,7 +51,7 @@ def test_nonempty_list_of_dicts():
             {"city": "NYC", "message": "flood"},
         ]
     }
-    EnvType = infer_environment_type("demo", env_data)  # noqa: N806 - type factory
+    EnvType: Any = infer_environment_type("demo", env_data)  # noqa: N806 - type factory
     instance = EnvType.model_validate(env_data)
     assert len(instance.alerts) == 2
     assert instance.alerts[0].city == "Chicago"
@@ -53,7 +59,7 @@ def test_nonempty_list_of_dicts():
 
 def test_nonempty_list_of_scalars():
     env_data = {"tags": ["a", "b", "c"]}
-    EnvType = infer_environment_type("demo", env_data)  # noqa: N806 - type factory
+    EnvType: Any = infer_environment_type("demo", env_data)  # noqa: N806 - type factory
     instance = EnvType.model_validate(env_data)
     assert instance.tags == ["a", "b", "c"]
 
@@ -76,7 +82,7 @@ def test_roundtrip_weather_structure():
         },
         "weather_alerts": [],
     }
-    EnvType = infer_environment_type("weather", env_data)  # noqa: N806 - type factory
+    EnvType: Any = infer_environment_type("weather", env_data)  # noqa: N806 - type factory
     instance = EnvType.model_validate(env_data)
     assert instance.cities["New York"].temperature_f == 72.0
     assert instance.weather_alerts == []
@@ -90,7 +96,7 @@ def test_roundtrip_weather_structure():
 
 def test_model_copy_deep():
     env_data = {"items": [], "cities": {"A": {"name": "a", "pop": 1}}}
-    EnvType = infer_environment_type("demo", env_data)  # noqa: N806 - type factory
+    EnvType: Any = infer_environment_type("demo", env_data)  # noqa: N806 - type factory
     instance = EnvType.model_validate(env_data)
     copy = instance.model_copy(deep=True)
     copy.items.append({"x": 1})

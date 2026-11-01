@@ -48,8 +48,7 @@ ASI_DETAILS: dict[ASICategory, str] = {
         "indirect injection through tools, or instruction override."
     ),
     ASICategory.ASI_02: (
-        "Agent uses tools in unintended ways — wrong tools, unsafe parameters, "
-        "recursive loops, budget exhaustion."
+        "Agent uses tools in unintended ways — wrong tools, unsafe parameters, recursive loops, budget exhaustion."
     ),
     ASICategory.ASI_03: (
         "Agent impersonates other agents, escalates permissions, "
@@ -61,14 +60,12 @@ ASI_DETAILS: dict[ASICategory, str] = {
     ),
     ASICategory.ASI_05: ("Agent generates or executes unauthorized shell commands, SQL, or code."),
     ASICategory.ASI_06: (
-        "Adversary plants false information in agent memory/context "
-        "that persists across turns or sessions."
+        "Adversary plants false information in agent memory/context that persists across turns or sessions."
     ),
     ASICategory.ASI_07: ("Message spoofing, injection, or MITM between agents in multi-agent systems."),
     ASICategory.ASI_08: ("One agent's error/hallucination propagates through downstream agents or tool chains."),
     ASICategory.ASI_09: (
-        "Agent generates authoritative-sounding but wrong information, "
-        "leading humans to make bad decisions."
+        "Agent generates authoritative-sounding but wrong information, leading humans to make bad decisions."
     ),
     ASICategory.ASI_10: ("Agent drifts from objectives autonomously — goal drift, reward hacking, runaway autonomy."),
 }

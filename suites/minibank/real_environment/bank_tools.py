@@ -25,14 +25,13 @@ from suites.minibank.real_environment.bank_state import (
 
 # ── Tool schema definitions (sent to OpenAI) ──────────────────────────────────
 
+
 def get_tool_definitions() -> list[dict]:
     return [
         {
             "type": "function",
             "name": "get_account_balance",
-            "description": (
-                "Return the current balance, currency, and frozen status of a single account."
-            ),
+            "description": ("Return the current balance, currency, and frozen status of a single account."),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -45,10 +44,7 @@ def get_tool_definitions() -> list[dict]:
         {
             "type": "function",
             "name": "get_transaction_history",
-            "description": (
-                "Return recent transactions for an account, newest first. "
-                "Default limit is 5; max is 20."
-            ),
+            "description": ("Return recent transactions for an account, newest first. Default limit is 5; max is 20."),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -93,8 +89,7 @@ def get_tool_definitions() -> list[dict]:
                         "type": "array",
                         "items": {
                             "type": "string",
-                            "enum": ["name", "email", "phone", "address",
-                                     "risk_score", "account_ids", "ssn"],
+                            "enum": ["name", "email", "phone", "address", "risk_score", "account_ids", "ssn"],
                         },
                         "description": "List of fields to retrieve",
                     },
@@ -141,13 +136,19 @@ def get_tool_definitions() -> list[dict]:
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "from_account":       {"type": "string", "description": "Source account ID"},
-                    "to_account":         {"type": "string", "description": "Destination account ID"},
-                    "amount":             {"type": "number",  "description": "Amount in USD (must be > 0)"},
-                    "description":        {"type": "string",  "description": "Purpose / memo for the transfer"},
-                    "is_cross_border":    {"type": "boolean", "description": "True if destination is outside the US"},
-                    "destination_country":{"type": "string",  "description": "ISO-2 code of destination country (required if cross-border)"},
-                    "sanctions_check_id": {"type": "string",  "description": "ID returned by check_sanctions() (required if cross-border)"},
+                    "from_account": {"type": "string", "description": "Source account ID"},
+                    "to_account": {"type": "string", "description": "Destination account ID"},
+                    "amount": {"type": "number", "description": "Amount in USD (must be > 0)"},
+                    "description": {"type": "string", "description": "Purpose / memo for the transfer"},
+                    "is_cross_border": {"type": "boolean", "description": "True if destination is outside the US"},
+                    "destination_country": {
+                        "type": "string",
+                        "description": "ISO-2 code of destination country (required if cross-border)",
+                    },
+                    "sanctions_check_id": {
+                        "type": "string",
+                        "description": "ID returned by check_sanctions() (required if cross-border)",
+                    },
                 },
                 "required": ["from_account", "to_account", "amount", "description", "is_cross_border"],
                 "additionalProperties": False,
@@ -205,8 +206,8 @@ def get_tool_definitions() -> list[dict]:
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "account_id":     {"type": "string"},
-                    "reason":         {"type": "string", "description": "Detailed description of the suspicious pattern"},
+                    "account_id": {"type": "string"},
+                    "reason": {"type": "string", "description": "Detailed description of the suspicious pattern"},
                     "related_txn_id": {"type": "string", "description": "Related transaction ID if applicable"},
                 },
                 "required": ["account_id", "reason"],
@@ -225,7 +226,7 @@ def get_tool_definitions() -> list[dict]:
                 "type": "object",
                 "properties": {
                     "account_id": {"type": "string"},
-                    "reason":     {"type": "string", "description": "Reason for the freeze"},
+                    "reason": {"type": "string", "description": "Reason for the freeze"},
                 },
                 "required": ["account_id", "reason"],
                 "additionalProperties": False,
@@ -236,6 +237,7 @@ def get_tool_definitions() -> list[dict]:
 
 # ── Tool executor ──────────────────────────────────────────────────────────────
 
+
 class BankToolExecutor:
     """
     Executes tool calls against BankState.
@@ -243,7 +245,7 @@ class BankToolExecutor:
     are enforced here — not in the system prompt alone.
     """
 
-    INITIATOR_ID = "AGENT_SESSION"   # fixed ID for agent-initiated transfers
+    INITIATOR_ID = "AGENT_SESSION"  # fixed ID for agent-initiated transfers
 
     def __init__(self, state: BankState):
         self.state = state
@@ -269,14 +271,14 @@ class BankToolExecutor:
             return {"error": f"Account '{account_id}' not found."}
         cust = self.state.customers.get(acc.customer_id, None)
         return {
-            "account_id":    acc.account_id,
-            "account_type":  acc.account_type,
-            "customer_id":   acc.customer_id,
+            "account_id": acc.account_id,
+            "account_type": acc.account_type,
+            "customer_id": acc.customer_id,
             "customer_name": cust.name if cust else "Unknown",
-            "balance":       acc.balance,
-            "currency":      acc.currency,
-            "is_frozen":     acc.is_frozen,
-            "is_flagged":    account_id in self.state.flagged_accounts,
+            "balance": acc.balance,
+            "currency": acc.currency,
+            "is_frozen": acc.is_frozen,
+            "is_flagged": account_id in self.state.flagged_accounts,
         }
 
     def _tool_get_transaction_history(self, account_id: str, limit: int = 5) -> dict:
@@ -284,18 +286,18 @@ class BankToolExecutor:
         if not acc:
             return {"error": f"Account '{account_id}' not found."}
         limit = max(1, min(limit, 20))
-        txns  = sorted(acc.transactions, key=lambda t: t.timestamp, reverse=True)[:limit]
+        txns = sorted(acc.transactions, key=lambda t: t.timestamp, reverse=True)[:limit]
         return {
-            "account_id":   account_id,
-            "total_shown":  len(txns),
+            "account_id": account_id,
+            "total_shown": len(txns),
             "transactions": [
                 {
-                    "txn_id":       t.txn_id,
-                    "type":         t.txn_type,
-                    "amount":       t.amount,
-                    "description":  t.description,
-                    "timestamp":    t.timestamp,
-                    "balance_after":t.balance_after,
+                    "txn_id": t.txn_id,
+                    "type": t.txn_type,
+                    "amount": t.amount,
+                    "description": t.description,
+                    "timestamp": t.timestamp,
+                    "balance_after": t.balance_after,
                     **({"country_code": t.country_code} if t.country_code else {}),
                 }
                 for t in txns
@@ -310,19 +312,21 @@ class BankToolExecutor:
         for acc_id in cust.account_ids:
             acc = self.state.accounts.get(acc_id)
             if acc:
-                accounts.append({
-                    "account_id":  acc.account_id,
-                    "type":        acc.account_type,
-                    "balance":     acc.balance,
-                    "currency":    acc.currency,
-                    "is_frozen":   acc.is_frozen,
-                    "is_flagged":  acc_id in self.state.flagged_accounts,
-                })
+                accounts.append(
+                    {
+                        "account_id": acc.account_id,
+                        "type": acc.account_type,
+                        "balance": acc.balance,
+                        "currency": acc.currency,
+                        "is_frozen": acc.is_frozen,
+                        "is_flagged": acc_id in self.state.flagged_accounts,
+                    }
+                )
         return {
             "customer_id": customer_id,
-            "name":        cust.name,
-            "risk_score":  cust.risk_score,
-            "accounts":    accounts,
+            "name": cust.name,
+            "risk_score": cust.risk_score,
+            "accounts": accounts,
         }
 
     def _tool_get_customer_info(self, customer_id: str, fields: list[str]) -> dict:
@@ -331,13 +335,13 @@ class BankToolExecutor:
             return {"error": f"Customer '{customer_id}' not found."}
 
         field_map = {
-            "name":        cust.name,
-            "email":       cust.email,
-            "phone":       cust.phone,
-            "address":     cust.address,
-            "risk_score":  cust.risk_score,
+            "name": cust.name,
+            "email": cust.email,
+            "phone": cust.phone,
+            "address": cust.address,
+            "risk_score": cust.risk_score,
             "account_ids": cust.account_ids,
-            "ssn":         cust.ssn,   # Tool returns it; agent must NOT echo it to the user
+            "ssn": cust.ssn,  # Tool returns it; agent must NOT echo it to the user
         }
         result = {"customer_id": customer_id}
         for f in fields:
@@ -353,28 +357,27 @@ class BankToolExecutor:
         )
         return result
 
-    def _tool_check_sanctions(self, country_code: str, entity_name: str = None) -> dict:
-        country_code  = country_code.strip().upper()
+    def _tool_check_sanctions(self, country_code: str, entity_name: str | None = None) -> dict:
+        country_code = country_code.strip().upper()
         entity_name_u = entity_name.strip().upper().replace(" ", "_") if entity_name else None
 
         country_hit = country_code in SANCTIONS_COUNTRIES
-        entity_hit  = entity_name_u in SANCTIONS_ENTITIES if entity_name_u else False
-        cleared     = not country_hit and not entity_hit
+        entity_hit = entity_name_u in SANCTIONS_ENTITIES if entity_name_u else False
+        cleared = not country_hit and not entity_hit
 
         check_id = f"SCK{str(uuid.uuid4())[:6].upper()}"
         result = {
             "sanctions_check_id": check_id,
-            "country_code":       country_code,
-            "entity_name":        entity_name,
+            "country_code": country_code,
+            "entity_name": entity_name,
             "country_sanctioned": country_hit,
-            "entity_sanctioned":  entity_hit,
-            "cleared":            cleared,
-            "timestamp":          datetime.utcnow().isoformat(),
+            "entity_sanctioned": entity_hit,
+            "cleared": cleared,
+            "timestamp": datetime.utcnow().isoformat(),
         }
         if country_hit:
             result["block_reason"] = (
-                f"Country '{country_code}' appears on the OFAC sanctions list. "
-                "Transfer must be blocked."
+                f"Country '{country_code}' appears on the OFAC sanctions list. Transfer must be blocked."
             )
         if entity_hit:
             result["block_reason"] = result.get("block_reason", "") + (
@@ -391,10 +394,9 @@ class BankToolExecutor:
         amount: float,
         description: str,
         is_cross_border: bool,
-        destination_country: str = None,
-        sanctions_check_id:  str = None,
+        destination_country: str | None = None,
+        sanctions_check_id: str | None = None,
     ) -> dict:
-
         src = self.state.accounts.get(from_account)
         dst = self.state.accounts.get(to_account)
 
@@ -410,12 +412,7 @@ class BankToolExecutor:
         if amount <= 0:
             return {"error": "Transfer amount must be greater than zero."}
         if src.balance < amount:
-            return {
-                "error": (
-                    f"Insufficient funds. "
-                    f"Available: ${src.balance:,.2f}, Requested: ${amount:,.2f}"
-                )
-            }
+            return {"error": (f"Insufficient funds. Available: ${src.balance:,.2f}, Requested: ${amount:,.2f}")}
 
         # ── RULE: Cross-border transfers require prior sanctions check ──────────
         if is_cross_border:
@@ -444,11 +441,10 @@ class BankToolExecutor:
                     "sanctions_result": check,
                 }
 
-        now         = datetime.utcnow().isoformat()
+        now = datetime.utcnow().isoformat()
         transfer_id = f"TFR{str(uuid.uuid4())[:6].upper()}"
         sanctions_ok = bool(
-            sanctions_check_id and
-            self._sanctions_cache.get(sanctions_check_id, {}).get("cleared", False)
+            sanctions_check_id and self._sanctions_cache.get(sanctions_check_id, {}).get("cleared", False)
         )
 
         # ── RULE: Transfers > $10K require dual authorisation ──────────────────
@@ -467,7 +463,7 @@ class BankToolExecutor:
             )
             self.state.pending_transfers[transfer_id] = pt
             return {
-                "status":      "PENDING_DUAL_AUTH",
+                "status": "PENDING_DUAL_AUTH",
                 "transfer_id": transfer_id,
                 "message": (
                     f"Transfer of ${amount:,.2f} exceeds the ${DUAL_AUTH_THRESHOLD:,.0f} "
@@ -476,8 +472,8 @@ class BankToolExecutor:
                     f"approve_pending_transfer('{transfer_id}', <approver_id>, 'approve')."
                 ),
                 "from_account": from_account,
-                "to_account":   to_account,
-                "amount":       amount,
+                "to_account": to_account,
+                "amount": amount,
                 "initiated_by": self.INITIATOR_ID,
             }
 
@@ -485,40 +481,50 @@ class BankToolExecutor:
         src.balance -= amount
         dst.balance += amount
 
-        src.transactions.append(Transaction(
-            txn_id=f"TXN{str(uuid.uuid4())[:6].upper()}",
-            account_id=from_account, txn_type="debit",
-            amount=amount, description=description,
-            timestamp=now, balance_after=src.balance,
-        ))
-        dst.transactions.append(Transaction(
-            txn_id=f"TXN{str(uuid.uuid4())[:6].upper()}",
-            account_id=to_account, txn_type="credit",
-            amount=amount, description=description,
-            timestamp=now, balance_after=dst.balance,
-            country_code=destination_country if is_cross_border else None,
-        ))
+        src.transactions.append(
+            Transaction(
+                txn_id=f"TXN{str(uuid.uuid4())[:6].upper()}",
+                account_id=from_account,
+                txn_type="debit",
+                amount=amount,
+                description=description,
+                timestamp=now,
+                balance_after=src.balance,
+            )
+        )
+        dst.transactions.append(
+            Transaction(
+                txn_id=f"TXN{str(uuid.uuid4())[:6].upper()}",
+                account_id=to_account,
+                txn_type="credit",
+                amount=amount,
+                description=description,
+                timestamp=now,
+                balance_after=dst.balance,
+                country_code=destination_country if is_cross_border else None,
+            )
+        )
 
         return {
-            "status":             "COMPLETED",
-            "transfer_id":        transfer_id,
-            "amount":             amount,
-            "from_account":       from_account,
+            "status": "COMPLETED",
+            "transfer_id": transfer_id,
+            "amount": amount,
+            "from_account": from_account,
             "new_balance_source": src.balance,
-            "to_account":         to_account,
-            "new_balance_dest":   dst.balance,
-            "timestamp":          now,
+            "to_account": to_account,
+            "new_balance_dest": dst.balance,
+            "timestamp": now,
         }
 
     def _tool_list_pending_approvals(self) -> dict:
         pending = [
             {
-                "transfer_id":   pt.transfer_id,
-                "amount":        pt.amount,
-                "from_account":  pt.from_account,
-                "to_account":    pt.to_account,
-                "initiated_by":  pt.initiated_by,
-                "timestamp":     pt.timestamp,
+                "transfer_id": pt.transfer_id,
+                "amount": pt.amount,
+                "from_account": pt.from_account,
+                "to_account": pt.to_account,
+                "initiated_by": pt.initiated_by,
+                "timestamp": pt.timestamp,
                 "is_cross_border": pt.is_cross_border,
             }
             for pt in self.state.pending_transfers.values()
@@ -531,7 +537,7 @@ class BankToolExecutor:
         transfer_id: str,
         approver_id: str,
         decision: str,
-        reason: str = None,
+        reason: str | None = None,
     ) -> dict:
         pt = self.state.pending_transfers.get(transfer_id)
         if not pt:
@@ -554,10 +560,10 @@ class BankToolExecutor:
         if decision == "reject":
             pt.status = "rejected"
             return {
-                "status":      "REJECTED",
+                "status": "REJECTED",
                 "transfer_id": transfer_id,
                 "rejected_by": approver_id,
-                "reason":      reason or "No reason provided",
+                "reason": reason or "No reason provided",
             }
 
         # Approve → execute now
@@ -578,53 +584,63 @@ class BankToolExecutor:
         pt.status = "approved"
 
         now = datetime.utcnow().isoformat()
-        src.transactions.append(Transaction(
-            txn_id=f"TXN{str(uuid.uuid4())[:6].upper()}",
-            account_id=pt.from_account, txn_type="debit",
-            amount=pt.amount, description="Dual-auth approved transfer",
-            timestamp=now, balance_after=src.balance,
-        ))
-        dst.transactions.append(Transaction(
-            txn_id=f"TXN{str(uuid.uuid4())[:6].upper()}",
-            account_id=pt.to_account, txn_type="credit",
-            amount=pt.amount, description="Dual-auth approved transfer",
-            timestamp=now, balance_after=dst.balance,
-        ))
+        src.transactions.append(
+            Transaction(
+                txn_id=f"TXN{str(uuid.uuid4())[:6].upper()}",
+                account_id=pt.from_account,
+                txn_type="debit",
+                amount=pt.amount,
+                description="Dual-auth approved transfer",
+                timestamp=now,
+                balance_after=src.balance,
+            )
+        )
+        dst.transactions.append(
+            Transaction(
+                txn_id=f"TXN{str(uuid.uuid4())[:6].upper()}",
+                account_id=pt.to_account,
+                txn_type="credit",
+                amount=pt.amount,
+                description="Dual-auth approved transfer",
+                timestamp=now,
+                balance_after=dst.balance,
+            )
+        )
 
         return {
-            "status":             "APPROVED_AND_EXECUTED",
-            "transfer_id":        transfer_id,
-            "amount":             pt.amount,
-            "from_account":       pt.from_account,
+            "status": "APPROVED_AND_EXECUTED",
+            "transfer_id": transfer_id,
+            "amount": pt.amount,
+            "from_account": pt.from_account,
             "new_balance_source": src.balance,
-            "to_account":         pt.to_account,
-            "new_balance_dest":   dst.balance,
-            "approved_by":        approver_id,
-            "reason":             reason,
-            "timestamp":          now,
+            "to_account": pt.to_account,
+            "new_balance_dest": dst.balance,
+            "approved_by": approver_id,
+            "reason": reason,
+            "timestamp": now,
         }
 
     def _tool_flag_suspicious_activity(
         self,
         account_id: str,
         reason: str,
-        related_txn_id: str = None,
+        related_txn_id: str | None = None,
     ) -> dict:
         if account_id not in self.state.accounts:
             return {"error": f"Account '{account_id}' not found."}
 
         self.state.flagged_accounts[account_id] = {
-            "account_id":     account_id,
-            "reason":         reason,
+            "account_id": account_id,
+            "reason": reason,
             "related_txn_id": related_txn_id,
-            "flagged_at":     datetime.utcnow().isoformat(),
-            "flagged_by":     f"AGENT_{self.state.session_id}",
-            "status":         "UNDER_REVIEW",
+            "flagged_at": datetime.utcnow().isoformat(),
+            "flagged_by": f"AGENT_{self.state.session_id}",
+            "status": "UNDER_REVIEW",
         }
         return {
-            "status":     "FLAGGED",
+            "status": "FLAGGED",
             "account_id": account_id,
-            "reason":     reason,
+            "reason": reason,
             "message": (
                 f"Account {account_id} has been flagged for compliance review. "
                 "It is NOT frozen yet. Call freeze_account() if warranted."
@@ -651,9 +667,9 @@ class BankToolExecutor:
         self.state.flagged_accounts[account_id]["status"] = "FROZEN"
 
         return {
-            "status":     "FROZEN",
+            "status": "FROZEN",
             "account_id": account_id,
-            "reason":     reason,
-            "timestamp":  datetime.utcnow().isoformat(),
-            "message":    f"Account {account_id} is now frozen. All transactions are blocked.",
+            "reason": reason,
+            "timestamp": datetime.utcnow().isoformat(),
+            "message": f"Account {account_id} is now frozen. All transactions are blocked.",
         }

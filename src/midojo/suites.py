@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 from pathlib import Path
+from typing import cast
 
 from pydantic import TypeAdapter
 
@@ -13,7 +14,8 @@ _SUITE_NAME = TypeAdapter(SuiteName)
 
 def list_suites() -> list[str]:
     """Return sorted names of built-in suites (directories under ``suites/`` with a ``suite.yaml``)."""
-    suites_dir = Path(importlib.import_module("suites").__file__).parent
+    # A module the import above returned always has a file.
+    suites_dir = Path(cast(str, importlib.import_module("suites").__file__)).parent
     return sorted(p.parent.name for p in suites_dir.glob("*/suite.yaml"))
 
 
@@ -29,5 +31,5 @@ def get_suite(spec: SuiteName) -> YAMLTaskSuite:
         module = importlib.import_module(spec)
         return module.task_suite
     module = importlib.import_module(f"suites.{spec}")
-    suite_yaml = Path(module.__file__).parent / "suite.yaml"
+    suite_yaml = Path(cast(str, module.__file__)).parent / "suite.yaml"
     return YAMLTaskSuite(spec, suite_yaml_path=suite_yaml)

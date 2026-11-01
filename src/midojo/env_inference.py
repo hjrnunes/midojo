@@ -7,7 +7,8 @@ from pydantic import create_model
 from midojo.types import Environment
 
 
-def _infer_type(value: Any, model_name: str) -> type:
+def _infer_type(value: Any, model_name: str) -> Any:
+    """Return the type annotation for a sample value: a class, a parametric alias or ``Any``."""
     if isinstance(value, bool):
         return bool
     if isinstance(value, int):
@@ -48,9 +49,7 @@ def _infer_field(key: str, value: Any, suite_name: str) -> tuple[type, Any]:
         if vals and all(isinstance(v, dict) for v in vals):
             sigs = [_fields_signature(v) for v in vals]
             if len(set(map(frozenset, sigs))) == 1:
-                nested = _make_model(
-                    f"{suite_name}_{key.title().replace(' ', '')}Entry", vals[0]
-                )
+                nested = _make_model(f"{suite_name}_{key.title().replace(' ', '')}Entry", vals[0])
                 return (dict[str, nested], ...)
         return (dict[str, Any], ...)
     return (_infer_type(value, f"{suite_name}_{key}"), ...)
