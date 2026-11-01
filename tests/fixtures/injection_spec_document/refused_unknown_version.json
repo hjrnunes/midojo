@@ -1,7 +1,6 @@
 {
   "environment": null,
   "environment_type": null,
-  "extensions": {},
   "injection_task_id": null,
   "interception": {
     "advertise_host": null,
@@ -51,7 +50,7 @@
   "runtime": {
     "type": "unmanaged"
   },
-  "schema_version": "midojo-episode-v1",
+  "schema_version": "midojo-injection-spec-v1.1",
   "security": {
     "tool_call_condition": {
       "comparisons": [

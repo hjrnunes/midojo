@@ -1,6 +1,7 @@
 {
   "environment": null,
   "environment_type": null,
+  "extensions": {},
   "injection_task_id": null,
   "interception": {
     "advertise_host": null,
@@ -50,7 +51,7 @@
   "runtime": {
     "type": "unmanaged"
   },
-  "schema_version": "midojo-episode-v1",
+  "schema_version": "midojo-injection-spec-v1",
   "security": {
     "tool_call_condition": {
       "comparisons": [
@@ -94,10 +95,5 @@
   ],
   "user_task_id": null,
   "utility": null,
-  "verifiers": [
-    {
-      "check": "asago_rubric_judge_episode",
-      "module": "asago_verifiers.asago_episode_judge"
-    }
-  ]
+  "verifiers": []
 }

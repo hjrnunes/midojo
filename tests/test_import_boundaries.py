@@ -75,7 +75,9 @@ LIGHT_MODULES = (
     "midojo.control_plane.inprocess_control",
     # The SDK's snapshot codec, which names a sealed snapshot: stdlib only.
     "midojo_sdk.snapshot",
-    # The SDK's episode schema accessor and the plan codec it names: stdlib only.
+    # The SDK's injection spec schema accessor and the plan codec it names: stdlib only.
+    "midojo_sdk.injection_spec_schema",
+    # The old module name is a re-export of that accessor: stdlib only too.
     "midojo_sdk.episode_schema",
     # The SDK's placement engine: decides a plan's placements, and the plan codec it names, stdlib only.
     "midojo_sdk.placement",

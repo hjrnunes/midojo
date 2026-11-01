@@ -22,7 +22,7 @@ from midojo.control_plane.grading import (
 )
 from midojo.control_plane.models import GradeResponse
 
-FIXTURES = Path(__file__).resolve().parent / "fixtures" / "episode_document"
+FIXTURES = Path(__file__).resolve().parent / "fixtures" / "verdict_document"
 
 
 def read_vector(name: str) -> dict[str, Any]:

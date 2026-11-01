@@ -50,7 +50,7 @@
   "runtime": {
     "type": "unmanaged"
   },
-  "schema_version": "midojo-episode-v9",
+  "schema_version": "midojo-injection-spec-v1",
   "security": {
     "tool_call_condition": {
       "comparisons": [
@@ -94,5 +94,10 @@
   ],
   "user_task_id": null,
   "utility": null,
-  "verifiers": []
+  "verifiers": [
+    {
+      "check": "asago_rubric_judge_episode",
+      "module": "asago_verifiers.asago_episode_judge"
+    }
+  ]
 }

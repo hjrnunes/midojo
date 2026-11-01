@@ -33,7 +33,7 @@ from midojo.runtimes import (
 from midojo.suite_definition import OpenShellRuntimeDefinition, UnmanagedRuntimeDefinition
 from midojo.suites import get_suite
 
-FIXTURES = Path(__file__).parent / "fixtures" / "episode_document"
+FIXTURES = Path(__file__).parent / "fixtures" / "injection_spec_document"
 UNMANAGED = {"type": "unmanaged"}
 OPENSHELL = {"type": "openshell", "image": "pi"}
 PREDICATE_GAP = "check:openshell-predicate-on-unmanaged-runtime"

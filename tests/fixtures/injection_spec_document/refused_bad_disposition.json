@@ -48,9 +48,9 @@
     "probe_payloads": []
   },
   "runtime": {
-    "type": "kubernetes"
+    "type": "unmanaged"
   },
-  "schema_version": "midojo-episode-v1",
+  "schema_version": "midojo-injection-spec-v1",
   "security": {
     "tool_call_condition": {
       "comparisons": [
@@ -84,7 +84,7 @@
       "default": "forward",
       "tools": {
         "escalate_to_human": "forward",
-        "process_refund": "forward",
+        "process_refund": "drop",
         "schedule_payment": "forward"
       }
     }

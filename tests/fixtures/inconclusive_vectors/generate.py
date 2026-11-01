@@ -16,7 +16,7 @@ Run it in MiDojo's interpreter, from the package root::
 
 ``--seed`` names another copy of the seed envelope than the recorded path. The seed is a
 compiled SCN-051 episode envelope, which this script reads with MiDojo's own document reader
-(the v0 wrapper, deprecated but read) and writes back as a ``midojo-episode-v1`` document.
+(the v0 wrapper, deprecated but read) and writes back as a ``midojo-injection-spec-v1`` document.
 ``seed/`` holds the copy every case starts from, and ``recording.json`` pins its sha256.
 
 A re-run writes the same bytes. ``generate`` seals the cases under a pinned clock and pinned
@@ -94,7 +94,7 @@ from midojo.control_plane.routers.runs import snapshot_response
 from midojo.control_plane.service import ControlPlane
 from midojo.control_plane.state import snapshot_digest
 from midojo.episode import Episode, tool_policy
-from midojo.episode_document import dump_document
+from midojo.injection_spec_document import dump_document
 from midojo.interception_host import HostInterception
 from midojo.runtimes import UnmanagedRuntime
 

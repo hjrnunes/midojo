@@ -1,10 +1,10 @@
-"""The injection spec as a document: the closed v1 form, and the v0 wrapper it reads for one release.
+"""The injection spec as a document: the closed v1 form, its old ID, and the v0 wrapper it reads for one release.
 
 An injection-spec document is the same data an :class:`~midojo.injection_spec.InjectionSpec` holds,
 without the trusted code (the environment model and the verifier
 implementations): a suite, a driver or another repository can write one, read
 it and run it. The schema is the SDK's
-(``midojo_sdk.episode_schema``), so every repository validates with the same
+(``midojo_sdk.injection_spec_schema``), so every repository validates with the same
 file; this module is the reader and writer MiDojo itself uses, and a test holds
 the two in agreement over the golden vectors.
 
@@ -12,19 +12,21 @@ The document is closed. A key MiDojo does not define is refused at every level
 (the top level, the plan, an instruction's target, the interception settings,
 the tool policy and each runtime definition), so a misspelled field never
 silently disappears. ``schema_version`` says which form the document is: this
-module writes only :data:`~midojo_sdk.episode_schema.EPISODE_DOCUMENT_V1` and
-reads the v0 consumer wrapper (``midojo-episode-v2``) with a
-:class:`DeprecationWarning`. Any other version raises
-:class:`UnsupportedDocumentVersion`, naming it.
+module writes only
+:data:`~midojo_sdk.injection_spec_schema.INJECTION_SPEC_DOCUMENT_V1`. It
+reads the document's old ID (``midojo-episode-v1``, the same closed shape
+under the name it had before the rename) and the v0 consumer wrapper
+(``midojo-episode-v2``), each with a :class:`DeprecationWarning`. Any other
+version raises :class:`UnsupportedDocumentVersion`, naming it.
 
 The plan in a document is the SDK's plan encoding; its version is the
 document's ``schema_version``, so changing the plan's bytes needs a new
 document version (see :data:`midojo_sdk.injection.PLAN_CODEC_VERSION`).
 
 ``verifiers`` is always an empty list: a verifier registry is trusted code, not
-data, so a document can name none. An episode built with its own registry has
-no document form, and :func:`to_document` refuses it rather than dropping the
-registry silently.
+data, so a document can name none. An injection spec built with its own
+registry has no document form, and :func:`to_document` refuses it rather than
+dropping the registry silently.
 """
 
 from __future__ import annotations
@@ -35,16 +37,19 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from midojo_sdk.episode_schema import EPISODE_DOCUMENT_V1
 from midojo_sdk.injection import InjectionPlan
+from midojo_sdk.injection_spec_schema import INJECTION_SPEC_DOCUMENT_V1, LEGACY_INJECTION_SPEC_DOCUMENT_V1
 
 from midojo.injection_spec import InjectionSpec, InterceptionSettings, RuntimeCheckError, ToolPolicy, thaw
 
-SUPPORTED_DOCUMENT_VERSIONS = (EPISODE_DOCUMENT_V1,)
+SUPPORTED_DOCUMENT_VERSIONS = (INJECTION_SPEC_DOCUMENT_V1,)
 """The document versions this module writes and reads."""
 
-LEGACY_DOCUMENT_VERSIONS = ("midojo-episode-v2",)
-"""The consumer's v0 wrapper: read for one release, never written."""
+_V0_DOCUMENT_VERSION = "midojo-episode-v2"
+"""The consumer's v0 wrapper: read for one release, with a deprecation warning."""
+
+LEGACY_DOCUMENT_VERSIONS = (LEGACY_INJECTION_SPEC_DOCUMENT_V1, _V0_DOCUMENT_VERSION)
+"""The versions this module reads but never writes: the document's old ID and the consumer's v0 wrapper."""
 
 _V1_FIELDS = frozenset(
     {
@@ -120,23 +125,23 @@ class UnsupportedDocumentVersion(InjectionSpecDocumentError):  # noqa: N818 - na
         self.version = version
         self.supported = SUPPORTED_DOCUMENT_VERSIONS
         super().__init__(
-            f"episode document version {version!r} is not supported; "
+            f"injection spec document version {version!r} is not supported; "
             f"supported: {', '.join(SUPPORTED_DOCUMENT_VERSIONS)}; "
             f"read-only legacy: {', '.join(LEGACY_DOCUMENT_VERSIONS)}"
         )
 
 
 def to_document(episode: InjectionSpec) -> dict[str, Any]:
-    """``episode`` as a v1 document: always v1, never the v0 wrapper.
+    """``episode`` as an injection-spec document: always v1 under the new ID, never a legacy form.
 
-    Every member is written, null where the episode has none, so two dumps of
-    the same episode are the same bytes. ``environment_type`` names the
-    environment model only when the episode has a suite name: a direct
-    episode's model is MiDojo's own inference, not provenance.
+    Every member is written, null where the injection spec has none, so two
+    dumps of the same injection spec are the same bytes. ``environment_type``
+    names the environment model only when the injection spec has a suite name:
+    a direct injection spec's model is MiDojo's own inference, not provenance.
     """
     if episode.verifiers is not None:
         raise InjectionSpecDocumentError(
-            "verifiers: an episode with its own verifier registry has no document form; a registry is trusted code, "
+            "verifiers: an injection spec with its own verifier registry has no document form; a registry is trusted code, "
             "not data, so a document names no verifier"
         )
     environment_type = None
@@ -153,7 +158,7 @@ def to_document(episode: InjectionSpec) -> dict[str, Any]:
         }
     interception = episode.interception
     return {
-        "schema_version": EPISODE_DOCUMENT_V1,
+        "schema_version": INJECTION_SPEC_DOCUMENT_V1,
         "suite_name": episode.suite_name,
         "user_task_id": episode.user_task_id,
         "injection_task_id": episode.injection_task_id,
@@ -178,26 +183,28 @@ def to_document(episode: InjectionSpec) -> dict[str, Any]:
 
 
 def from_document(cls: type[InjectionSpec], document: Mapping[str, object]) -> InjectionSpec:
-    """An episode from a v1 document, or from the v0 consumer wrapper with a :class:`DeprecationWarning`."""
-    data = _object(document, "episode document")
+    """An injection spec from a v1 document in either ID, or from the v0 consumer wrapper, each legacy read warning."""
+    data = _object(document, "injection spec document")
     if "schema_version" not in data:
         if isinstance(data.get("episode"), Mapping):
             return _read_v0(cls, data)
-        raise InjectionSpecDocumentError("episode document: schema_version is required")
+        raise InjectionSpecDocumentError("injection spec document: schema_version is required")
     version = data["schema_version"]
     if type(version) is not str:
         raise InjectionSpecDocumentError(
-            f"episode document: schema_version must be a string, not {type(version).__name__}"
+            f"injection spec document: schema_version must be a string, not {type(version).__name__}"
         )
-    if version == EPISODE_DOCUMENT_V1:
+    if version == INJECTION_SPEC_DOCUMENT_V1:
         return _read_v1(cls, data)
-    if version in LEGACY_DOCUMENT_VERSIONS:
+    if version == LEGACY_INJECTION_SPEC_DOCUMENT_V1:
+        return _read_legacy_v1(cls, data)
+    if version == _V0_DOCUMENT_VERSION:
         return _read_v0(cls, data)
     raise UnsupportedDocumentVersion(version)
 
 
 def load_document(cls: type[InjectionSpec], path: str | Path) -> InjectionSpec:
-    """An episode from the JSON document at ``path``: :func:`from_document` of its decoded contents."""
+    """An injection spec from the JSON document at ``path``: :func:`from_document` of its decoded contents."""
     text = Path(path).read_text(encoding="utf-8")
     try:
         document = json.loads(text)
@@ -207,7 +214,7 @@ def load_document(cls: type[InjectionSpec], path: str | Path) -> InjectionSpec:
 
 
 def dump_document(episode: InjectionSpec, path: str | Path) -> None:
-    """Write ``episode``'s v1 document to ``path`` as canonical JSON: sorted keys, two-space indent, one newline."""
+    """Write ``episode``'s document to ``path`` as canonical JSON: sorted keys, two-space indent, one newline."""
     Path(path).write_text(json.dumps(to_document(episode), indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
@@ -215,7 +222,7 @@ def dump_document(episode: InjectionSpec, path: str | Path) -> None:
 
 
 def _read_v1(cls: type[InjectionSpec], data: Mapping[str, Any]) -> InjectionSpec:
-    _closed(data, _V1_FIELDS, "episode document")
+    _closed(data, _V1_FIELDS, "injection spec document")
     _verifiers(data.get("verifiers"))
     turns = _turns(data.get("turns"))
     try:
@@ -233,31 +240,42 @@ def _read_v1(cls: type[InjectionSpec], data: Mapping[str, Any]) -> InjectionSpec
             tools=_tools(data.get("tools")),
         )
     except RuntimeCheckError as exc:
-        raise InjectionSpecDocumentError(f"episode document: {exc}", gap=exc.gap) from None
+        raise InjectionSpecDocumentError(f"injection spec document: {exc}", gap=exc.gap) from None
     except (TypeError, ValueError) as exc:
-        raise InjectionSpecDocumentError(f"episode document: {exc}") from None
+        raise InjectionSpecDocumentError(f"injection spec document: {exc}") from None
     _environment_type(episode, _string(data.get("environment_type"), "environment_type"))
     return episode
 
 
-def _read_v0(cls: type[InjectionSpec], data: Mapping[str, Any]) -> InjectionSpec:
+def _read_legacy_v1(cls: type[InjectionSpec], data: Mapping[str, Any]) -> InjectionSpec:
+    """An injection spec from a document under the ID it had before the rename, the same closed shape."""
     warnings.warn(
-        f"the episode document version {LEGACY_DOCUMENT_VERSIONS[0]!r} is read as v0 and is deprecated; "
-        f"write {EPISODE_DOCUMENT_V1!r} instead",
+        f"the document version {LEGACY_INJECTION_SPEC_DOCUMENT_V1!r} is the old name of "
+        f"{INJECTION_SPEC_DOCUMENT_V1!r} and is deprecated; write {INJECTION_SPEC_DOCUMENT_V1!r} instead",
         DeprecationWarning,
         stacklevel=3,
     )
-    _closed(data, _V0_TOP_LEVEL, "episode document (v0)")
+    return _read_v1(cls, data)
+
+
+def _read_v0(cls: type[InjectionSpec], data: Mapping[str, Any]) -> InjectionSpec:
+    warnings.warn(
+        f"the document version {_V0_DOCUMENT_VERSION!r} is read as v0 and is deprecated; "
+        f"write {INJECTION_SPEC_DOCUMENT_V1!r} instead",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+    _closed(data, _V0_TOP_LEVEL, "injection spec document (v0)")
     if data.get("verifiers", []) != []:
         raise InjectionSpecDocumentError(
             "verifiers: a v0 wrapper must list no verifier; MiDojo reads only [] and names none in a document"
         )
     inner = _object(data.get("episode"), "episode")
-    _closed(inner, _V0_EPISODE_FIELDS, "episode (v0)")
+    _closed(inner, _V0_EPISODE_FIELDS, "injection spec (v0)")
     return _read_v1(
         cls,
         {
-            "schema_version": EPISODE_DOCUMENT_V1,
+            "schema_version": INJECTION_SPEC_DOCUMENT_V1,
             "suite_name": inner.get("suite_name"),
             "user_task_id": inner.get("user_task_id"),
             "injection_task_id": inner.get("injection_task_id"),
@@ -402,5 +420,5 @@ def _environment_type(episode: InjectionSpec, named: str | None) -> None:
     inferred = episode.environment_type.__name__ if episode.environment_type is not None else None
     if named != inferred:
         raise InjectionSpecDocumentError(
-            f"environment_type: the episode's suite_name and environment imply {inferred!r}, not {named!r}"
+            f"environment_type: the injection spec's suite_name and environment imply {inferred!r}, not {named!r}"
         )

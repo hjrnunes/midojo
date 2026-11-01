@@ -90,3 +90,16 @@ def test_open_episode_opens_the_evaluation_open_evaluation_opens() -> None:
     assert type(old) is type(new) is midojo.EvaluationContext
     assert old.episode is spec and new.episode is spec
     assert old.run_id is new.run_id is None
+
+
+def test_the_old_schema_module_is_the_new_one() -> None:
+    import midojo_sdk.episode_schema
+    import midojo_sdk.injection_spec_schema
+
+    assert (
+        midojo_sdk.injection_spec_schema.EPISODE_DOCUMENT_V1
+        == midojo_sdk.injection_spec_schema.INJECTION_SPEC_DOCUMENT_V1
+    )
+    assert midojo_sdk.episode_schema.load_schema is midojo_sdk.injection_spec_schema.load_schema
+    assert midojo_sdk.episode_schema.SCHEMA_FILE == "schemas/midojo-injection-spec-v1.schema.json"
+    assert midojo_sdk.episode_schema.LEGACY_SCHEMA_FILE == "schemas/midojo-episode-v1.schema.json"

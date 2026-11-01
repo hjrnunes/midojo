@@ -50,7 +50,7 @@
   "runtime": {
     "type": "unmanaged"
   },
-  "schema_version": "midojo-episode-v1",
+  "schema_version": "midojo-injection-spec-v1",
   "security": {
     "tool_call_condition": {
       "comparisons": [

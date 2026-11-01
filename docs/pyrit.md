@@ -1,4 +1,4 @@
-# PyRIT campaigns over MiDojo episodes
+# PyRIT campaigns over MiDojo evaluations
 
 Install `midojo[pyrit]`, or in this checkout run:
 
@@ -25,12 +25,12 @@ gate is not a substitute for checking it in the extra environment.
 ## Target and evidence
 
 `MidojoEpisodeTarget` is a text-only, single-turn PyRIT `PromptTarget`.
-Each `send_prompt_async` runs one episode through `midojo.open_episode`.
+Each `send_prompt_async` runs one evaluation through `midojo.open_evaluation`.
 The candidate fills one declared plan instruction; `check_plan_within`
 refuses changed selectors, modes, transformations, size limits, extra
 instructions or probes before an evaluation opens. The host-supplied
 `episode_for_payload` compiler and `drive` callback are trusted code.
-`drive` uses the episode's benign turns and `ep.binding`, records replies
+`drive` uses the injection spec's benign turns and `ep.binding`, records replies
 with `ep.turn`, and leaves the context to seal and clean up.
 
 For a suite, `MidojoEpisodeTarget.from_suite` takes `suite`,
@@ -58,19 +58,21 @@ never imports anything the declaration names. Only a suite module that
 doesn't exist (a `ModuleNotFoundError` naming it or a package it would be
 in) reads as None; any other import error, one from the suite module's own
 imports included, propagates. Direct users supply an
-`episode_for_payload(candidate) -> Episode` compiler and its permitted
+`episode_for_payload(candidate) -> InjectionSpec` compiler and its permitted
 single-instruction `InjectionPlan` as `surface`.
+
+The target keeps its name, `MidojoEpisodeTarget`, and so does its `episode_for_payload` argument; `Episode`, `midojo.episode` and `open_episode` remain deprecated aliases of the new names.
 
 The response text is the agent's actual final reply. Its `prompt_metadata`
 contains `midojo.evaluation_id`, `midojo.snapshot_id`, `midojo.grade` (JSON),
 `midojo.status` and a reason; `midojo.run_id` is included when present.
-The target opens standalone episodes with an in-process control plane, so
+The target opens standalone evaluations with an in-process control plane, so
 normally there is no run ID. A failed/refused attempt carries its status and
 reason, plus any evaluation/snapshot identity available after cleanup.
 Refused and failed sends return the fixed reply "MiDojo could not evaluate
 this candidate."
 A candidate with multiple pieces, a non-text modality or an invalid role
-receives a refused receipt before an episode opens. PyRIT validates the
+receives a refused receipt before an evaluation opens. PyRIT validates the
 Message model itself before dispatching to the target.
 Cancellation and interrupts propagate.
 
@@ -117,7 +119,7 @@ earlier sends and replays remain available until the target/control plane is
 released; supplying `control=` lets the caller retain them longer.
 
 Each send and replay is graded on the target's control plane once the
-episode is sealed, as `midojo-run` grades (`ep.control.grade_evaluation`):
+evaluation is sealed, as `midojo-run` grades (`ep.control.grade_evaluation`):
 in a worker thread under the evaluation's grading lock, so a `reply_judge`
 service never blocks the event loop, and the receipt holds the grade the
 control plane recorded, its judge records included. Tool evidence belongs
@@ -142,8 +144,7 @@ returns false also scores false, following MiDojo's attempt-loop convention.
 
 PyRIT 1.1 supports native undetermined scores: both scorer variants return
 `Score(status=ScoreStatus.UNDETERMINED, score_value=None)` for security=None,
-invalid **security** grade validity, an absent security check, failed/refused
-episodes, an unknown response identity, or an unreadable/blocked transport
+invalid **security** grade validity, an absent security check, failed/refused evaluations, an unknown response identity, or an unreadable/blocked transport
 response.
 A failed or unknown replay is also undetermined. Calling `get_value()` on
 such a score raises PyRIT's `UndeterminedScoreError`; it never reads as false.
@@ -157,20 +158,20 @@ and 0.0 for a known non-break. It provides no intermediate heuristic score.
 
 The target refuses construction unless its runtime declares a reset or
 `DisposableRuntime.disposable=True`. It passes `reset=True` to every
-`open_episode` when reset is available. A supplied runtime belongs to the
+`open_evaluation` when reset is available. A supplied runtime belongs to the
 caller: start its run before the campaign and end it afterwards. A fresh
 OpenShell sandbox isolates the suite's sandbox and simulated environment;
 external services still need an explicit reset if their state is changed.
 
-To preserve **one send = one episode**, the scorer runs confirmation when
-it first sees a successful discovery. It reuses the same frozen episode,
+To preserve **one send = one evaluation**, the scorer runs confirmation when
+it first sees a successful discovery. It reuses the same frozen injection spec,
 opens a fresh evaluation with a clean start, and caches that replay across
 scorers. Its persisted `score_metadata` repeats the discovery receipt and
 adds `midojo.replay`, a JSON receipt with the replay's evaluation ID,
 snapshot ID, grade and status. The response metadata remains the original
 send's receipt. Scoring can therefore execute the agent once more and must
 finish before the caller ends the runtime's run. Sends and replays are
-serialized within one target. The replay queue retains episode specifications
+serialized within one target. The replay queue retains injection specs
 only for security-True discoveries, releasing them after confirmation. Use
 one target per runtime; sharing a runtime across target instances is unsupported.
 
@@ -272,7 +273,7 @@ campaign that succeeded is a failure to write them raised itself:
   `security_reason`, `grade_validity`, the whole `grade`, and its
   `snapshot_file` (or a `snapshot_error` for an evaluation never sealed);
 - `snapshots/<evaluation_id>.json`: each sealed snapshot, a failed
-  episode's interrupted seal included, as
+  evaluation's interrupted seal included, as
   `GET /runs/{run_id}/evaluations/{eval_id}/snapshot` returns it:
   `midojo.control_plane.client.snapshot_from_response` rebuilds it with the
   suite's environment type and checks its digest against its `snapshot_id`;
