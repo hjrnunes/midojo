@@ -97,7 +97,7 @@ class ResettableRuntime(Protocol):
     """A runtime that can return its target to the initial state: a capability it declares by implementing ``reset``.
 
     Nothing resets a target implicitly: the episode context calls ``reset``
-    only when its caller asks (``open_episode(..., reset=True)``) and the
+    only when its caller asks (``open_evaluation(..., reset=True)``) and the
     runtime declares it, before the evaluation's ``setup``. Neither built-in
     runtime declares it: an OpenShell sandbox is new for each evaluation, but
     what the agent changed outside it (a remote account, say) isn't undone.

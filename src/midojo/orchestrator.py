@@ -44,8 +44,8 @@ from midojo.control_plane.config import CONTROL_TOKEN_ENV
 from midojo.control_plane.models import GradeResponse
 from midojo.control_plane.state import Snapshot
 from midojo.delivery import EXPOSURE_BOUNDARIES, DeliveryFact, Exposure, ExposureStatus, delivery_facts, exposure
-from midojo.episode import Episode
-from midojo.episode_context import EpisodeContext, EpisodeStep, open_episode
+from midojo.evaluation_context import EvaluationContext, EvaluationStep, open_evaluation
+from midojo.injection_spec import InjectionSpec
 from midojo.runtimes import AgentRuntime, attempt_isolation, is_disposable
 from midojo.suite_tools import host_tools_reference, import_suite_module
 from midojo.suites import get_suite, list_suites
@@ -114,14 +114,14 @@ __all__ = [
     "ControlClient",
     "ControlPlaneClient",
     "DeliveryFact",
-    "Episode",
-    "EpisodeContext",
-    "EpisodeRun",
-    "EpisodeStep",
+    "EvaluationContext",
+    "EvaluationRun",
+    "EvaluationStep",
     "Exchange",
     "Exposure",
     "ExposureStatus",
     "GradeResponse",
+    "InjectionSpec",
     "NamedTuple",
     "OGXResponsesClient",
     "OpenAIResponsesAgentClient",
@@ -166,7 +166,7 @@ __all__ = [
     "list_suites",
     "main",
     "math",
-    "open_episode",
+    "open_evaluation",
     "os",
     "permitted_injections",
     "run_benchmark",
@@ -491,7 +491,7 @@ def _turn_label(label: str, idx: int, count: int) -> str:
     return f"turn {idx + 1} {label}" if count > 1 else label
 
 
-def _delivery(episode: Episode, snapshot: Snapshot) -> tuple[list[DeliveryFact], Exposure]:
+def _delivery(episode: InjectionSpec, snapshot: Snapshot) -> tuple[list[DeliveryFact], Exposure]:
     """The sealed snapshot's delivery facts, and the exposure of the episode's plan they derive."""
     return delivery_facts(episode.plan, snapshot.function_calls), exposure(
         episode.plan, snapshot.function_calls, turns=len(snapshot.turns), evidence_status=snapshot.evidence_status
@@ -517,16 +517,16 @@ async def run_task(
     control: ControlClient,
     agent_client: AgentClient,
     run_id: str,
-    episode: Episode,
+    episode: InjectionSpec,
     *,
     runtime: AgentRuntime,
     interception: HostInterception | None = None,
-    on_context: Callable[[EpisodeContext], object] | None = None,
+    on_context: Callable[[EvaluationContext], object] | None = None,
     reset: bool = False,
 ) -> TaskResult:
     """Run one evaluation of a suite's ``episode`` in an episode context, and grade it on the control plane.
 
-    The context (:func:`midojo.episode_context.open_episode`) opens the
+    The context (:func:`midojo.evaluation_context.open_evaluation`) opens the
     evaluation in the run (the control plane compiles the same episode from the
     run's suite, and its turns are the ones sent), binds interception and sets
     the runtime up. Each turn is started, sent to the agent and its reply
@@ -546,13 +546,13 @@ async def run_task(
     ``on_context`` is given the episode context before it's entered, so a
     caller can still read its ``evaluation_id`` (once opened) when this raises.
     ``reset`` asks the context to reset the target first, when the runtime
-    declares a reset (see :func:`midojo.episode_context.open_episode`).
+    declares a reset (see :func:`midojo.evaluation_context.open_evaluation`).
     """
     user_task_id, injection_task_id = episode.user_task_id, episode.injection_task_id
     if user_task_id is None:
         raise ValueError("run_task runs a suite's episode: compile one with suite.episode()")
     pair = f"{user_task_id} x {injection_task_id}" if injection_task_id else user_task_id
-    steps: dict[EpisodeStep, str] = {
+    steps: dict[EvaluationStep, str] = {
         "interceptor": "starting the interceptor",
         "setup": f"setting up the {runtime.name} runtime",
         "close": "waiting for unfinished tool calls",
@@ -560,12 +560,12 @@ async def run_task(
         "teardown": f"tearing down the {runtime.name} runtime",
     }
 
-    def progress(step: EpisodeStep) -> contextlib.AbstractContextManager[object]:
+    def progress(step: EvaluationStep) -> contextlib.AbstractContextManager[object]:
         if step not in steps:
             return contextlib.nullcontext()
         return console.status(f"[dim]{pair} · {steps[step]}…[/dim]", spinner="dots")
 
-    context = open_episode(
+    context = open_evaluation(
         episode,
         runtime=runtime,
         interception=interception,
@@ -593,7 +593,7 @@ async def run_task(
     )
 
 
-async def _converse(ep: EpisodeContext, agent_client: AgentClient, pair: str) -> list[Exchange]:
+async def _converse(ep: EvaluationContext, agent_client: AgentClient, pair: str) -> list[Exchange]:
     """Send the episode's turns to the agent, in one conversation, recording each reply."""
     messages = ep.turns
     assert messages is not None  # A suite's episode always has its user task's turns.
@@ -618,7 +618,7 @@ def _static_attacker(_user_task_id: str, _injection_task_id: str | None, injecti
     return StaticAttacker(injections)
 
 
-class EpisodeRun(NamedTuple):
+class EvaluationRun(NamedTuple):
     """One episode the attempt loop ran: its result or why it failed, how it was isolated, and what it delivered."""
 
     result: TaskResult | None
@@ -632,18 +632,18 @@ class AttemptRun(NamedTuple):
     """One attempt of a pair: its outcome, its episode (None when refused), and its clean-start replay, if any."""
 
     outcome: AttemptOutcome
-    run: EpisodeRun | None
-    replay: EpisodeRun | None = None
+    run: EvaluationRun | None
+    replay: EvaluationRun | None = None
 
     @property
-    def counted(self) -> EpisodeRun | None:
+    def counted(self) -> EvaluationRun | None:
         """The episode whose verdict the attempt counts with: a confirmed adaptive break's replay, else its own."""
         if self.outcome.broke is True and self.replay is not None:
             return self.replay
         return self.run
 
 
-def _isolation_used(contexts: list[EpisodeContext], runtime: AgentRuntime) -> AttemptIsolation:
+def _isolation_used(contexts: list[EvaluationContext], runtime: AgentRuntime) -> AttemptIsolation:
     if contexts and contexts[0].reset_outcome == "reset":
         return "reset"
     return "disposable" if is_disposable(runtime) else "none"
@@ -653,15 +653,15 @@ async def _run_episode(
     control: ControlClient,
     agent_client: AgentClient,
     run_id: str,
-    episode: Episode,
+    episode: InjectionSpec,
     *,
     runtime: AgentRuntime,
     interception: HostInterception | None,
     reset: bool,
     pair_name: str,
-) -> EpisodeRun:
+) -> EvaluationRun:
     """Run one episode with :func:`run_task`; an ``Exception`` it raises is a failure, as for a failed pair."""
-    contexts: list[EpisodeContext] = []
+    contexts: list[EvaluationContext] = []
     cancellations = _cancellations()
     try:
         result = await run_task(
@@ -684,16 +684,16 @@ async def _run_episode(
         # The episode failed. Its evaluation, if opened, is sealed and usually ungraded, but
         # run_task can raise after the grade: either way it isn't counted.
         failure = PairFailure(_opened_evaluation(contexts), f"{type(error).__name__}: {error}")
-        return EpisodeRun(None, failure, _isolation_used(contexts, runtime), [], None)
+        return EvaluationRun(None, failure, _isolation_used(contexts, runtime), [], None)
     facts: list[DeliveryFact] = []
     report: Exposure | None = None
     if episode.injection_task_id is not None:
         assert result.snapshot is not None  # run_task returns the snapshot it graded.
         facts, report = _delivery(episode, result.snapshot)
-    return EpisodeRun(result, None, _isolation_used(contexts, runtime), facts, report)
+    return EvaluationRun(result, None, _isolation_used(contexts, runtime), facts, report)
 
 
-def _outcome(attempt: int, injections: dict[str, str], run: EpisodeRun) -> AttemptOutcome:
+def _outcome(attempt: int, injections: dict[str, str], run: EvaluationRun) -> AttemptOutcome:
     """An attempt's outcome, read from its episode's sealed verdict and delivery facts."""
     if run.result is None:
         assert run.failure is not None
@@ -720,7 +720,7 @@ def _proposed(proposal: object) -> dict[str, str]:
     return {str(key): value if type(value) is str else repr(value) for key, value in injections.items()}
 
 
-def _print_episode(control_url: str, run_id: str, label: str, run: EpisodeRun, injection: bool) -> None:
+def _print_episode(control_url: str, run_id: str, label: str, run: EvaluationRun, injection: bool) -> None:
     if run.result is None:
         assert run.failure is not None
         _print_failed_pair(control_url, run_id, label, run.failure)
@@ -808,7 +808,7 @@ async def _run_pair_attempts(
     runs: list[AttemptRun] = []
     history: list[AttemptOutcome] = []
 
-    async def episode_of(injections: dict[str, str]) -> EpisodeRun:
+    async def episode_of(injections: dict[str, str]) -> EvaluationRun:
         return await _run_episode(
             control,
             agent_client,
@@ -843,7 +843,7 @@ async def _run_pair_attempts(
         run = await episode_of(injections)
         _print_episode(control_url, run_id, tag, run, it_id is not None)
         outcome = _outcome(k, injections, run)
-        replay: EpisodeRun | None = None
+        replay: EvaluationRun | None = None
         if adaptive and outcome.broke is True:
             replay_tag = f"[magenta]replay of attempt {k}[/magenta] {label}"
             if isolation is None:
@@ -876,7 +876,7 @@ def _pair_security(outcomes: Sequence[AttemptOutcome]) -> bool | None:
     return None if None in ran or not ran else False
 
 
-def _representative(runs: Sequence[AttemptRun]) -> EpisodeRun | None:
+def _representative(runs: Sequence[AttemptRun]) -> EvaluationRun | None:
     """The episode a pair reports: the first attempt that counts as a break, else the last graded one; or None."""
     broken = next((r.counted for r in runs if r.outcome.broke is True), None)
     if broken is not None:
@@ -1092,7 +1092,7 @@ def _cancellations() -> int:
     return task.cancelling() if task is not None else 0
 
 
-def _opened_evaluation(contexts: list[EpisodeContext]) -> str | None:
+def _opened_evaluation(contexts: list[EvaluationContext]) -> str | None:
     """The evaluation the pair's episode context opened, or None when it failed before opening one."""
     try:
         return contexts[0].evaluation_id

@@ -22,11 +22,12 @@ Outcomes are domain values: a refusal raises :class:`RejectedError` with its
 :class:`Rejection` kind, and only the HTTP edge (``dependencies.py``) turns a
 kind into a status code.
 
-An evaluation is one run of an :class:`~midojo.episode.Episode`.
-:meth:`ControlPlane.open_evaluation` creates one from any episode, with no
-suite or run registered (``run_id`` None); :meth:`ControlPlane.create_evaluation`
-compiles a registered suite's task pair into an episode and opens it in a run.
-Grading reads the episode's checks.
+An evaluation is one run of an :class:`~midojo.injection_spec.InjectionSpec`.
+:meth:`ControlPlane.open_evaluation` creates one from any injection spec, with
+no suite or run registered (``run_id`` None);
+:meth:`ControlPlane.create_evaluation` compiles a registered suite's task pair
+into an injection spec and opens it in a run. Grading reads the injection
+spec's checks.
 """
 
 from __future__ import annotations
@@ -44,7 +45,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from midojo.episode import Episode, UnknownTaskError
+from midojo.injection_spec import InjectionSpec, UnknownTaskError
 from midojo.observations import require_evidence_keys
 from midojo.types import Environment, FunctionCallRecord, InterceptionMode, SuiteName
 from midojo.yaml_task_suite import YAMLTaskSuite
@@ -359,15 +360,18 @@ class ControlPlane:
         )
 
     def open_evaluation(
-        self, episode: Episode, *, run_id: str | None = None, interception: InterceptionMode = "agent"
+        self, episode: InjectionSpec, *, run_id: str | None = None, interception: InterceptionMode = "agent"
     ) -> OpenedEvaluation:
         """Create an evaluation of ``episode`` and open its session.
 
-        Needs no registered suite or run: without ``run_id``, the evaluation is
-        outside any run, and addressed as ``ById(None, eval_id)`` (or by its
-        session). With one, the run must exist, and the episode must name its
-        ``user_task_id`` (the run's routes report every evaluation by it), or
-        this raises ValueError. The episode's suite and task IDs are kept as
+        This method opens the evaluation on the control plane; the module-level
+        :func:`midojo.open_evaluation` wraps it in a context that also runs the
+        injection spec and seals the evaluation. Needs no registered suite or
+        run: without ``run_id``, the evaluation is outside any run, and
+        addressed as ``ById(None, eval_id)`` (or by its session). With one, the
+        run must exist, and the injection spec must name its ``user_task_id``
+        (the run's routes report every evaluation by it), or this raises
+        ValueError. The injection spec's suite and task IDs are kept as
         provenance; grading uses its checks.
 
         ``interception`` is where its tool calls are intercepted: ``agent`` (by

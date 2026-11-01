@@ -27,7 +27,7 @@ from midojo_sdk import snapshot as sdk_snapshot
 from pydantic import BaseModel
 from pydantic_core import TzInfo
 
-from midojo.episode import MAX_NESTING_DEPTH, Episode
+from midojo.injection_spec import MAX_NESTING_DEPTH, InjectionSpec
 from midojo.observations import FUNCTION_CALLS, EvidenceStatus, digest_content
 from midojo.types import Environment, FunctionCallRecord, InterceptionMode, SuiteName
 
@@ -391,7 +391,7 @@ def unsupported_value(value: Any) -> str | None:
     can't be copied, and the control plane copies what it keeps. Nor is a
     list, tuple, dict or set that contains itself, at any depth: it has no
     finite encoding. Nor are containers nested more than
-    :data:`~midojo.episode.MAX_NESTING_DEPTH` deep (``value`` itself, when a
+    :data:`~midojo.injection_spec.MAX_NESTING_DEPTH` deep (``value`` itself, when a
     container, is the first level): the check stops there, so it never hits
     the recursion limit, and what it accepts can be copied and encoded.
     """
@@ -509,8 +509,8 @@ class Evaluation:
     capture_failures: tuple[CaptureFailure, ...] = ()
     # Set once, from the snapshot, and never replaced.
     grade: GradeResponse | None = None
-    # Read-only: copying the evaluation shares it (see Episode.__deepcopy__).
-    episode: Episode | None = None
+    # Read-only: copying the evaluation shares it (see InjectionSpec.__deepcopy__).
+    episode: InjectionSpec | None = None
     suite_name: SuiteName | None = None
     # How many times the environment has changed since the evaluation was created.
     environment_revision: int = 0

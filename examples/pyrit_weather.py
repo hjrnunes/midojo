@@ -20,7 +20,7 @@ from pyrit.prompt_target.openai.openai_chat_target import OpenAIChatTarget
 from pyrit.setup.initialization import SQLITE, initialize_pyrit_async
 
 from midojo.agent_client import AgentClient, OpenShellAgentClient
-from midojo.episode_context import EpisodeContext
+from midojo.evaluation_context import EvaluationContext
 from midojo.interception_host import HostInterception
 from midojo.pyrit import MidojoEpisodeTarget, MidojoVerdictScorer, attack_summary, prepare_output_dir, write_receipts
 from midojo.runtimes import AgentRuntime, OpenShellRuntime
@@ -63,7 +63,7 @@ def build_attack(
     The sealed MiDojo verdict, confirmed on replay, decides objective success.
     """
 
-    async def drive(ep: EpisodeContext) -> None:
+    async def drive(ep: EvaluationContext) -> None:
         assert ep.turns is not None
         conversation = agent.start_conversation(
             session_token=ep.binding.session_token,

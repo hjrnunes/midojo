@@ -24,7 +24,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from midojo.episode import Episode
+from midojo.injection_spec import InjectionSpec
 from midojo.verifiers import ConversationTurn
 from midojo.verifiers.judge import JudgeRecord
 
@@ -52,7 +52,7 @@ class UnsupportedVerdictVersion(VerdictDocumentError):  # noqa: N818 - named by 
 
 
 def grade_snapshot(
-    episode: Episode, snapshot: Snapshot, *, judgements: Sequence[JudgeRecord | Mapping[str, Any]] | None = None
+    episode: InjectionSpec, snapshot: Snapshot, *, judgements: Sequence[JudgeRecord | Mapping[str, Any]] | None = None
 ) -> GradeResponse:
     """Grade ``snapshot`` with ``episode``'s checks. Reads nothing else, and changes nothing in ``snapshot``.
 
@@ -141,7 +141,7 @@ class Verdict:
 
 
 def grade(
-    episode: Episode, snapshot: Snapshot, *, judgements: Sequence[JudgeRecord | Mapping[str, Any]] | None = None
+    episode: InjectionSpec, snapshot: Snapshot, *, judgements: Sequence[JudgeRecord | Mapping[str, Any]] | None = None
 ) -> Verdict:
     """Grade ``snapshot`` with ``episode``'s checks: :func:`grade_snapshot`, naming what was graded.
 

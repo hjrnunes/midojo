@@ -72,8 +72,8 @@ class ControlClient(Protocol):
 
     An evaluation is addressed by its run and its ID. ``run_id`` is None only
     for an evaluation outside any run, which only a control plane in this
-    process can open (``InProcessControlClient.open_episode``); over HTTP that
-    raises ValueError.
+    process can open (``InProcessControlClient.open_evaluation``); over HTTP
+    that raises ValueError.
     """
 
     async def aclose(self) -> None: ...

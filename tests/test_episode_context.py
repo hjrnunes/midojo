@@ -200,7 +200,7 @@ def test_open_episode_refuses_a_blocking_tool_policy_without_an_interceptor_to_e
     )
     with pytest.raises(ValueError, match="book_shelter") as refused_open:
         open_episode(episode, runtime=UnmanagedRuntime())
-    assert "midojo.episode_handle.open" in str(refused_open.value)
+    assert "midojo.evaluation_handle.open" in str(refused_open.value)
 
 
 def test_open_episode_accepts_a_blocking_tool_policy_its_own_interceptor_enforces():

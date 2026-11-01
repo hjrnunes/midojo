@@ -22,7 +22,7 @@ from midojo.attacks import resolve_source, wrap_payload
 from midojo.capabilities import OPENSHELL_PREDICATE_ON_UNMANAGED_RUNTIME
 from midojo.control_plane.config import CONTROL_TOKEN_ENV
 from midojo.env_inference import infer_environment_type
-from midojo.episode import Episode, RuntimeCheckError, UnknownTaskError, freeze
+from midojo.injection_spec import InjectionSpec, RuntimeCheckError, UnknownTaskError, freeze
 from midojo.probes import PROBE_PLACEHOLDER_RE, substitute_probes, substitute_probes_deep
 from midojo.runtimes import AgentRuntime, RuntimeRegistry, build_runtime
 from midojo.suite_definition import OpenShellRuntimeDefinition, ProbeDefinition, SuiteDefinition
@@ -137,7 +137,7 @@ class YAMLTaskSuite:
     """Reads a suite definition from a single suite.yaml file.
 
     A suite is a catalogue: :meth:`episode` compiles one of its user task x
-    injection task pairs into an :class:`~midojo.episode.Episode`. Parsing it
+    injection task pairs into an :class:`~midojo.injection_spec.InjectionSpec`. Parsing it
     builds no runtime and imports no runtime provider: the suite records the
     runtime definition its ``agent_runtime`` asks for, and :meth:`new_runtime`
     builds a fresh runtime from it each time.
@@ -185,10 +185,10 @@ class YAMLTaskSuite:
         user_task_id: str,
         injection_task_id: str | None = None,
         injections: Mapping[str, str] | None = None,
-    ) -> Episode:
-        """Compile a user task x injection task pair into an episode, with ``injections`` substituted.
+    ) -> InjectionSpec:
+        """Compile a user task x injection task pair into an injection spec, with ``injections`` substituted.
 
-        Raises :class:`~midojo.episode.UnknownTaskError` for a task ID the suite
+        Raises :class:`~midojo.injection_spec.UnknownTaskError` for a task ID the suite
         doesn't have. ``injections`` maps ``"<task>:<probe>"`` to a payload (see
         :meth:`get_probes_for_task`); without it, no probe is active.
         """
@@ -204,7 +204,7 @@ class YAMLTaskSuite:
         instructions += _template_instructions(files, Channel.RUNTIME_FILE, active)
         plan = InjectionPlan(tuple(instructions), probe_payloads=tuple(active.items()))
         substitutions = dict(plan.substitution_payloads)
-        return Episode(
+        return InjectionSpec(
             runtime=self.definition.agent_runtime,
             turns=self.inject_user_task_turns(user_task_id, substitutions),
             plan=plan,
@@ -243,7 +243,7 @@ class YAMLTaskSuite:
         observations: dict[str, BaseModel] | None = None,
         turns: list[ConversationTurn] | None = None,
     ) -> dict[str, Any]:
-        """Grade one evaluation with the pair's checks (see :meth:`Episode.grade <midojo.episode.Episode.grade>`).
+        """Grade one evaluation with the pair's checks (see :meth:`InjectionSpec.grade <midojo.injection_spec.InjectionSpec.grade>`).
 
         ``utility`` and ``security`` are True, False, or None when the check
         couldn't be decided from the evidence collected; ``grade_validity`` marks

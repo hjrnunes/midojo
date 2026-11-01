@@ -2,7 +2,7 @@
 
 The cap counts listening interceptors and disposable sandboxes in one
 process, so a driver cannot exhaust the machine by opening episodes it never
-closes. These tests drive the cap through :func:`midojo.episode_handle.open`,
+closes. These tests drive the cap through :func:`midojo.evaluation_handle.open`,
 the public seam a driver uses, and through child processes where "per process"
 is the behaviour under test. No control-plane server and no network: the
 upstream is the scripted MCP server and the control plane runs in this
@@ -21,10 +21,10 @@ from pathlib import Path
 
 import pytest
 
-from midojo import episode_handle
+from midojo import evaluation_handle
 from midojo.capabilities import MissingCapabilityError
-from midojo.episode import Episode
-from midojo.episode_handle import DEFAULT_MAX_LIVE_EPISODES, LiveEpisodeLimitError
+from midojo.evaluation_handle import DEFAULT_MAX_LIVE_EPISODES, LiveEpisodeLimitError
+from midojo.injection_spec import InjectionSpec
 from midojo.runtimes import UnmanagedRuntime
 from tests.fixtures.scripted_target.upstream import scripted_upstream
 
@@ -32,9 +32,9 @@ ROOT = Path(__file__).resolve().parent.parent
 THREADS = 8
 
 
-def episode() -> Episode:
+def episode() -> InjectionSpec:
     """A one-turn unmanaged episode whose evidence needs a finished call, as the live ones do."""
-    return Episode(turns=["What's the weather in Boston?"], security={"tool_called": {"name": "book_shelter"}})
+    return InjectionSpec(turns=["What's the weather in Boston?"], security={"tool_called": {"name": "book_shelter"}})
 
 
 def clean_env() -> dict[str, str]:
@@ -53,18 +53,18 @@ def listeners() -> int:
     return len([line for line in listing.stdout.splitlines()[1:] if line.strip()])
 
 
-def port_of(handle: episode_handle.EpisodeHandle) -> int:
+def port_of(handle: evaluation_handle.EvaluationHandle) -> int:
     endpoint = handle.tool_endpoint
     assert endpoint is not None
     return int(endpoint.url.rsplit(":", 1)[1].split("/")[0])
 
 
-def hold(count: int, **options) -> list[episode_handle.EpisodeHandle]:
+def hold(count: int, **options) -> list[evaluation_handle.EvaluationHandle]:
     """Open ``count`` handles that stay open until the test closes them."""
-    return [episode_handle.open(episode(), upstream=scripted_upstream(), **options) for _ in range(count)]
+    return [evaluation_handle.open(episode(), upstream=scripted_upstream(), **options) for _ in range(count)]
 
 
-def close_all(handles: list[episode_handle.EpisodeHandle]) -> None:
+def close_all(handles: list[evaluation_handle.EvaluationHandle]) -> None:
     for handle in handles:
         handle.close()
 
@@ -85,13 +85,13 @@ def test_eight_threads_open_eight_handles_on_distinct_ports_twenty_rounds():
 
     for round_number in range(20):
         barrier = threading.Barrier(THREADS)
-        opened: list[episode_handle.EpisodeHandle | None] = [None] * THREADS
+        opened: list[evaluation_handle.EvaluationHandle | None] = [None] * THREADS
         failures: list[BaseException] = []
 
         def one(index: int) -> None:
             try:
                 barrier.wait(timeout=30)
-                opened[index] = episode_handle.open(episode(), upstream=scripted_upstream())
+                opened[index] = evaluation_handle.open(episode(), upstream=scripted_upstream())
             except BaseException as failure:  # Every failure is collected and re-raised after the round.
                 failures.append(failure)
 
@@ -124,16 +124,16 @@ def test_the_ninth_handle_is_refused_with_the_limit_and_binds_nothing(monkeypatc
         assert listeners() >= DEFAULT_MAX_LIVE_EPISODES
         listeners_at_cap = listeners()
         contexts: list[str] = []
-        original = episode_handle.EpisodeContext
+        original = evaluation_handle.EvaluationContext
 
         class Watched(original):  # type: ignore[misc, valid-type]
             def __init__(self, *args, **kwargs):
                 contexts.append("constructed")
                 super().__init__(*args, **kwargs)
 
-        monkeypatch.setattr(episode_handle, "EpisodeContext", Watched)
+        monkeypatch.setattr(evaluation_handle, "EvaluationContext", Watched)
         with pytest.raises(LiveEpisodeLimitError) as caught:
-            episode_handle.open(episode(), upstream=scripted_upstream())
+            evaluation_handle.open(episode(), upstream=scripted_upstream())
         error = caught.value
         assert (error.limit, error.live, error.reason) == (8, 8, "live-episode-limit")
         assert "8" in str(error) and str(DEFAULT_MAX_LIVE_EPISODES) in str(error)
@@ -146,12 +146,12 @@ def test_the_ninth_handle_is_refused_with_the_limit_and_binds_nothing(monkeypatc
 def test_two_processes_each_keep_their_own_eight():
     script = """
 import sys
-from midojo import episode_handle
-from midojo.episode import Episode
+from midojo import evaluation_handle
+from midojo.injection_spec import InjectionSpec
 from tests.fixtures.scripted_target.upstream import scripted_upstream
 
 handles = [
-    episode_handle.open(Episode(turns=["hi"]), upstream=scripted_upstream()) for _ in range(8)
+    evaluation_handle.open(InjectionSpec(turns=["hi"]), upstream=scripted_upstream()) for _ in range(8)
 ]
 print("open", flush=True)
 sys.stdin.readline()
@@ -199,12 +199,12 @@ def test_two_threads_race_for_the_last_slot_and_exactly_one_wins(monkeypatch):
     held = hold(DEFAULT_MAX_LIVE_EPISODES - 1)
     try:
         barrier = threading.Barrier(2)
-        outcomes: list[episode_handle.EpisodeHandle | LiveEpisodeLimitError] = []
+        outcomes: list[evaluation_handle.EvaluationHandle | LiveEpisodeLimitError] = []
 
         def attempt() -> None:
             barrier.wait(timeout=30)
             try:
-                outcomes.append(episode_handle.open(episode(), upstream=scripted_upstream()))
+                outcomes.append(evaluation_handle.open(episode(), upstream=scripted_upstream()))
             except LiveEpisodeLimitError as refusal:
                 outcomes.append(refusal)
 
@@ -213,7 +213,7 @@ def test_two_threads_race_for_the_last_slot_and_exactly_one_wins(monkeypatch):
             racer.start()
         for racer in racers:
             racer.join(timeout=60)
-        winners = [outcome for outcome in outcomes if isinstance(outcome, episode_handle.EpisodeHandle)]
+        winners = [outcome for outcome in outcomes if isinstance(outcome, evaluation_handle.EvaluationHandle)]
         refusals = [outcome for outcome in outcomes if isinstance(outcome, LiveEpisodeLimitError)]
         assert len(winners) == 1 and len(refusals) == 1
         assert (refusals[0].limit, refusals[0].live) == (DEFAULT_MAX_LIVE_EPISODES, DEFAULT_MAX_LIVE_EPISODES)
@@ -230,24 +230,24 @@ import warnings
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-from midojo import episode_handle
-from midojo.episode import Episode
-from midojo.episode_handle import LiveEpisodeLimitError
+from midojo import evaluation_handle
+from midojo.injection_spec import InjectionSpec
+from midojo.evaluation_handle import LiveEpisodeLimitError
 from tests.fixtures.scripted_target.upstream import scripted_upstream
 
-held = [episode_handle.open(Episode(turns=["hi"]), upstream=scripted_upstream()) for _ in range(8)]
+held = [evaluation_handle.open(InjectionSpec(turns=["hi"]), upstream=scripted_upstream()) for _ in range(8)]
 print("parent open 8", flush=True)
 
 pid = os.fork()
 if pid == 0:
     try:
-        mine = [episode_handle.open(Episode(turns=["hi"]), upstream=scripted_upstream()) for _ in range(8)]
+        mine = [evaluation_handle.open(InjectionSpec(turns=["hi"]), upstream=scripted_upstream()) for _ in range(8)]
     except LiveEpisodeLimitError as inherited:
         print(f"child inherited limit={inherited.limit} live={inherited.live}", flush=True)
         sys.stdout.flush()
         os._exit(1)
     try:
-        episode_handle.open(Episode(turns=["hi"]), upstream=scripted_upstream())
+        evaluation_handle.open(InjectionSpec(turns=["hi"]), upstream=scripted_upstream())
     except LiveEpisodeLimitError as refusal:
         print(f"child refused limit={refusal.limit} live={refusal.live}", flush=True)
     else:
@@ -282,7 +282,7 @@ def test_an_environment_cap_of_two_refuses_the_third(monkeypatch):
     held = hold(2)
     try:
         with pytest.raises(LiveEpisodeLimitError) as caught:
-            episode_handle.open(episode(), upstream=scripted_upstream())
+            evaluation_handle.open(episode(), upstream=scripted_upstream())
         assert (caught.value.limit, caught.value.live) == (2, 2)
     finally:
         close_all(held)
@@ -290,17 +290,17 @@ def test_an_environment_cap_of_two_refuses_the_third(monkeypatch):
 
 def test_a_max_live_below_the_cap_lowers_it_and_above_it_does_not_raise_it(monkeypatch):
     monkeypatch.delenv("MIDOJO_MAX_LIVE_EPISODES", raising=False)
-    first = episode_handle.open(episode(), upstream=scripted_upstream(), max_live=1)
+    first = evaluation_handle.open(episode(), upstream=scripted_upstream(), max_live=1)
     try:
         with pytest.raises(LiveEpisodeLimitError) as caught:
-            episode_handle.open(episode(), upstream=scripted_upstream(), max_live=1)
+            evaluation_handle.open(episode(), upstream=scripted_upstream(), max_live=1)
         assert caught.value.limit == 1
     finally:
         first.close()
     held = hold(DEFAULT_MAX_LIVE_EPISODES, max_live=DEFAULT_MAX_LIVE_EPISODES * 4)
     try:
         with pytest.raises(LiveEpisodeLimitError) as caught:
-            episode_handle.open(episode(), upstream=scripted_upstream(), max_live=DEFAULT_MAX_LIVE_EPISODES * 4)
+            evaluation_handle.open(episode(), upstream=scripted_upstream(), max_live=DEFAULT_MAX_LIVE_EPISODES * 4)
         assert (caught.value.limit, caught.value.live) == (DEFAULT_MAX_LIVE_EPISODES, DEFAULT_MAX_LIVE_EPISODES)
     finally:
         close_all(held)
@@ -309,27 +309,27 @@ def test_a_max_live_below_the_cap_lowers_it_and_above_it_does_not_raise_it(monke
 def test_a_non_integer_environment_value_raises_before_a_slot_is_taken(monkeypatch):
     monkeypatch.setenv("MIDOJO_MAX_LIVE_EPISODES", "many")
     with pytest.raises(ValueError, match="MIDOJO_MAX_LIVE_EPISODES"):
-        episode_handle.open(episode(), upstream=scripted_upstream())
+        evaluation_handle.open(episode(), upstream=scripted_upstream())
     monkeypatch.delenv("MIDOJO_MAX_LIVE_EPISODES")
     # The invalid value took no slot: all eight are still available.
     held = hold(DEFAULT_MAX_LIVE_EPISODES)
     try:
         with pytest.raises(LiveEpisodeLimitError):
-            episode_handle.open(episode(), upstream=scripted_upstream())
+            evaluation_handle.open(episode(), upstream=scripted_upstream())
     finally:
         close_all(held)
 
 
 def test_the_environment_cap_applies_in_a_new_process():
     script = """
-from midojo import episode_handle
-from midojo.episode import Episode
-from midojo.episode_handle import LiveEpisodeLimitError
+from midojo import evaluation_handle
+from midojo.injection_spec import InjectionSpec
+from midojo.evaluation_handle import LiveEpisodeLimitError
 from tests.fixtures.scripted_target.upstream import scripted_upstream
 
-handles = [episode_handle.open(Episode(turns=["hi"]), upstream=scripted_upstream()) for _ in range(2)]
+handles = [evaluation_handle.open(InjectionSpec(turns=["hi"]), upstream=scripted_upstream()) for _ in range(2)]
 try:
-    episode_handle.open(Episode(turns=["hi"]), upstream=scripted_upstream())
+    evaluation_handle.open(InjectionSpec(turns=["hi"]), upstream=scripted_upstream())
 except LiveEpisodeLimitError as error:
     print(f"limit={error.limit} live={error.live}", flush=True)
 else:
@@ -359,10 +359,10 @@ def test_closing_one_handle_twice_frees_one_slot_only(monkeypatch):
     try:
         held[0].close()
         held[0].close()
-        replacement = episode_handle.open(episode(), upstream=scripted_upstream())
+        replacement = evaluation_handle.open(episode(), upstream=scripted_upstream())
         try:
             with pytest.raises(LiveEpisodeLimitError) as caught:
-                episode_handle.open(episode(), upstream=scripted_upstream())
+                evaluation_handle.open(episode(), upstream=scripted_upstream())
             assert (caught.value.limit, caught.value.live) == (DEFAULT_MAX_LIVE_EPISODES, DEFAULT_MAX_LIVE_EPISODES)
         finally:
             replacement.close()
@@ -373,15 +373,15 @@ def test_closing_one_handle_twice_frees_one_slot_only(monkeypatch):
 def test_leaving_a_with_block_frees_the_slot_even_when_the_block_raises(monkeypatch):
     monkeypatch.delenv("MIDOJO_MAX_LIVE_EPISODES", raising=False)
     with pytest.raises(ZeroDivisionError):
-        with episode_handle.open(episode(), upstream=scripted_upstream(), max_live=1):
+        with evaluation_handle.open(episode(), upstream=scripted_upstream(), max_live=1):
             raise ZeroDivisionError("the driver broke")
-    with episode_handle.open(episode(), upstream=scripted_upstream(), max_live=1) as again:
+    with evaluation_handle.open(episode(), upstream=scripted_upstream(), max_live=1) as again:
         assert again.closed is False
 
 
 def test_a_collected_handle_frees_its_slot(monkeypatch):
     monkeypatch.delenv("MIDOJO_MAX_LIVE_EPISODES", raising=False)
-    handle = episode_handle.open(episode(), upstream=scripted_upstream(), max_live=1)
+    handle = evaluation_handle.open(episode(), upstream=scripted_upstream(), max_live=1)
     reference = weakref.ref(handle)
     del handle
     for _ in range(100):
@@ -389,7 +389,7 @@ def test_a_collected_handle_frees_its_slot(monkeypatch):
         if reference() is None:
             break
     assert reference() is None
-    with episode_handle.open(episode(), upstream=scripted_upstream(), max_live=1):
+    with evaluation_handle.open(episode(), upstream=scripted_upstream(), max_live=1):
         pass
 
 
@@ -408,11 +408,11 @@ def report():
     sys.stdout.flush()
 
 
-from midojo import episode_handle
-from midojo.episode import Episode
+from midojo import evaluation_handle
+from midojo.injection_spec import InjectionSpec
 from tests.fixtures.scripted_target.upstream import scripted_upstream
 
-state["handle"] = episode_handle.open(Episode(turns=["hi"]), upstream=scripted_upstream())
+state["handle"] = evaluation_handle.open(InjectionSpec(turns=["hi"]), upstream=scripted_upstream())
 print("open", flush=True)
 """
     child = subprocess.run(
@@ -434,7 +434,7 @@ def test_a_cap_refusal_gap_refusals_and_failed_opens_leave_every_slot_free(monke
     held = hold(DEFAULT_MAX_LIVE_EPISODES)
     try:
         with pytest.raises(LiveEpisodeLimitError) as refused:
-            episode_handle.open(episode(), upstream=scripted_upstream())
+            evaluation_handle.open(episode(), upstream=scripted_upstream())
         assert (refused.value.limit, refused.value.live) == (DEFAULT_MAX_LIVE_EPISODES, DEFAULT_MAX_LIVE_EPISODES)
     finally:
         close_all(held)
@@ -449,24 +449,24 @@ def test_a_cap_refusal_gap_refusals_and_failed_opens_leave_every_slot_free(monke
                 packages=("openshell",),
             )
 
-        gap.setattr(Episode, "check_runtime_available", unavailable)
+        gap.setattr(InjectionSpec, "check_runtime_available", unavailable)
         for _ in range(10):
             with pytest.raises(MissingCapabilityError):
-                episode_handle.open(
-                    Episode(runtime={"type": "openshell", "image": "pi"}, turns=["hi"]),
+                evaluation_handle.open(
+                    InjectionSpec(runtime={"type": "openshell", "image": "pi"}, turns=["hi"]),
                     upstream=scripted_upstream(),
                 )
 
     # Ten opens that fail after their slot is taken.
     for _ in range(10):
         with pytest.raises(RuntimeError, match="setup failed"):
-            episode_handle.open(episode(), runtime=FailingSetup(), upstream=scripted_upstream())
+            evaluation_handle.open(episode(), runtime=FailingSetup(), upstream=scripted_upstream())
 
     # Exactly eight slots are left, not one fewer for each failure.
     held = hold(DEFAULT_MAX_LIVE_EPISODES)
     try:
         with pytest.raises(LiveEpisodeLimitError) as caught:
-            episode_handle.open(episode(), upstream=scripted_upstream())
+            evaluation_handle.open(episode(), upstream=scripted_upstream())
         assert (caught.value.limit, caught.value.live) == (DEFAULT_MAX_LIVE_EPISODES, DEFAULT_MAX_LIVE_EPISODES)
         assert len({port_of(handle) for handle in held}) == DEFAULT_MAX_LIVE_EPISODES
     finally:

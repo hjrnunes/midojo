@@ -151,7 +151,7 @@ class RecordedJudge:
     unknown with ``judge-replay-ambiguous:<id8>``. Records that decide alike
     answer alike, so any one of them answers.
 
-    Pass one to :func:`midojo.grade` (or :meth:`midojo.Episode.grade`) as
+    Pass one to :func:`midojo.grade` (or :meth:`midojo.InjectionSpec.grade`) as
     ``judgements=``: the grading then reads its judgements from it instead of
     asking a service. Records whose ``failure`` is set replay as unknown, as
     they graded the first time.

@@ -1,6 +1,6 @@
 """Remove a run's OpenShell workspace after its driver is gone.
 
-:func:`midojo.episode_handle.open` starts this as a detached process for a
+:func:`midojo.evaluation_handle.open` starts this as a detached process for a
 disposable runtime. It waits for the driver process to exit and then deletes
 the sandboxes in the driver's workspace and the workspace itself, so a driver
 killed with ``SIGKILL`` leaves no sandbox behind. A normal close stops the

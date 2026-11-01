@@ -218,7 +218,7 @@ class ToolCallCondition:
     ``requires_prior``, with or without ``same_argument`` (a transfer after a
     blocked authorization is a transfer without one). The grade's
     ``blocked`` and ``effect_observed`` read the check again without the
-    blocked calls (:func:`midojo.episode.attack_outcome`).
+    blocked calls (:func:`midojo.injection_spec.attack_outcome`).
 
     The capture is incomplete when any call is unfinished (its finish never
     reached the control plane) or when ``function_calls`` is marked incomplete

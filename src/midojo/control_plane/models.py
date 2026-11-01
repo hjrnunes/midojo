@@ -389,7 +389,7 @@ class GradeResponse(BaseModel):
 
     ``attempted``, ``blocked``, ``effect_observed`` and ``injection_delivered``
     say apart what ``security`` folds together, each True, False or None
-    (unknown); see :func:`midojo.episode.attack_outcome`. They never change
+    (unknown); see :func:`midojo.injection_spec.attack_outcome`. They never change
     ``security`` or its validity.
     """
 

@@ -729,7 +729,7 @@ class _Trail:
 class PlanPlacementEngine:
     """The default engine: one injection plan's placements, its occurrence counters and its outcomes.
 
-    ``plan`` is the tool-output part of an episode's plan. ``evaluation_id``
+    ``plan`` is the tool-output part of an injection spec's plan. ``evaluation_id``
     names the evaluation its occurrences belong to, for a call view that
     doesn't name its own scope; a new scope counts from zero, so a server
     that serves several evaluations keeps their occurrence rules apart.

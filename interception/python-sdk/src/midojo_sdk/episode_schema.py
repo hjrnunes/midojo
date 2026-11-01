@@ -3,7 +3,7 @@
 The schema is the language-neutral half of the contract: every repository that
 reads or writes an episode document validates it with the schema, so this
 package owns the file. MiDojo itself reads and writes documents through
-:mod:`midojo.episode_document`, and a test holds the two in agreement over the
+:mod:`midojo.injection_spec_document`, and a test holds the two in agreement over the
 golden vectors.
 
 The plan is ``$defs/plan`` inside the schema. Its version is the enclosing

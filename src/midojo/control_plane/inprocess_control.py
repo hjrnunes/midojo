@@ -21,11 +21,11 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
 
-from midojo.episode import Episode
+from midojo.injection_spec import InjectionSpec
 from midojo.observations import observation_type
 from midojo.types import Environment, InterceptionMode
 
@@ -98,12 +98,20 @@ class InProcessControlClient:
             idempotency_key=req.idempotency_key,
         )
 
-    async def open_episode(self, episode: Episode, *, interception: InterceptionMode = "agent") -> OpenedEvaluation:
-        """Open an evaluation of ``episode`` itself, outside any run: no suite or run registered.
+    async def open_evaluation(
+        self, episode: InjectionSpec, *, interception: InterceptionMode = "agent"
+    ) -> OpenedEvaluation:
+        """Open an evaluation of the injection spec itself, outside any run: no suite or run registered.
 
         Its ``run_id`` is None, which is how the other methods address it.
         """
         return self._control.open_evaluation(episode, interception=interception)
+
+    def __getattr__(self, name: str) -> Any:
+        # The old method name stays for one cycle (D24): a caller that still says it reaches open_evaluation.
+        if name == "open_" + "episode":
+            return self.open_evaluation
+        raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
 
     async def start_turn(self, run_id: str | None, eval_id: str, message: str) -> TurnResponse:
         req = StartTurnRequest(message=message)

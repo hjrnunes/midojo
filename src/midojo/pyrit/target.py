@@ -19,8 +19,8 @@ import midojo
 from midojo.attacks.attacker import AttackAttempt, OutOfSurfaceError, check_plan_within, permitted_injections
 from midojo.control_plane.models import GradeResponse
 from midojo.control_plane.service import ControlPlane
-from midojo.episode import Episode
-from midojo.episode_context import EpisodeContext
+from midojo.evaluation_context import EvaluationContext
+from midojo.injection_spec import InjectionSpec
 from midojo.interception_host import HostInterception
 from midojo.runtimes import AgentRuntime, attempt_isolation
 from midojo.suite_tools import host_tools_reference
@@ -121,7 +121,7 @@ class MidojoVerdict:
 
 @dataclass(frozen=True)
 class _Attempt:
-    episode: Episode | None
+    episode: InjectionSpec | None
     verdict: MidojoVerdict
 
 
@@ -143,9 +143,9 @@ class MidojoEpisodeTarget(PromptTarget):
     def __init__(
         self,
         *,
-        episode_for_payload: Callable[[str], Episode],
+        episode_for_payload: Callable[[str], InjectionSpec],
         surface: InjectionPlan,
-        drive: Callable[[EpisodeContext], Awaitable[None]],
+        drive: Callable[[EvaluationContext], Awaitable[None]],
         runtime: AgentRuntime,
         interception: HostInterception | None = None,
         control: ControlPlane | None = None,
@@ -180,7 +180,7 @@ class MidojoEpisodeTarget(PromptTarget):
         user_task_id: str,
         injection_task_id: str,
         probe_key: str,
-        drive: Callable[[EpisodeContext], Awaitable[None]],
+        drive: Callable[[EvaluationContext], Awaitable[None]],
         runtime: AgentRuntime,
         interception: HostInterception | None = None,
         control: ControlPlane | None = None,
@@ -203,7 +203,7 @@ class MidojoEpisodeTarget(PromptTarget):
             raise ValueError("a suite declaring HOST_TOOLS requires host interception")
         surface = suite.episode(user_task_id, injection_task_id, {probe_key: ""}).plan
 
-        def compile_episode(payload: str) -> Episode:
+        def compile_episode(payload: str) -> InjectionSpec:
             injections = permitted_injections(AttackAttempt({probe_key: payload}), {probe_key: ""})
             return suite.episode(user_task_id, injection_task_id, injections)
 
@@ -254,8 +254,8 @@ class MidojoEpisodeTarget(PromptTarget):
             self._attempts[str(response.message_pieces[0].id)] = _Attempt(replay_episode, verdict)
             return [response]
 
-    async def _run(self, episode: Episode) -> tuple[MidojoVerdict, str]:
-        ep = midojo.open_episode(
+    async def _run(self, episode: InjectionSpec) -> tuple[MidojoVerdict, str]:
+        ep = midojo.open_evaluation(
             episode,
             runtime=self._runtime,
             interception=self._interception,

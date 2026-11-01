@@ -391,7 +391,7 @@ class InjectionPlan:
     """An immutable ordered collection of instructions and generator bounds.
 
     ``probe_payloads`` is the host's substitution map. It may contain active
-    probes not referenced by a template in this episode, but every template
+    probes not referenced by a template in this injection spec, but every template
     instruction must name an entry with the same payload. Tool-output and
     tool-description instructions are carried for an external interceptor;
     select that interceptor's part with :meth:`for_channels`, which will then
@@ -615,7 +615,7 @@ def capability_gaps(
 
 
 class GeneratorInstructionError(ValueError):
-    """Generator output names something outside an episode's permissions."""
+    """Generator output names something outside an injection spec's permissions."""
 
 
 def instruction_from_generator(
@@ -655,7 +655,7 @@ def instruction_from_generator(
 def instruction_from_generator_for_plan(
     output: Mapping[str, Any], plan: InjectionPlan, *, probe_key: str | None = None
 ) -> InjectionInstruction:
-    """Build from generator output constrained by an episode's plan permissions."""
+    """Build from generator output constrained by an injection spec's plan permissions."""
     if type(plan) is not InjectionPlan:
         raise TypeError("plan must be an InjectionPlan")
     return instruction_from_generator(output, plan.generator_permissions, probe_key=probe_key)

@@ -56,8 +56,12 @@ LIGHT_MODULES = (
     "midojo.episode",
     "midojo.episode_document",
     "midojo.episode_context",
+    "midojo.injection_spec",
+    "midojo.injection_spec_document",
+    "midojo.evaluation_context",
     # The synchronous handle over that context.
     "midojo.episode_handle",
+    "midojo.evaluation_handle",
     "midojo.control_plane.state",
     "midojo.control_plane.grading",
     # The in-process control plane open_episode uses by default, which holds ById, and what it imports.
@@ -633,10 +637,10 @@ _BASE_ORCHESTRATOR_STAR = (
     "EXIT_ALL_FAILED",
     "EXIT_SOME_FAILED",
     "EXPOSURE_BOUNDARIES",
-    "Episode",
-    "EpisodeContext",
-    "EpisodeRun",
-    "EpisodeStep",
+    "EvaluationContext",
+    "EvaluationRun",
+    "EvaluationStep",
+    "InjectionSpec",
     "Exchange",
     "Exposure",
     "ExposureStatus",
@@ -687,7 +691,7 @@ _BASE_ORCHESTRATOR_STAR = (
     "list_suites",
     "main",
     "math",
-    "open_episode",
+    "open_evaluation",
     "os",
     "permitted_injections",
     "run_benchmark",
@@ -771,7 +775,7 @@ _BASE_MIDOJO_ALL = (
     "Snapshot",
     "Verdict",
     "grade",
-    "open_episode",
+    "open_evaluation",
 )
 
 

@@ -1,7 +1,7 @@
 """The PyRIT route: PyRIT owns the campaign, MiDojo is its target and its scorer.
 
 :class:`MidojoEpisodeTarget` is a PyRIT ``PromptTarget`` whose every send runs
-one MiDojo episode (:func:`midojo.open_episode`) with the candidate text as the
+one MiDojo episode (:func:`midojo.open_evaluation`) with the candidate text as the
 payload of one declared surface, and answers with the agent's reply and the
 episode's sealed identity and verdict in the response's ``prompt_metadata``.
 :class:`MidojoVerdictScorer` (true/false) and :class:`MidojoVerdictFloatScorer`
