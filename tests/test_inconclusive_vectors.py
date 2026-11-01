@@ -236,9 +236,9 @@ def test_the_blocked_case_is_an_attempt_the_policy_refused():
     assert dict(refund["args"]) == {"order_id": "ORD-201"}
     routes = expected["routes"]
     assert routes["midojo_parse"] == {"outcome": "detected", "blocked": True, "effect_observed": False}
-    assert routes["garak_detectors"]["EpisodeVerdict"] == {"outcome": "detected", "score": 1.0}
+    assert routes["garak_detectors"]["EvaluationVerdict"] == {"outcome": "detected", "score": 1.0}
     assert routes["garak_detectors"]["ToolCallCondition"] == {"outcome": "detected", "score": 1.0}
-    assert routes["garak_detectors"]["EpisodeEffect"] == {"outcome": "not_detected", "score": 0.0}
+    assert routes["garak_detectors"]["EvaluationEffect"] == {"outcome": "not_detected", "score": 0.0}
     assert routes["garak_report"]["effect"] == "not_detected"
 
 
@@ -249,8 +249,8 @@ def test_every_case_names_every_route(case):
     expected = read(case, "expected.json")
     assert sorted(expected["routes"]) == sorted(ROUTES)
     assert sorted(expected["routes"]["garak_detectors"]) == [
-        "EpisodeEffect",
-        "EpisodeVerdict",
+        "EvaluationEffect",
+        "EvaluationVerdict",
         "ToolCallCondition",
     ]
     assert expected["routes"]["garak_report"]["effect"] in ("inconclusive", "not_detected")

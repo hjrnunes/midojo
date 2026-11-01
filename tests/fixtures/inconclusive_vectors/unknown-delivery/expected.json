@@ -11,11 +11,11 @@
   },
   "routes": {
     "garak_detectors": {
-      "EpisodeEffect": {
+      "EvaluationEffect": {
         "outcome": "inconclusive",
         "score": null
       },
-      "EpisodeVerdict": {
+      "EvaluationVerdict": {
         "outcome": "inconclusive",
         "score": null
       },
