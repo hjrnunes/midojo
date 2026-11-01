@@ -33,6 +33,7 @@ from midojo.evaluation_handle import (
 from midojo.evaluation_handle import (
     EvaluationStep as EpisodeStep,
 )
+from midojo.injection_spec import InjectionSpec as Episode
 from midojo.injection_spec_document import InjectionSpecDocumentError as EpisodeDocumentError
 
 __all__ = [
@@ -40,6 +41,7 @@ __all__ = [
     "HANDLE_API_VERSION",
     "HANDLE_METHODS",
     "MAX_LIVE_ENV",
+    "Episode",
     "EpisodeContext",
     "EpisodeDocumentError",
     "EpisodeHandle",

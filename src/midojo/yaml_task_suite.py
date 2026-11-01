@@ -22,6 +22,7 @@ from midojo.attacks import resolve_source, wrap_payload
 from midojo.capabilities import OPENSHELL_PREDICATE_ON_UNMANAGED_RUNTIME
 from midojo.control_plane.config import CONTROL_TOKEN_ENV
 from midojo.env_inference import infer_environment_type
+from midojo.episode_aliases import resolve as _resolve_episode_alias
 from midojo.injection_spec import InjectionSpec, RuntimeCheckError, UnknownTaskError, freeze
 from midojo.probes import PROBE_PLACEHOLDER_RE, substitute_probes, substitute_probes_deep
 from midojo.runtimes import AgentRuntime, RuntimeRegistry, build_runtime
@@ -36,6 +37,11 @@ from midojo.verifiers.openshell import reads_openshell_observations
 # keeps these from colliding with the bare ``${...}`` shell tokens that appear in
 # attack payloads, and mirrors the syntax OGX uses in its distribution configs.
 _ENV_VAR_RE = re.compile(r"\$\{env\.([A-Za-z_][A-Za-z0-9_]*)(?:(:=|:\+)([^}]*))?\}")
+
+
+def __getattr__(name: str) -> Any:
+    """Resolve a name this module exported before the episode -> injection spec rename (D24)."""
+    return _resolve_episode_alias(__name__, name)
 
 
 def _expand_env_vars(value: Any) -> Any:

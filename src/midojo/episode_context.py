@@ -29,10 +29,12 @@ from midojo.evaluation_context import (
 from midojo.evaluation_context import (
     open_evaluation as open_episode,
 )
+from midojo.injection_spec import InjectionSpec as Episode
 
 __all__ = [
     "INTERRUPTED_EVIDENCE",
     "AgentBinding",
+    "Episode",
     "EpisodeContext",
     "EpisodeResult",
     "EpisodeStep",

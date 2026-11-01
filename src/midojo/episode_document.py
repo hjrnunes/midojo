@@ -8,6 +8,7 @@ name here is the same object as the new module's. New code imports
 
 from __future__ import annotations
 
+from midojo.injection_spec import InjectionSpec as Episode
 from midojo.injection_spec_document import (
     LEGACY_DOCUMENT_VERSIONS,
     SUPPORTED_DOCUMENT_VERSIONS,
@@ -24,6 +25,7 @@ from midojo.injection_spec_document import (
 __all__ = [
     "LEGACY_DOCUMENT_VERSIONS",
     "SUPPORTED_DOCUMENT_VERSIONS",
+    "Episode",
     "EpisodeDocumentError",
     "UnsupportedDocumentVersion",
     "dump_document",

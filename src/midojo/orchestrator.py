@@ -44,6 +44,8 @@ from midojo.control_plane.config import CONTROL_TOKEN_ENV
 from midojo.control_plane.models import GradeResponse
 from midojo.control_plane.state import Snapshot
 from midojo.delivery import EXPOSURE_BOUNDARIES, DeliveryFact, Exposure, ExposureStatus, delivery_facts, exposure
+from midojo.episode_aliases import names as _episode_alias_names
+from midojo.episode_aliases import resolve as _resolve_episode_alias
 from midojo.evaluation_context import EvaluationContext, EvaluationStep, open_evaluation
 from midojo.injection_spec import InjectionSpec
 from midojo.runtimes import AgentRuntime, attempt_isolation, is_disposable
@@ -81,11 +83,11 @@ def __getattr__(name: str) -> Any:
         from midojo import runtimes
 
         return getattr(runtimes.openshell, name)
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return _resolve_episode_alias(__name__, name)
 
 
 def __dir__() -> list[str]:
-    return sorted({*globals(), *_FROM_OPENSHELL})
+    return sorted({*globals(), *_FROM_OPENSHELL, *_episode_alias_names(__name__)})
 
 
 # What ``from midojo.orchestrator import *`` exports: every public name it exported when this module imported the
@@ -174,6 +176,8 @@ __all__ = [
     "sys",
     "tool_url",
 ]
+# The renamed names this module exported keep their place in the star-import surface until the aliases go (M9).
+__all__ += list(_episode_alias_names(__name__))  # pyright: ignore[reportUnsupportedDunderAll]
 
 
 def _resolve_system_message(suite_name: str) -> str:

@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
 
+from midojo.episode_aliases import resolve as _resolve_episode_alias
 from midojo.injection_spec import InjectionSpec
 from midojo.observations import observation_type
 from midojo.types import Environment, InterceptionMode
@@ -49,6 +50,11 @@ from .state import Snapshot
 
 if TYPE_CHECKING:
     from midojo_sdk.recorder import Recorder, WorldState
+
+
+def __getattr__(name: str) -> Any:
+    """Resolve a name this module exported before the episode -> injection spec rename (D24)."""
+    return _resolve_episode_alias(__name__, name)
 
 
 class InProcessControlClient:

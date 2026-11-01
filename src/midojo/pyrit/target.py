@@ -8,7 +8,7 @@ import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from types import ModuleType
-from typing import Literal
+from typing import Any, Literal
 
 from midojo_sdk.injection import InjectionPlan
 from pyrit.models.messages.conversations import construct_response_from_request
@@ -19,12 +19,19 @@ import midojo
 from midojo.attacks.attacker import AttackAttempt, OutOfSurfaceError, check_plan_within, permitted_injections
 from midojo.control_plane.models import GradeResponse
 from midojo.control_plane.service import ControlPlane
+from midojo.episode_aliases import resolve as _resolve_episode_alias
 from midojo.evaluation_context import EvaluationContext
 from midojo.injection_spec import InjectionSpec
 from midojo.interception_host import HostInterception
 from midojo.runtimes import AgentRuntime, attempt_isolation
 from midojo.suite_tools import host_tools_reference
 from midojo.yaml_task_suite import YAMLTaskSuite
+
+
+def __getattr__(name: str) -> Any:
+    """Resolve a name this module exported before the episode -> injection spec rename (D24)."""
+    return _resolve_episode_alias(__name__, name)
+
 
 METADATA_PREFIX = "midojo."
 UNDETERMINED_REPLY = "MiDojo could not evaluate this candidate."

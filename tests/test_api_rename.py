@@ -8,6 +8,8 @@ behaves the same until the aliases go (M9).
 
 from __future__ import annotations
 
+import pytest
+
 import midojo
 import midojo.episode
 import midojo.episode_context
@@ -80,6 +82,55 @@ def test_each_old_name_is_its_new_name() -> None:
     assert midojo.episode_handle.EpisodeHandle is EvaluationHandle
     assert midojo.episode_document.EpisodeDocumentError is InjectionSpecDocumentError
     assert midojo.EvaluationRun is midojo.orchestrator.EvaluationRun
+
+
+def test_each_old_name_imports_from_the_module_that_exported_it() -> None:
+    """Every old import path names the new object, not only the package root (AGENTS.md invariant 5)."""
+    from midojo.control_plane.grading import Episode as GradingEpisode
+    from midojo.control_plane.inprocess_control import Episode as InProcessEpisode
+    from midojo.control_plane.service import Episode as ServiceEpisode
+    from midojo.control_plane.state import Episode as StateEpisode
+    from midojo.episode_context import Episode as ContextEpisode
+    from midojo.episode_document import Episode as DocumentEpisode
+    from midojo.episode_handle import Episode as HandleEpisode
+    from midojo.evaluation_context import EvaluationContext, EvaluationStep, open_evaluation
+    from midojo.injection_spec import InjectionSpec
+    from midojo.orchestrator import Episode as OrchestratorEpisode
+    from midojo.orchestrator import EpisodeContext, EpisodeRun, EpisodeStep, open_episode
+    from midojo.yaml_task_suite import Episode as YamlSuiteEpisode
+
+    assert OrchestratorEpisode is InjectionSpec
+    assert EpisodeContext is EvaluationContext
+    assert EpisodeRun is midojo.orchestrator.EvaluationRun
+    assert EpisodeStep is EvaluationStep
+    assert open_episode is open_evaluation
+    assert GradingEpisode is InjectionSpec
+    assert InProcessEpisode is InjectionSpec
+    assert ServiceEpisode is InjectionSpec
+    assert StateEpisode is InjectionSpec
+    assert ContextEpisode is InjectionSpec
+    assert DocumentEpisode is InjectionSpec
+    assert HandleEpisode is InjectionSpec
+    assert YamlSuiteEpisode is InjectionSpec
+
+
+def test_the_pyrit_target_keeps_its_old_names() -> None:
+    pytest.importorskip("pyrit")
+    from midojo.pyrit.target import Episode, EpisodeContext
+
+    assert Episode is midojo.InjectionSpec
+    assert EpisodeContext is midojo.EvaluationContext
+
+
+def test_a_star_import_of_the_orchestrator_still_names_the_old_names() -> None:
+    """The module's ``__all__`` was the documented star-import surface before the rename."""
+    namespace: dict[str, object] = {}
+    exec("from midojo.orchestrator import *", namespace)
+    assert namespace["Episode"] is midojo.InjectionSpec
+    assert namespace["EpisodeContext"] is midojo.EvaluationContext
+    assert namespace["EpisodeRun"] is midojo.orchestrator.EvaluationRun
+    assert namespace["EpisodeStep"] is midojo.EvaluationStep
+    assert namespace["open_episode"] is midojo.open_evaluation
 
 
 def test_open_episode_opens_the_evaluation_open_evaluation_opens() -> None:

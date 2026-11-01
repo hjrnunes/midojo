@@ -27,11 +27,17 @@ from midojo_sdk import snapshot as sdk_snapshot
 from pydantic import BaseModel
 from pydantic_core import TzInfo
 
+from midojo.episode_aliases import resolve as _resolve_episode_alias
 from midojo.injection_spec import MAX_NESTING_DEPTH, InjectionSpec
 from midojo.observations import FUNCTION_CALLS, EvidenceStatus, digest_content
 from midojo.types import Environment, FunctionCallRecord, InterceptionMode, SuiteName
 
 from .models import CapturePhase, GradeResponse
+
+
+def __getattr__(name: str) -> Any:
+    """Resolve a name this module exported before the episode -> injection spec rename (D24)."""
+    return _resolve_episode_alias(__name__, name)
 
 
 def _now() -> str:

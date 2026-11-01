@@ -45,6 +45,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from midojo.episode_aliases import resolve as _resolve_episode_alias
 from midojo.injection_spec import InjectionSpec, UnknownTaskError
 from midojo.observations import require_evidence_keys
 from midojo.types import Environment, FunctionCallRecord, InterceptionMode, SuiteName
@@ -63,6 +64,12 @@ from .models import (
 )
 from .state import CaptureFailure, Creation, Evaluation, Run, Snapshot, Stage, Turn, unsupported_value
 from .store import InMemoryStore, Store, detached
+
+
+def __getattr__(name: str) -> Any:
+    """Resolve a name this module exported before the episode -> injection spec rename (D24)."""
+    return _resolve_episode_alias(__name__, name)
+
 
 # How often the closure wait checks for unfinished calls, in seconds.
 CLOSURE_POLL_SECONDS = 0.05
