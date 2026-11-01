@@ -551,6 +551,11 @@ class OpenShellRuntime:
         return self._workspace_name
 
     @property
+    def cluster(self) -> str:
+        """The gateway name ``configure`` set, or ``""`` for the active one."""
+        return self._cluster
+
+    @property
     def image(self) -> str:
         return self._image
 

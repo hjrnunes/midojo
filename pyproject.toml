@@ -5,8 +5,21 @@ description = "Man-in-the-middle red teaming for AI agents"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Security",
+]
 requires-python = ">= 3.12"
 dependencies = [
+    # The episode document, the snapshot codec, the plan codec and the host
+    # interceptor's MCP client all live in the SDK, so MiDojo depends on it as
+    # a base package. The mcp extra pins FastMCP, which the interceptor needs.
+    "midojo-sdk[mcp]",
     "pydantic>=2.7.1",
     "pyyaml>=6.0.1",
     "click>=8.1.7",
@@ -31,7 +44,6 @@ Issues = "https://github.com/asago-ai/midojo/issues"
 [project.optional-dependencies]
 # Dependencies for running the bundled suites' example agents (a2a, ogx, ...).
 suites = [
-    "midojo-sdk[mcp]",
     "fastmcp",
     "ogx>=0.8.0,<0.9.0",
     "ogx-client>=0.8.0,<0.9.0",
@@ -43,11 +55,11 @@ suites = [
 # The PyRIT route (midojo.pyrit): a PyRIT target and scorers over MiDojo
 # episodes. PyRIT's API broke at 0.10 and 1.0, so it is pinned to 1.1.
 pyrit = [
-    "midojo-sdk[mcp]",
     "pyrit>=1.1.0,<1.2",
 ]
 dev = [
     "midojo-sdk[mcp,langchain]",
+    "jsonschema>=4.23",
     "pytest>=8.0.2",
     "pytest-asyncio>=0.24",
     "ruff>=0.3.0",

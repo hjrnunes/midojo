@@ -4,6 +4,16 @@ version = "0.1.0"
 description = "Build MiDojo interception layers for AI agents"
 readme = "README.md"
 license = "Apache-2.0"
+license-files = ["LICENSE"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Security",
+]
 requires-python = ">= 3.12"
 dependencies = [
     "httpx>=0.28",

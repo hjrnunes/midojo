@@ -24,6 +24,18 @@ def no_control_token(monkeypatch):
     monkeypatch.delenv("MIDOJO_CONTROL_TOKEN", raising=False)
 
 
+@pytest.fixture(scope="session", autouse=True)
+def every_snapshot_is_named_by_the_sdk_digest():
+    """One implementation names a snapshot: every snapshot the suite builds is checked (architecture 2.1.1)."""
+    from tests.snapshot_invariant import install
+
+    undo = install()
+    try:
+        yield
+    finally:
+        undo()
+
+
 @pytest.fixture
 def suite():
     return task_suite

@@ -26,7 +26,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import midojo_sdk.injection as injection
-import midojo_sdk.mcp as splice
+import midojo_sdk.mcp as interceptor
+import midojo_sdk.placement as splice
 import pytest
 from mcp.types import CallToolResult, ImageContent, TextContent
 from midojo_sdk.injection import (
@@ -115,11 +116,12 @@ class Case:
     placed: dict[int, tuple[str, str, dict[str, Any], str]] = field(default_factory=dict)
 
     async def observed(self, module: types.ModuleType) -> tuple[Any, Any, Any, Any, Any]:
-        mcp = module.MidojoMCP(
+        engine = module.PlanPlacementEngine(InjectionPlan(self.instructions), evaluation_id="e1")
+        mcp: Any = interceptor.MidojoMCP(
             "splice",
             recorder=Recorder(),
             upstream_transport=object(),
-            plan=InjectionPlan(self.instructions),
+            engine=engine,
             evaluation_id="e1",
         )
         mcp._upstream = FixedUpstream(self.upstream)
@@ -128,14 +130,15 @@ class Case:
             sent = (await mcp._forward_call(TOOL, arguments)).to_mcp_result()
             texts = [part.text if isinstance(part, TextContent) else f"<{part.type}>" for part in sent.content]
             returned.append((texts, sent.structuredContent))
+        recorded = engine.outcomes()
         outcomes = sorted(
             (o.admission_order, o.instruction_index, o.status.value, o.occurrence, tuple(p.value for p in o.emitted))
-            for o in mcp.injection_outcomes
+            for o in recorded
         )
-        details = {o.instruction_index: o.detail for o in mcp.injection_outcomes}
+        details = {o.instruction_index: o.detail for o in recorded}
         named = sorted(
             (o.admission_order, o.instruction_index, _named(o.payload_digest, o.placed_digest, o.slot))
-            for o in mcp.injection_outcomes
+            for o in recorded
         )
         fields = {
             index: [
@@ -144,7 +147,7 @@ class Case:
                     "placed_digest": o.placed_digest,
                     "slot": None if o.slot is None else o.slot.to_data(),
                 }
-                for o in sorted(mcp.injection_outcomes, key=lambda o: o.admission_order)
+                for o in sorted(recorded, key=lambda o: o.admission_order)
                 if o.instruction_index == index and o.status.value in PLACEMENTS
             ]
             for index in self.placed

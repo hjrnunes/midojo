@@ -21,6 +21,12 @@ and the packages to install. Reading a suite or an episode imports none of it. T
 lifecycle. The world state the agent's tools read and write is the suite's
 ``environment``, which the control plane keeps whatever the runtime.
 
+A runtime is also a declared need: :func:`runtime_capabilities` answers what a
+definition's runtime can do (whether it resets, whether each evaluation gets a
+fresh target, what it observes) without building it or importing its provider,
+and a registry's ``check_available`` names an uninstalled provider package as a
+gap (``runtime:openshell:missing-package``) before anything binds.
+
 Each evaluation's ``setup`` gets what the agent may hold: the evaluation's
 session token when an interception layer in the agent records its calls, or,
 in host mode, only the tool endpoint of the interceptor the host runs
@@ -29,13 +35,15 @@ in host mode, only the tool endpoint of the interceptor the host runs
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from types import ModuleType
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel
 
-from midojo.capabilities import import_provider
+from midojo.capabilities import MissingCapabilityError, import_provider, runtime_missing_package_gap
 from midojo.suite_definition import AgentRuntimeDefinition, OpenShellRuntimeDefinition
 from midojo.tool_endpoint import ToolEndpoint
 
@@ -133,6 +141,136 @@ def is_disposable(runtime: object) -> bool:
     return isinstance(runtime, DisposableRuntime) and runtime.disposable is True
 
 
+@dataclass(frozen=True)
+class RuntimeCapabilities:
+    """What a runtime can do, answered from its definition: nothing built, no sandbox, no provider imported.
+
+    ``requires_packages`` are the distributions whose absence blocks the
+    runtime (the provider names every package to install in its error);
+    ``observations`` the evidence parts the runtime collects, by source;
+    ``resettable`` and ``disposable`` say how it keeps one evaluation's target
+    from carrying into the next, as :func:`attempt_isolation` decides it.
+    ``isolates_attempts`` is whether it isolates at all: resettable or
+    disposable.
+    """
+
+    name: str
+    requires_packages: tuple[str, ...] = ()
+    resettable: bool = False
+    disposable: bool = False
+    observations: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.name:
+            raise ValueError("a runtime capability set names its runtime")
+        for field in ("requires_packages", "observations"):
+            values = tuple(getattr(self, field))
+            if not all(isinstance(value, str) and value for value in values):
+                raise TypeError(f"a runtime's {field} are non-empty names")
+            object.__setattr__(self, field, values)
+
+    @property
+    def isolates_attempts(self) -> bool:
+        """Whether evaluations on this runtime are isolated: it resets its target, or each gets a fresh one."""
+        return self.resettable or self.disposable
+
+
+# What each built-in ``agent_runtime`` type declares, read without calling its builder: building ``openshell``
+# imports its provider, and answering what it needs must not.
+_BUILTIN_CAPABILITIES: dict[str, RuntimeCapabilities] = {
+    "unmanaged": RuntimeCapabilities(name="unmanaged"),
+    "openshell": RuntimeCapabilities(
+        name="openshell",
+        requires_packages=("openshell",),
+        disposable=True,
+        observations=("openshell",),
+    ),
+}
+
+
+def _capabilities_of(runtime: object, *, default_name: str) -> RuntimeCapabilities:
+    """What ``runtime`` (a built runtime or its class) declares about itself, ``default_name`` when it names none."""
+    declared = getattr(runtime, "capabilities", None)
+    if isinstance(declared, RuntimeCapabilities):
+        return declared
+    name = getattr(runtime, "name", None)
+    if not isinstance(name, str) or not name:
+        name = default_name
+    builtin = _BUILTIN_CAPABILITIES.get(name)
+    requires = getattr(runtime, "requires_packages", None)
+    observations = getattr(runtime, "observations", None)
+    return RuntimeCapabilities(
+        name=name,
+        requires_packages=tuple(requires) if requires is not None else (builtin.requires_packages if builtin else ()),
+        resettable=isinstance(runtime, ResettableRuntime),
+        disposable=is_disposable(runtime),
+        observations=tuple(observations) if observations is not None else (builtin.observations if builtin else ()),
+    )
+
+
+def _builder_runtime(builder: object) -> object | None:
+    """The runtime a builder will produce, when it names one: the class it builds, or a class it captures."""
+    if isinstance(builder, type):
+        return builder
+    if isinstance(builder, functools.partial):
+        for candidate in (builder.func, *builder.args, *(builder.keywords or {}).values()):
+            found = _runtime_class(candidate)
+            if found is not None:
+                return found
+    candidates: list[object] = list(getattr(builder, "__defaults__", None) or ())
+    for cell in getattr(builder, "__closure__", None) or ():
+        try:
+            candidates.append(cell.cell_contents)
+        except ValueError:  # an empty cell: the name it will hold is not bound yet.
+            continue
+    for candidate in candidates:
+        found = _runtime_class(candidate)
+        if found is not None:
+            return found
+    return None
+
+
+def _runtime_class(candidate: object) -> type | None:
+    """``candidate`` when it is a class the runtime protocol could describe, else None."""
+    if isinstance(candidate, type) and (hasattr(candidate, "setup") or hasattr(candidate, "name")):
+        return candidate
+    return None
+
+
+def runtime_capabilities(runtime: object, *, registry: RuntimeRegistry | None = None) -> RuntimeCapabilities:
+    """What ``runtime`` can do, from its definition: no runtime built, no sandbox created, no provider imported.
+
+    ``runtime`` is an ``agent_runtime`` definition (a mapping such as
+    ``{"type": "openshell"}`` or a parsed
+    :data:`~midojo.suite_definition.AgentRuntimeDefinition`), or a runtime
+    itself. A definition answers from what its type declares, looked up in
+    ``registry`` (:data:`DEFAULT_RUNTIMES` unless given), which calls no
+    builder: a type registered with a runtime class answers from that class,
+    one whose builder declares ``capabilities`` from them, one whose builder
+    captures the class it builds from that class, and the built-in types from
+    :data:`_BUILTIN_CAPABILITIES`. A registered type none of those describe
+    answers as a runtime that needs nothing, resets nothing, is not
+    disposable and observes nothing.
+    """
+    runtime_type = _declared_type(runtime)
+    if runtime_type is not None:
+        return (registry if registry is not None else DEFAULT_RUNTIMES).capabilities_for(runtime_type)
+    return _capabilities_of(runtime, default_name=type(runtime).__name__)
+
+
+def _declared_type(runtime: object) -> str | None:
+    """The ``type`` a definition names, or None when ``runtime`` is not a definition."""
+    if isinstance(runtime, Mapping):
+        value = runtime.get("type", "openshell")  # the same default as midojo.suite_definition._runtime_type
+    elif isinstance(runtime, BaseModel):
+        value = getattr(runtime, "type", None)
+    else:
+        return None
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"an agent_runtime type is a non-empty string, not {value!r}")
+    return value
+
+
 class UnmanagedRuntime:
     """An agent that MiDojo neither starts nor observes.
 
@@ -223,21 +361,84 @@ class RuntimeRegistry:
     :func:`~midojo.capabilities.import_provider`.
     """
 
-    def __init__(self, builders: Mapping[str, RuntimeBuilder] | None = None) -> None:
+    def __init__(
+        self,
+        builders: Mapping[str, RuntimeBuilder] | None = None,
+        *,
+        capabilities: Mapping[str, RuntimeCapabilities] | None = None,
+        providers: Mapping[str, Callable[[], object]] | None = None,
+    ) -> None:
         self._builders: dict[str, RuntimeBuilder] = dict(builders or {})
+        self._capabilities: dict[str, RuntimeCapabilities] = dict(capabilities or {})
+        self._providers: dict[str, Callable[[], object]] = dict(providers or {})
 
-    def register(self, runtime_type: str, builder: RuntimeBuilder, *, replace: bool = False) -> None:
-        """Build runtimes of ``runtime_type`` with ``builder``; ValueError if it has one, unless ``replace``."""
+    def register(
+        self,
+        runtime_type: str,
+        builder: RuntimeBuilder,
+        *,
+        replace: bool = False,
+        capabilities: RuntimeCapabilities | None = None,
+        provider: Callable[[], object] | None = None,
+    ) -> None:
+        """Build runtimes of ``runtime_type`` with ``builder``; ValueError if it has one, unless ``replace``.
+
+        ``capabilities`` are what the type declares, when the builder can't
+        say (see :func:`runtime_capabilities`); ``provider`` imports what
+        :meth:`check_available` needs to be sure the type can be built here.
+        """
         if runtime_type in self._builders and not replace:
             raise ValueError(f"Runtime type {runtime_type!r} is already registered")
         self._builders[runtime_type] = builder
+        if capabilities is not None:
+            self._capabilities[runtime_type] = capabilities
+        if provider is not None:
+            self._providers[runtime_type] = provider
 
     def __contains__(self, runtime_type: object) -> bool:
         return runtime_type in self._builders
 
     def copy(self) -> RuntimeRegistry:
         """A registry with the same builders, changed apart from this one."""
-        return RuntimeRegistry(self._builders)
+        return RuntimeRegistry(self._builders, capabilities=self._capabilities, providers=self._providers)
+
+    def capabilities_for(self, runtime_type: str) -> RuntimeCapabilities:
+        """What runtimes of ``runtime_type`` can do, answered without building one (see :func:`runtime_capabilities`)."""
+        declared = self._capabilities.get(runtime_type)
+        if declared is not None:
+            return declared
+        builder = self._builders.get(runtime_type)
+        if builder is None:
+            raise ValueError(f"No runtime is registered for agent_runtime type {runtime_type!r}")
+        on_builder = getattr(builder, "capabilities", None)
+        if isinstance(on_builder, RuntimeCapabilities):
+            return on_builder
+        runtime = _builder_runtime(builder)
+        if runtime is not None:
+            return _capabilities_of(runtime, default_name=runtime_type)
+        builtin = _BUILTIN_CAPABILITIES.get(runtime_type)
+        return builtin if builtin is not None else RuntimeCapabilities(name=runtime_type)
+
+    def check_available(self, runtime_type: str) -> None:
+        """Raise :class:`~midojo.capabilities.MissingCapabilityError` when this machine can't build ``runtime_type``.
+
+        The error names the runtime, the packages to install, and the gap
+        (``runtime:openshell:missing-package``). It imports the type's
+        provider but builds no runtime: nothing is started, bound or held.
+        """
+        capabilities = self.capabilities_for(runtime_type)
+        provider = self._providers.get(runtime_type, _PROVIDERS.get(runtime_type))
+        if provider is None or not capabilities.requires_packages:
+            return
+        try:
+            provider()
+        except MissingCapabilityError as error:
+            raise MissingCapabilityError(
+                error.capability,
+                error.packages,
+                gap=runtime_missing_package_gap(runtime_type),
+                missing=error.name,
+            ) from error
 
     def build(self, suite_name: str, definition: AgentRuntimeDefinition) -> AgentRuntime:
         """A fresh runtime for ``definition`` (see :func:`build_runtime`)."""
@@ -250,10 +451,21 @@ class RuntimeRegistry:
 DEFAULT_RUNTIMES = RuntimeRegistry({"openshell": _build_openshell, "unmanaged": _build_unmanaged})
 """The registry :func:`build_runtime` uses when it is given none."""
 
+# How a registered type's provider is imported for ``check_available``: the built-in types only; a custom type
+# passes ``provider`` to ``register``.
+_PROVIDERS: dict[str, Callable[[], object]] = {"openshell": _openshell_module}
 
-def register_runtime(runtime_type: str, builder: RuntimeBuilder, *, replace: bool = False) -> None:
-    """Register ``builder`` for ``runtime_type`` in :data:`DEFAULT_RUNTIMES`."""
-    DEFAULT_RUNTIMES.register(runtime_type, builder, replace=replace)
+
+def register_runtime(
+    runtime_type: str,
+    builder: RuntimeBuilder,
+    *,
+    replace: bool = False,
+    capabilities: RuntimeCapabilities | None = None,
+    provider: Callable[[], object] | None = None,
+) -> None:
+    """Register ``builder`` for ``runtime_type`` in :data:`DEFAULT_RUNTIMES` (see :meth:`RuntimeRegistry.register`)."""
+    DEFAULT_RUNTIMES.register(runtime_type, builder, replace=replace, capabilities=capabilities, provider=provider)
 
 
 def build_runtime(
@@ -304,6 +516,7 @@ __all__ = [
     "Protocol",
     "ResettableRuntime",
     "RuntimeBuilder",
+    "RuntimeCapabilities",
     "RuntimeRegistry",
     "ToolEndpoint",
     "UnmanagedRuntime",
@@ -313,5 +526,6 @@ __all__ = [
     "is_disposable",
     "openshell",
     "register_runtime",
+    "runtime_capabilities",
     "runtime_checkable",
 ]

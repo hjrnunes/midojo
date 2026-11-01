@@ -36,7 +36,7 @@ import json
 import logging
 import math
 import os
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -47,7 +47,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict
 from pydantic_core import to_jsonable_python
 
-from midojo.verifiers import VerificationContext, VerificationResult
+from midojo.verifiers import ValidityReason, VerificationContext, VerificationResult
 
 NAME = "reply_judge"
 SCHEMA = "midojo.judge.v1"
@@ -91,6 +91,113 @@ class JudgeRecord(BaseModel):
     failure: str | None = None
 
 
+class _ReplayRefusal(LookupError):  # noqa: N818 - the replay contract names the leaves, not a lint choice.
+    """A replay that can't answer a request: its check is unknown, with the reason's ``id8``.
+
+    ``request_id`` is the id that was asked for and ``id8`` its first eight
+    hex digits, which the check's reason names after ``why``.
+    """
+
+    why = "judge-replay"
+
+    def __init__(self, request: Mapping[str, Any]) -> None:
+        self.request_id = str(request["id"])
+        self.id8 = self.request_id.removeprefix("sha256:")[:8]
+        super().__init__(f"{self.why}:{self.id8}")
+
+
+class UnrecordedJudgeRequest(_ReplayRefusal):
+    """A replay was asked for a request its records don't hold: the check is unknown, never False.
+
+    The reason is ``judge-replay-unrecorded:<first 8 hex of the request id>``.
+    """
+
+    why = "judge-replay-unrecorded"
+
+
+class AmbiguousJudgeRequest(_ReplayRefusal):
+    """A replay holds several records for one request id it can't tell apart, and they disagree.
+
+    Checks that differ only by endpoint share a request id, which hashes the
+    body alone. When the check doesn't name its endpoint and the records
+    decide differently, MiDojo guesses none of them: the answer is unknown
+    with ``judge-replay-ambiguous:<first 8 hex of the request id>``, so a
+    recorded failure never replays as a verdict.
+    """
+
+    why = "judge-replay-ambiguous"
+
+
+def _decides_alike(left: JudgeRecord, right: JudgeRecord) -> bool:
+    """Whether two records decide their check alike: the same verdict, or the same failure."""
+    return (left.verdict, left.failure) == (right.verdict, right.failure)
+
+
+class RecordedJudge:
+    """Answers ``reply_judge`` requests from records kept by an earlier grading, and never opens a connection.
+
+    ``records`` are :class:`JudgeRecord` instances, or their JSON mappings (as
+    a grade's ``judgements`` holds them), kept by request id. Asking for a
+    request no record names raises :class:`UnrecordedJudgeRequest`, which the
+    check turns into unknown with ``judge-replay-unrecorded:<id8>``: a replay
+    never guesses a verdict.
+
+    A request id hashes the request body alone, so checks that differ only by
+    endpoint (the same claim asked of two judge services, say) share one id
+    in an earlier grade. :meth:`ask` then matches the check's own endpoint,
+    the part of the live key a record keeps, when the caller passes it with
+    ``endpoint_known=True``. When the records for one id disagree and that
+    can't tell them apart, the answer is :class:`AmbiguousJudgeRequest`,
+    unknown with ``judge-replay-ambiguous:<id8>``. Records that decide alike
+    answer alike, so any one of them answers.
+
+    Pass one to :func:`midojo.grade` (or :meth:`midojo.Episode.grade`) as
+    ``judgements=``: the grading then reads its judgements from it instead of
+    asking a service. Records whose ``failure`` is set replay as unknown, as
+    they graded the first time.
+    """
+
+    def __init__(self, records: Iterable[JudgeRecord | Mapping[str, Any]]) -> None:
+        self._records: dict[str, list[JudgeRecord]] = {}
+        for record in records:
+            kept = record if isinstance(record, JudgeRecord) else JudgeRecord.model_validate(record)
+            self._records.setdefault(kept.request_id, []).append(kept)
+
+    def __len__(self) -> int:
+        """How many records it holds, repeated request ids included."""
+        return sum(len(group) for group in self._records.values())
+
+    def __contains__(self, request_id: object) -> bool:
+        return request_id in self._records
+
+    def ask(
+        self, request: Mapping[str, Any], *, endpoint: str | None = None, endpoint_known: bool = False
+    ) -> JudgeRecord:
+        """The record for ``request``, or a :class:`_ReplayRefusal` naming why it can't be known.
+
+        ``endpoint`` narrows to the records recorded at that endpoint, when
+        ``endpoint_known`` says the check alone names it. One candidate
+        answers. Several that decide alike answer alike, so the first
+        answers; several that disagree raise :class:`AmbiguousJudgeRequest`:
+        a record is never guessed.
+        """
+        candidates = self._records.get(str(request["id"]))
+        if not candidates:
+            raise UnrecordedJudgeRequest(request)
+        if len(candidates) == 1:
+            return candidates[0]
+        if endpoint_known:
+            matching = [record for record in candidates if record.endpoint == endpoint]
+            if len(matching) == 1:
+                return matching[0]
+            if matching:
+                candidates = matching
+        first = candidates[0]
+        if all(_decides_alike(first, other) for other in candidates[1:]):
+            return first
+        raise AmbiguousJudgeRequest(request)
+
+
 @dataclass(frozen=True)
 class ReplyJudge:
     """Passes when the judge service finds ``claim`` supported by the reply, fails when it finds it contradicted.
@@ -124,10 +231,49 @@ class ReplyJudge:
         progress = _Progress()
         try:
             record = self._judgement(ctx, progress)
+        except _ReplayRefusal as unanswered:
+            return self._unanswered(ctx, unanswered, progress)
         except Exception as exc:
             record = progress.failed(self, exc)
             ctx.judgements.setdefault(progress.key or json.dumps(["failed", record.request_id]), record)
         return self.result(record)
+
+    def _unanswered(
+        self, ctx: VerificationContext, unanswered: _ReplayRefusal, progress: _Progress
+    ) -> VerificationResult:
+        """A replay with no record it can answer from: unknown, naming the id, never a verdict.
+
+        The answer is kept on the context as a failed :class:`JudgeRecord`, as
+        every other unanswered request is, so the grade shows which request had
+        no answer. The reason is the refusal's own: ``judge-replay-unrecorded:``
+        or ``judge-replay-ambiguous:`` and the id's first eight hex digits.
+        """
+        why = str(unanswered)
+        request = progress.request or {"schema": SCHEMA, "id": unanswered.request_id}
+        record = JudgeRecord(
+            request_id=unanswered.request_id, endpoint=progress.endpoint, request=request, sent=False, failure=why
+        )
+        ctx.judgements.setdefault(progress.key or json.dumps(["replay", unanswered.request_id]), record)
+        return VerificationResult(
+            None, f"{self.label} (unknown: {why})", (ValidityReason(check=self.label, reason=why),)
+        )
+
+    def _replay_endpoint(self) -> tuple[bool, str | None]:
+        """The endpoint this check would ask, when the check alone names it: ``(known, endpoint)``.
+
+        A literal ``url`` names the endpoint the live path would clean (None
+        when it isn't a URL one could read); a check with no URL at all names
+        None. A ``url_env`` variable is read only when the check is assessed,
+        so a replay, which reads no environment, can't know which endpoint it
+        held then: the endpoint is unknown.
+        """
+        if self.url is None:
+            return (False, None) if self.url_env is not None else (True, None)
+        try:
+            cleaned = httpx.URL(self.url).copy_with(username=None, password=None, query=None, fragment=None)
+        except Exception:
+            return True, None
+        return True, _text(str(cleaned))
 
     def _judgement(self, ctx: VerificationContext, progress: _Progress) -> JudgeRecord:
         try:
@@ -143,6 +289,12 @@ class ReplyJudge:
         progress.request = request
         progress.key = json.dumps([request["id"], self.url, self.url_env, self.token_env, self.timeout_seconds])
         record = ctx.judgements.get(progress.key)
+        if record is None and ctx.judge_replay is not None:
+            # A re-grade answers from its records, by request id and, when the check names one, endpoint.
+            endpoint_known, endpoint = self._replay_endpoint()
+            record = ctx.judgements[progress.key] = ctx.judge_replay.ask(
+                request, endpoint=endpoint, endpoint_known=endpoint_known
+            )
         if record is None:
             record = ctx.judgements[progress.key] = self.ask(request, progress)
         return record

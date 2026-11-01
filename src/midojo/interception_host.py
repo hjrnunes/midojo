@@ -41,7 +41,7 @@ import asyncio
 import contextlib
 import secrets
 import socket
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -122,6 +122,8 @@ class HostInterceptor:
         advertise_host: str | None = None,
         name: str = "midojo-interceptor",
         observe_requests: bool = False,
+        allowed: Iterable[str] | None = None,
+        blocked: Iterable[str] = (),
     ) -> None:
         url, transport = (upstream, None) if isinstance(upstream, str) else (None, upstream)
         self.mcp = MidojoMCP(
@@ -135,6 +137,10 @@ class HostInterceptor:
         )
         if tools is not None:
             tools(self.mcp)
+        # An episode's tool policy: mirror only the tools it allows (None mirrors all), and block its writes.
+        self._allowed = None if allowed is None else frozenset(allowed)
+        self._blocked = tuple(dict.fromkeys(blocked))
+        self.mcp.block(*self._blocked)
         self._token = secrets.token_urlsafe(32)
         # A host is kept without URL brackets, and bracketed once when the endpoint's URL is made.
         self._bind_host = bind_host = bare_host(bind_host)
@@ -151,6 +157,10 @@ class HostInterceptor:
     @property
     def injection_outcomes(self) -> tuple[InjectionOutcome, ...]:
         return self.mcp.injection_outcomes
+
+    async def tool_names(self) -> list[str]:
+        """The tools this interceptor lists: the ones it mirrors under its policy, and its simulated ones."""
+        return await self.mcp.tool_names()
 
     def app(self) -> Any:
         """The interceptor as an ASGI app: the tools at ``TOOL_PATH``, for this interceptor's token only."""
@@ -203,7 +213,7 @@ class HostInterceptor:
 
     async def start(self) -> ToolEndpoint:
         """Mirror the upstream's tools and serve them. Returns the endpoint to give the target."""
-        await self.mcp.mirror_upstream()
+        await self.mcp.mirror_upstream(allowed=self._allowed)
         # Bound here, so a taken port raises OSError now rather than ending the server's task.
         listener = _listen(self._bind_host, self._port)
         config = uvicorn.Config(
@@ -262,6 +272,11 @@ class HostInterception:
     ``tools`` are the suite's simulated tools (a suite's ``HOST_TOOLS``),
     registered on every evaluation's interceptor, which then gets the
     evaluation's environment as well as its recorder.
+
+    ``allowed`` and ``blocked`` are the episode's tool policy: ``allowed``
+    lists the tools each interceptor mirrors (None mirrors every upstream
+    tool), and ``blocked`` lists the tools it refuses to run, so a write never
+    reaches the upstream.
     """
 
     upstream: Any
@@ -270,6 +285,8 @@ class HostInterception:
     advertise_host: str | None = None
     observe_requests: bool = False
     tools: HostTools | None = None
+    allowed: tuple[str, ...] | None = None
+    blocked: tuple[str, ...] = ()
 
     def interceptor(
         self, recorder: Recorder, *, evaluation_id: str, plan: InjectionPlan, world: WorldState | None = None
@@ -286,4 +303,6 @@ class HostInterception:
             port=self.port,
             advertise_host=self.advertise_host,
             observe_requests=self.observe_requests,
+            allowed=self.allowed,
+            blocked=self.blocked,
         )

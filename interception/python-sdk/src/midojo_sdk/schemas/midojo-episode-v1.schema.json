@@ -1,0 +1,244 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://midojo.ai/schemas/midojo-episode-v1.schema.json",
+  "title": "MiDojo episode document v1",
+  "description": "One episode as data: its turns, its injection plan, its checks, its runtime definition and its interception settings. The document is closed: a key MiDojo does not define is refused. The plan in $defs/plan carries no version of its own; the enclosing schema_version is its version, so a change to the plan's bytes needs document v2.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version"],
+  "properties": {
+    "schema_version": {
+      "const": "midojo-episode-v1",
+      "description": "The document version. An unknown value is refused, naming it."
+    },
+    "suite_name": {
+      "$ref": "#/$defs/nullable_string",
+      "description": "The suite that compiled the episode, or null for a direct caller."
+    },
+    "user_task_id": {
+      "$ref": "#/$defs/nullable_string",
+      "description": "The user task the suite compiled, or null."
+    },
+    "injection_task_id": {
+      "$ref": "#/$defs/nullable_string",
+      "description": "The injection task the suite compiled, or null."
+    },
+    "environment_type": {
+      "$ref": "#/$defs/nullable_string",
+      "description": "The name of the environment model the episode's suite_name and environment imply, or null without a suite."
+    },
+    "environment": {
+      "type": ["object", "null"],
+      "description": "The initial state of the simulated tools: opaque suite data. MiDojo's freeze() rules apply to every value."
+    },
+    "runtime": {
+      "$ref": "#/$defs/runtime",
+      "description": "The runtime the episode needs, as a definition: never a live runtime."
+    },
+    "turns": {
+      "type": ["array", "null"],
+      "minItems": 1,
+      "items": {"type": "string"},
+      "description": "The user's messages, one at a time, or null when the host drives the conversation."
+    },
+    "plan": {"$ref": "#/$defs/plan"},
+    "security": {
+      "type": ["object", "null"],
+      "description": "The authored security check. Its inner shape is the verifier registry's to validate when the episode is built, not this schema's."
+    },
+    "utility": {
+      "type": ["object", "null"],
+      "description": "The authored utility check. Its inner shape is the verifier registry's to validate when the episode is built, not this schema's."
+    },
+    "verifiers": {
+      "const": [],
+      "description": "The episode's verifier list. MiDojo reads and writes an empty list: a verifier registry is trusted code, never data."
+    },
+    "interception": {
+      "$ref": "#/$defs/interception",
+      "description": "The interception layer the episode needs. Every member is optional and defaults as shown."
+    },
+    "tools": {
+      "oneOf": [{"type": "null"}, {"$ref": "#/$defs/tools"}],
+      "description": "The tool policy, or null to mirror every upstream tool and block none."
+    }
+  },
+  "$defs": {
+    "nullable_string": {"type": ["string", "null"]},
+    "mode": {"enum": ["append", "replace"]},
+    "surface": {"enum": ["content_block", "structured_content", "description", "template"]},
+    "runtime": {
+      "oneOf": [{"$ref": "#/$defs/unmanaged_runtime"}, {"$ref": "#/$defs/openshell_runtime"}]
+    },
+    "unmanaged_runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {"type": {"const": "unmanaged"}},
+      "description": "The agent runs somewhere MiDojo doesn't control."
+    },
+    "openshell_runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "image"],
+      "properties": {
+        "type": {"const": "openshell"},
+        "image": {"type": "string", "minLength": 1},
+        "agent_command": {"type": ["array", "null"], "items": {"type": "string"}},
+        "policy": {"type": ["object", "null"]},
+        "providers": {"type": "array", "items": {"type": "string"}},
+        "env_vars": {"type": "object", "additionalProperties": {"type": "string"}},
+        "files": {"type": "object", "additionalProperties": {"type": "string"}},
+        "timeout_seconds": {"type": ["number", "null"], "exclusiveMinimum": 0},
+        "inject_session": {"type": "boolean"},
+        "require_policy_allows": {"type": "boolean"}
+      },
+      "description": "The agent runs in an OpenShell sandbox created for each evaluation."
+    },
+    "interception": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {"const": "host"},
+        "upstream": {"$ref": "#/$defs/nullable_string"},
+        "bind_host": {"$ref": "#/$defs/nullable_string"},
+        "advertise_host": {"$ref": "#/$defs/nullable_string"},
+        "port": {"oneOf": [{"type": "null"}, {"type": "integer", "minimum": 0, "maximum": 65535}]},
+        "observe_requests": {"type": "boolean"}
+      }
+    },
+    "tools": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allowed"],
+      "properties": {
+        "allowed": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "write_disposition": {"$ref": "#/$defs/write_disposition"}
+      }
+    },
+    "write_disposition": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "default": {"enum": ["forward", "block"]},
+        "tools": {"type": "object", "additionalProperties": {"enum": ["forward", "block"]}}
+      }
+    },
+    "plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["instructions", "generator_permissions", "probe_payloads"],
+      "properties": {
+        "instructions": {"type": "array", "items": {"$ref": "#/$defs/instruction"}},
+        "generator_permissions": {"$ref": "#/$defs/generator_permissions"},
+        "probe_payloads": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "prefixItems": [{"type": "string"}, {"type": "string"}],
+            "minItems": 2,
+            "maxItems": 2
+          }
+        }
+      },
+      "description": "An injection plan: the same shape InjectionPlan.to_data() writes."
+    },
+    "generator_permissions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tools", "fields", "modes"],
+      "properties": {
+        "tools": {"type": "array", "items": {"type": "string"}},
+        "fields": {"type": "array", "items": {"$ref": "#/$defs/path"}},
+        "modes": {"type": "array", "items": {"$ref": "#/$defs/mode"}}
+      }
+    },
+    "instruction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "channel",
+        "payload",
+        "target",
+        "occurrence",
+        "transformation",
+        "size_limit",
+        "mismatch_policy",
+        "mode",
+        "probe_key"
+      ],
+      "properties": {
+        "channel": {"enum": ["tool_output", "tool_description", "user_prompt", "environment_state", "runtime_file"]},
+        "payload": {"type": "string"},
+        "target": {"$ref": "#/$defs/target"},
+        "occurrence": {"$ref": "#/$defs/occurrence"},
+        "transformation": {"enum": ["identity", "json_string"]},
+        "size_limit": {"oneOf": [{"type": "null"}, {"type": "integer", "minimum": 0}]},
+        "mismatch_policy": {"enum": ["strict", "fallback_append"]},
+        "mode": {"$ref": "#/$defs/mode"},
+        "probe_key": {"$ref": "#/$defs/nullable_string"}
+      }
+    },
+    "occurrence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "nth"],
+      "properties": {
+        "kind": {"enum": ["first", "nth", "every"]},
+        "nth": {"oneOf": [{"type": "null"}, {"type": "integer", "minimum": 1}]}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"kind": {"const": "nth"}}, "required": ["kind"]},
+          "then": {"properties": {"nth": {"type": "integer", "minimum": 1}}, "required": ["nth"]},
+          "else": {"properties": {"nth": {"type": "null"}}}
+        }
+      ]
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tool",
+        "surface",
+        "content_block_index",
+        "content_block_type",
+        "structured_content_path",
+        "template_path",
+        "template_key"
+      ],
+      "properties": {
+        "tool": {"$ref": "#/$defs/nullable_string"},
+        "surface": {"$ref": "#/$defs/surface"},
+        "content_block_index": {"oneOf": [{"type": "null"}, {"type": "integer", "minimum": 0}]},
+        "content_block_type": {"$ref": "#/$defs/nullable_string"},
+        "structured_content_path": {"$ref": "#/$defs/path"},
+        "template_path": {"$ref": "#/$defs/path"},
+        "template_key": {"$ref": "#/$defs/nullable_string"},
+        "call_arguments": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/argument_value"}
+        },
+        "result_record": {"$ref": "#/$defs/record_selector"}
+      }
+    },
+    "argument_value": {"type": ["string", "integer", "number", "boolean", "null"]},
+    "path": {"type": "array", "items": {"$ref": "#/$defs/path_part"}},
+    "path_part": {
+      "oneOf": [
+        {"type": "string"},
+        {"type": "integer", "minimum": 0},
+        {"$ref": "#/$defs/record_selector"}
+      ]
+    },
+    "record_selector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["equals"],
+      "properties": {
+        "field": {"type": "string", "minLength": 1},
+        "equals": {"type": ["string", "integer"]}
+      }
+    }
+  }
+}

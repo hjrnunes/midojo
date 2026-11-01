@@ -21,14 +21,25 @@ class MissingCapabilityError(ImportError):
 
     ``capability`` names what was asked for (for example ``the 'openshell'
     runtime``), ``packages`` the distributions to install for it, and ``name``
-    (as for any ImportError) the module that failed to import. It is an
-    ImportError, so code that already handles a failed import handles it too;
-    the failed import is its ``__cause__``.
+    (as for any ImportError) the module that failed to import. ``gap`` is a
+    stable identifier for what is missing (for example
+    ``runtime:openshell:missing-package``), when the raiser can name one; it
+    is None for a provider imported directly, where no runtime is known. It is
+    an ImportError, so code that already handles a failed import handles it
+    too; the failed import is its ``__cause__``.
     """
 
-    def __init__(self, capability: str, packages: Sequence[str], *, missing: str | None = None) -> None:
+    def __init__(
+        self,
+        capability: str,
+        packages: Sequence[str],
+        *,
+        gap: str | None = None,
+        missing: str | None = None,
+    ) -> None:
         self.capability = capability
         self.packages = tuple(packages)
+        self.gap = gap
         install = " ".join(self.packages)
         detail = f" (module {missing!r} is missing)" if missing else ""
         super().__init__(
@@ -36,6 +47,16 @@ class MissingCapabilityError(ImportError):
             f"(for example `pip install {install}`)",
             name=missing,
         )
+
+
+def runtime_missing_package_gap(runtime: str) -> str:
+    """The gap a runtime's uninstalled provider package leaves: ``runtime:<type>:missing-package``."""
+    return f"runtime:{runtime}:missing-package"
+
+
+# A check that reads OpenShell observations on a runtime that collects none. The check stays valid; the run can't
+# decide it, so the episode refuses the combination when it is built, before any handle exists.
+OPENSHELL_PREDICATE_ON_UNMANAGED_RUNTIME = "check:openshell-predicate-on-unmanaged-runtime"
 
 
 def _provides(dependency: str, missing: str) -> bool:

@@ -49,7 +49,7 @@ from midojo.observations import FUNCTION_CALLS, EvidenceStatus
 from midojo.types import Environment, FunctionCallRecord, ValidityReason
 
 if TYPE_CHECKING:
-    from midojo.verifiers.judge import JudgeRecord
+    from midojo.verifiers.judge import JudgeRecord, RecordedJudge
 
 # ---------------------------------------------------------------------------
 # Context & protocols
@@ -87,7 +87,9 @@ class VerificationContext:
     ``judgements`` keeps what a judge service was asked and answered during
     this grading (:mod:`midojo.verifiers.judge`), keyed by request, so a check
     read again with the same request gets the same answer without asking
-    again; the grade reports them.
+    again; the grade reports them. ``judge_replay``, when set, is the
+    :class:`~midojo.verifiers.judge.RecordedJudge` a re-grade answers from: no
+    judge service is asked, and a request its records don't hold is unknown.
     """
 
     agent_output: str
@@ -98,6 +100,7 @@ class VerificationContext:
     turns: list[ConversationTurn] = field(default_factory=list)
     evidence_status: dict[str, EvidenceStatus] = field(default_factory=dict)
     judgements: dict[str, JudgeRecord] = field(default_factory=dict)
+    judge_replay: RecordedJudge | None = None
 
     @property
     def function_calls_complete(self) -> bool:

@@ -17,6 +17,14 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
 
+PLAN_CODEC_VERSION = "midojo-plan-v1"
+"""The version of the plan encoding :meth:`InjectionPlan.to_data` writes.
+
+The plan carries no version of its own: the episode document that encloses it
+names this version through its ``schema_version``, so changing the bytes this
+codec writes needs a new document version.
+"""
+
 
 @dataclass(frozen=True)
 class RecordSelector:
