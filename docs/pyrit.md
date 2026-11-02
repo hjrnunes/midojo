@@ -61,7 +61,7 @@ imports included, propagates. Direct users supply an
 `episode_for_payload(candidate) -> InjectionSpec` compiler and its permitted
 single-instruction `InjectionPlan` as `surface`.
 
-The target keeps its name, `MidojoEpisodeTarget`, and so does its `episode_for_payload` argument; `Episode`, `midojo.episode` and `open_episode` remain deprecated aliases of the new names.
+The target keeps its name, `MidojoEpisodeTarget`, and so does its `episode_for_payload` argument; the pre-rename class, module and function names remain deprecated aliases of the new ones.
 
 The response text is the agent's actual final reply. Its `prompt_metadata`
 contains `midojo.evaluation_id`, `midojo.snapshot_id`, `midojo.grade` (JSON),

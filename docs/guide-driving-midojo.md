@@ -39,8 +39,6 @@ The injection spec names what the run is:
 
 The plan's bytes are the plan codec's: `midojo_sdk.injection.PLAN_CODEC_VERSION` names it, and the document's `schema_version` names the codec, since a plan carries no version of its own. A v0 consumer document (`{"episode": ...}`, no `schema_version`) still reads, and so does a document with the old `schema_version: midojo-episode-v1`, both with a `DeprecationWarning`; new documents are always written as `midojo-injection-spec-v1`. The JSON Schema travels in the SDK wheel at `midojo_sdk/schemas/midojo-injection-spec-v1.schema.json`, and `midojo_sdk.injection_spec_schema.load_schema()` loads it; the old `midojo_sdk/schemas/midojo-episode-v1.schema.json` stays packaged for readers. The encoding of a snapshot, and its `SNAPSHOT_DIGEST_VERSION`, live in `midojo_sdk.snapshot`.
 
-The old names, `Episode`, `midojo.episode`, `open_episode` and `midojo.episode_document`, remain deprecated aliases.
-
 ## The handle
 
 `midojo.evaluation_handle.open(spec, upstream=..., runtime=...)` returns an `EvaluationHandle`. Entering the handle starts the runtime, opens the evaluation on a control plane in this process, starts the interceptor and sets the runtime up. Leaving it seals the evaluation if you didn't, tears the runtime down, stops the interceptor and closes the handle. The handle runs the same `EvaluationContext` the asynchronous API runs, on a loop thread of its own.

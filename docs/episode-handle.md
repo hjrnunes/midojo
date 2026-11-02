@@ -91,5 +91,3 @@ The reaper belongs to the handle, which starts it. An asynchronous driver, one t
 - New keyword arguments to `open` and `send_turn` are appended with defaults, so existing calls keep working.
 
 A change that breaks any of these raises the major version. The asynchronous API is unchanged: `midojo.open_evaluation` and `EvaluationContext` behave as before, and a handle is exactly a context driven on a thread.
-
-The old names, `Episode`, `midojo.episode`, `EpisodeContext`, `open_episode` and `midojo.episode_handle`, remain deprecated aliases.

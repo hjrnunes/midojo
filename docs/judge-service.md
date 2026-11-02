@@ -206,8 +206,6 @@ assert "judge-replay-unrecorded:" in missing.grade.security_reason
 assert missing.grade.grade_validity.security.status == "invalid"
 ```
 
-The old names, `Episode`, `open_episode` and `midojo.episode_context`, remain deprecated aliases of `InjectionSpec`, `open_evaluation` and `midojo.evaluation_context`.
-
 ### Independence limit
 
 In this workspace the judge model is the target model. Both are `gemma4-oc`, the profile whose `model` is `gemma-4-26b-a4b-it` in `asago-scenario-generator/config/model-profiles.yaml`. The settings that run it agree: orch's `evaluate` stage names `gemma4-oc` as its judge profile, its live package run starts the judge service with the target profile's `model` (`judge_model=self.profile["model"]`, `model=profile["model"]` in `run_fresh_package_live.py`), and the consumer's judge service reads `JUDGE_MODEL_URL` and `JUDGE_MODEL` from its environment, which that run sets to the boundary's judge proxy and the target profile's model.
