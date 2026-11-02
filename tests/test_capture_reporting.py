@@ -403,7 +403,7 @@ def losing_http(app, path: str = "/agent/function-calls") -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.MockTransport(handle))
 
 
-def open_episode(app) -> tuple[ControlPlane, str, str]:
+def open_control_plane_evaluation(app) -> tuple[ControlPlane, str, str]:
     control: ControlPlane = app.state.control
     opened = control.open_evaluation(
         Episode(turns=["go"], security=_NEVER_EMAILED, utility={"output_contains": "done"}, environment={})
@@ -420,7 +420,7 @@ async def graded_security(control: ControlPlane, eval_id: str):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("transport", ["http", "in-process"])
 async def test_midojo_mcp_reports_a_lost_blocked_call_so_its_absence_is_unknown(app, monkeypatch, transport):
-    control, eval_id, token = open_episode(app)
+    control, eval_id, token = open_control_plane_evaluation(app)
     async with losing_http(app) as http:
         if transport == "http":
             monkeypatch.setenv("MIDOJO_SESSION_TOKEN", token)
@@ -450,7 +450,7 @@ async def test_midojo_mcp_reports_a_lost_blocked_call_so_its_absence_is_unknown(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("transport", ["http", "in-process"])
 async def test_midojo_mcp_reports_a_lost_start_of_a_simulated_tool(app, monkeypatch, transport):
-    control, eval_id, token = open_episode(app)
+    control, eval_id, token = open_control_plane_evaluation(app)
     ran = []
     agent = InProcessAgentClient(control, token)
 
@@ -482,7 +482,7 @@ async def test_midojo_mcp_reports_a_lost_start_of_a_simulated_tool(app, monkeypa
 
 @pytest.mark.asyncio
 async def test_midojo_mcp_reports_a_lost_finish_of_a_mirrored_call(app):
-    control, eval_id, token = open_episode(app)
+    control, eval_id, token = open_control_plane_evaluation(app)
     upstream = ScriptedMCP()
     mcp = MidojoMCP(
         "proxy", upstream_transport=upstream.transport, recorder=LosingFinish(InProcessAgentClient(control, token))
@@ -526,7 +526,7 @@ async def call_blocked_tool(midojo: MidojoMiddleware) -> None:
 async def test_the_langchain_middleware_reports_a_lost_blocked_call_so_its_absence_is_unknown(
     app, monkeypatch, transport
 ):
-    control, eval_id, token = open_episode(app)
+    control, eval_id, token = open_control_plane_evaluation(app)
     async with losing_http(app) as http:
         if transport == "http":
             monkeypatch.setenv("MIDOJO_SESSION_TOKEN", token)
@@ -546,7 +546,7 @@ async def test_the_langchain_middleware_reports_a_lost_blocked_call_so_its_absen
 
 @pytest.mark.asyncio
 async def test_the_langchain_middleware_reports_a_refused_record_and_answers_the_agent_as_before(app):
-    control, eval_id, token = open_episode(app)
+    control, eval_id, token = open_control_plane_evaluation(app)
     agent = InProcessAgentClient(control, token)
     # The control plane already holds this call_id with another body: the blocked call's finish is refused.
     midojo = MidojoMiddleware(recorder=agent)
