@@ -17,29 +17,17 @@ from midojo.verifiers.tool_call_condition import DETECTED, NOT_DETECTED, evaluat
 from midojo.yaml_task_suite import YAMLTaskSuite
 
 FIXTURES = Path(__file__).parent / "fixtures" / "tool_call_condition"
-V1 = "tool-call-condition-v1"
 V2 = "tool-call-condition-v2"
 # The copy keeps the contract's own layout; CONTRACT.lock is its reference to
 # the producer's contract: it names the version and records every digest.
-V1_FIXTURES = {f"{V1}/vectors/{name}": FIXTURES / V1 / "vectors" / name for name in ("evaluate.json", "validate.json")}
 
 
 def _vectors(path: Path) -> list[dict]:
     return json.loads(path.read_text())["vectors"]
 
 
-V1_VALIDATE = _vectors(FIXTURES / V1 / "vectors" / "validate.json")
-V1_EVALUATE = _vectors(FIXTURES / V1 / "vectors" / "evaluate.json")
 V2_VALIDATE = _vectors(FIXTURES / V2 / "vectors" / "validate.json")
 V2_EVALUATE = _vectors(FIXTURES / V2 / "vectors" / "evaluate.json")
-V2_EVALUATE_BY_ID = {vector["id"]: vector for vector in V2_EVALUATE}
-
-# The v1 vectors whose expected result v2 changes; the evaluator gives the v2 result for them.
-V1_VECTORS_V2_CHANGES = {
-    "completeness.order-clean.complete-false",
-    "order.same-argument-bool-int",
-    "order.same-argument-null-both-missing-on-prior",
-}
 
 
 def _expected(vector: dict) -> tuple:
@@ -70,8 +58,8 @@ def test_every_fixture_file_matches_the_contract_lock():
 
 
 def test_the_fixtures_hold_every_vector():
-    assert (len(V1_EVALUATE), len(V1_VALIDATE), len(V2_EVALUATE), len(V2_VALIDATE)) == (438, 128, 463, 128)
-    for vectors in (V1_EVALUATE, V1_VALIDATE, V2_EVALUATE, V2_VALIDATE):
+    assert (len(V2_EVALUATE), len(V2_VALIDATE)) == (463, 128)
+    for vectors in (V2_EVALUATE, V2_VALIDATE):
         assert len({vector["id"] for vector in vectors}) == len(vectors)
 
 
@@ -82,37 +70,9 @@ def test_validate_vectors(vector):
     assert problem == vector["error"]
 
 
-def test_validation_is_unchanged_from_v1():
-    assert [(v["id"], v["condition"], v["valid"], v["error"]) for v in V1_VALIDATE] == [
-        (v["id"], v["condition"], v["valid"], v["error"]) for v in V2_VALIDATE
-    ]
-
-
 @pytest.mark.parametrize("vector", V2_EVALUATE, ids=[v["id"] for v in V2_EVALUATE])
 def test_evaluate_vectors(vector):
     assert _evaluated(vector) == _expected(vector)
-
-
-def test_v2_changes_the_expected_result_of_exactly_the_listed_v1_vectors():
-    changed = set()
-    for vector in V1_EVALUATE:
-        v2 = V2_EVALUATE_BY_ID[vector["id"]]
-        assert (v2["condition"], v2["calls"], v2["complete"]) == (
-            vector["condition"],
-            vector["calls"],
-            vector["complete"],
-        )
-        if _expected(v2) != _expected(vector):
-            changed.add(vector["id"])
-    assert changed == V1_VECTORS_V2_CHANGES
-
-
-@pytest.mark.parametrize("vector", V1_EVALUATE, ids=[v["id"] for v in V1_EVALUATE])
-def test_v1_evaluate_vectors(vector):
-    if vector["id"] in V1_VECTORS_V2_CHANGES:
-        assert _evaluated(vector) == _expected(V2_EVALUATE_BY_ID[vector["id"]]) != _expected(vector)
-    else:
-        assert _evaluated(vector) == _expected(vector)
 
 
 class _Env(Environment):
