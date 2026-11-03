@@ -584,6 +584,91 @@ class InjectionOutcome:
         if self.status not in PLACED and placement != (None, None, None):
             raise ValueError(f"a {self.status.value} outcome placed nothing: it has no payload digest or slot")
 
+    def to_data(self) -> dict[str, Any]:
+        """The outcome as fresh JSON data: every field, its enums by value, its slot as the plan codec's form."""
+        return {
+            "instruction_index": self.instruction_index,
+            "probe_key": self.probe_key,
+            "scope": self.scope,
+            "call_id": self.call_id,
+            "tool": self.tool,
+            "occurrence": self.occurrence,
+            "admission_order": self.admission_order,
+            "status": self.status.value,
+            "detail": self.detail,
+            "selected": self.selected,
+            "transformation": None if self.transformation is None else self.transformation.value,
+            "emitted": [surface.value for surface in self.emitted],
+            "payload_digest": self.payload_digest,
+            "placed_digest": self.placed_digest,
+            "slot": None if self.slot is None else self.slot.to_data(),
+        }
+
+    @classmethod
+    def from_data(cls, data: Mapping[str, Any]) -> InjectionOutcome:
+        """Decode :meth:`to_data`'s form; every field must be there."""
+        try:
+            value = _object(data, "outcome")
+            _only_fields(value, set(_OUTCOME_FIELDS), "outcome")
+            missing = set(_OUTCOME_FIELDS) - set(value)
+            if missing:
+                raise ValueError(f"an outcome holds every field; missing {sorted(missing)}")
+            emitted = value["emitted"]
+            if type(emitted) is not list:
+                raise TypeError("emitted must be a list")
+            transformation = value["transformation"]
+            slot = value["slot"]
+            probe_key = value["probe_key"]
+            if probe_key is not None:
+                _optional_str(probe_key, "probe_key")
+            payload_digest = value["payload_digest"]
+            if payload_digest is not None:
+                _optional_str(payload_digest, "payload_digest")
+            placed_digest = value["placed_digest"]
+            if placed_digest is not None:
+                _optional_str(placed_digest, "placed_digest")
+            if type(value["selected"]) is not bool:
+                raise TypeError("selected must be a bool")
+            return cls(
+                instruction_index=_count(value["instruction_index"], "instruction_index"),
+                probe_key=probe_key,
+                scope=_str(value["scope"], "scope"),
+                call_id=_str(value["call_id"], "call_id"),
+                tool=_str(value["tool"], "tool"),
+                occurrence=_count(value["occurrence"], "occurrence"),
+                admission_order=_count(value["admission_order"], "admission_order"),
+                status=OutcomeStatus(value["status"]),
+                detail=_str(value["detail"], "detail"),
+                selected=value["selected"],
+                transformation=None if transformation is None else Transformation(transformation),
+                emitted=tuple(SelectorSurface(surface) for surface in emitted),
+                payload_digest=payload_digest,
+                placed_digest=placed_digest,
+                slot=None if slot is None else InjectionSlot.from_data(slot),
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"invalid injection outcome data: {exc}") from None
+
+
+_OUTCOME_FIELDS = (
+    "instruction_index",
+    "probe_key",
+    "scope",
+    "call_id",
+    "tool",
+    "occurrence",
+    "admission_order",
+    "status",
+    "detail",
+    "selected",
+    "transformation",
+    "emitted",
+    "payload_digest",
+    "placed_digest",
+    "slot",
+)
+"""The fields an outcome's data form holds, all of them always: the document is fixed, not sparse."""
+
 
 def capability_gaps(
     plan: InjectionPlan, capability: InterceptorCapability, *, tools: Collection[str] | None = None
@@ -682,6 +767,14 @@ def _path(value: Any, what: str, *, record_selectors: bool = True) -> FieldPath:
 def _str(value: Any, what: str) -> str:
     if type(value) is not str:
         raise TypeError(f"{what} must be a str")
+    return value
+
+
+def _count(value: Any, what: str) -> int:
+    if type(value) is not int:
+        raise TypeError(f"{what} must be an int")
+    if value < 0:
+        raise ValueError(f"{what} must not be negative")
     return value
 
 

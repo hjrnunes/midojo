@@ -26,11 +26,22 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from midojo_sdk.injection import (
+    InjectionMode,
+    InjectionOutcome,
+    InjectionSlot,
+    InjectionTarget,
+    OutcomeStatus,
+    SelectorSurface,
+    Transformation,
+    payload_digest,
+)
 from midojo_sdk.link import (
     INVALID_REQUEST,
     LINK_LOST_REASON,
     Answer,
     Frame,
+    Link,
     LinkError,
     LinkFault,
     LinkLost,
@@ -39,8 +50,10 @@ from midojo_sdk.link import (
     Rejection,
     decode_answer,
     decode_frame,
+    decode_message,
     encode_answer,
     encode_frame,
+    encode_message,
     rejection_error,
 )
 from midojo_sdk.mcp import MidojoMCP
@@ -132,6 +145,81 @@ def test_the_service_sends_only_the_recorder_and_world_ops(op):
     assert decode_frame(encode_frame(Frame(0, op, {}))).op == op
 
 
+# --- the binding control messages around the frame stream ---
+
+
+def test_a_binding_control_message_round_trips():
+    bind = encode_message(
+        "bind",
+        api={"version": 1, "evaluation_id": "eval-1"},
+        plan={"instructions": []},
+        policy={"allowed": ["get_weather"]},
+        upstream_url="http://127.0.0.1:8770/mcp",
+        host_tools=[],
+        faces=["mcp"],
+    )
+
+    message = decode_message(bind)
+
+    assert message.op == "bind"
+    assert message["faces"] == ["mcp"]
+    assert message["api"] == {"version": 1, "evaluation_id": "eval-1"}
+    assert json.loads(encode_message("unbind")) == {"op": "unbind"}
+    assert json.loads(encode_message("ping")) == {"op": "ping"}
+    refused = decode_message(encode_message("rejected", kind="invalid_bind", detail="faces must be ['mcp']"))
+    assert (refused.op, refused["kind"]) == ("rejected", "invalid_bind")
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        "not json",
+        "[]",
+        '{"op": "forward_myself"}',
+        '{"re": 0, "ok": null}',
+    ],
+    ids=["not-json", "not-object", "unknown-op", "an-answer"],
+)
+def test_a_control_message_that_is_not_one_is_a_link_fault(data):
+    with pytest.raises(LinkFault):
+        decode_message(data)
+
+
+def test_a_frame_op_cannot_be_encoded_as_a_control_message():
+    with pytest.raises(ValueError):
+        encode_message("start_call")
+
+
+def test_an_injection_outcome_round_trips_through_its_document_form():
+    slot = InjectionSlot(InjectionTarget(tool="get_weather"), InjectionMode.APPEND)
+    outcome = InjectionOutcome(
+        instruction_index=0,
+        probe_key="weather_alert:main",
+        scope="eval-1",
+        call_id="call-1",
+        tool="get_weather",
+        occurrence=1,
+        admission_order=2,
+        status=OutcomeStatus.APPLIED,
+        detail="appended a content block",
+        selected=True,
+        transformation=Transformation.IDENTITY,
+        emitted=(SelectorSurface.CONTENT_BLOCK,),
+        payload_digest=payload_digest("PAYLOAD"),
+        placed_digest=payload_digest("PAYLOAD"),
+        slot=slot,
+    )
+
+    decoded = InjectionOutcome.from_data(json.loads(json.dumps(outcome.to_data())))
+
+    assert decoded == outcome
+
+
+def test_an_injection_outcome_document_that_is_not_one_is_a_value_error():
+    with pytest.raises(ValueError):
+        InjectionOutcome.from_data({"status": "applied"})
+
+
 # --- the standard-library-only promise ---
 
 
@@ -158,9 +246,9 @@ def test_the_link_module_imports_only_the_standard_library():
 def test_the_link_module_holds_the_codec_the_recorder_and_the_world():
     source = LINK_MODULE.read_text(encoding="utf-8")
 
-    for name in ("Frame", "Answer", "LinkRecorder", "LinkWorld", "Link", "LinkLost", "LinkFault"):
+    for name in ("Frame", "Answer", "Message", "LinkRecorder", "LinkWorld", "Link", "LinkLost", "LinkFault"):
         assert f"class {name}" in source, name
-    for name in ("encode_frame", "decode_frame", "encode_answer", "decode_answer"):
+    for name in ("encode_frame", "decode_frame", "encode_answer", "decode_answer", "encode_message", "decode_message"):
         assert f"def {name}" in source, name
 
 
@@ -501,6 +589,84 @@ async def test_an_env_change_lost_in_flight_forwards_the_call_once_and_seals_inc
         assert snapshot.evidence_status[FUNCTION_CALLS] == "incomplete"
         assert (grade.security, grade.grade_validity.security.status) == (None, "invalid")
         assert len(rig.upstream.served) == 1
+
+
+# --- liveness ---
+
+
+class _Peer:
+    """A duplex whose driver answers only the frames named in ``answers``: the rest hang, as a stuck one's do."""
+
+    def __init__(self, answers: dict[int, Any] | None = None) -> None:
+        self.answers = dict(answers or {})
+        self.sent: list[str] = []
+        self.closed = False
+        self._in: asyncio.Queue[str] = asyncio.Queue()
+
+    async def send(self, data: str) -> None:
+        self.sent.append(data)
+        frame = decode_frame(data)
+        if frame.id in self.answers:
+            self._in.put_nowait(encode_answer(Answer(frame.id, ok=self.answers[frame.id])))
+
+    async def receive(self) -> str:
+        return await self._in.get()
+
+    def close(self) -> None:
+        self.closed = True
+
+
+@pytest.mark.asyncio
+async def test_an_answer_past_its_deadline_loses_the_link_and_fails_every_pending_request():
+    """The answer deadline catches a hung link on the first call: nothing waits past it, and both fail alike."""
+    duplex = _Peer()
+    link = Link(duplex, answer_deadline=0.05)
+
+    outcomes = await asyncio.gather(link.request("env_read"), link.request("env_read"), return_exceptions=True)
+
+    assert len(duplex.sent) == 2
+    assert all(isinstance(outcome, LinkLost) for outcome in outcomes)
+    assert all(outcome is link.lost for outcome in outcomes)
+    assert link.lost is not None
+    assert "0.05s" in link.lost.detail
+    # The link is final: a later request raises the same loss without sending anything.
+    with pytest.raises(LinkLost) as later:
+        await link.request("env_read")
+    assert later.value is link.lost
+    assert len(duplex.sent) == 2
+    await link.aclose()
+
+
+@pytest.mark.asyncio
+async def test_an_answer_within_the_deadline_keeps_the_link_live():
+    """The control: the same deadline, two answered frames, and the link is live and reusable."""
+    duplex = _Peer({0: {"environment": {}, "revision": "r1"}, 1: None})
+    link = Link(duplex, answer_deadline=0.5)
+
+    assert await link.request("env_read") == {"environment": {}, "revision": "r1"}
+    assert await link.request("start_call", {"call_id": "c1"}) is None
+
+    assert link.lost is None
+    assert not duplex.closed
+    await link.aclose()
+
+
+@pytest.mark.asyncio
+async def test_wait_lost_returns_only_once_the_link_is_lost():
+    """A service waits for the end of a binding without polling: the loss it returns is the link's own."""
+    duplex = _Peer()
+    link = Link(duplex)
+    waiter = asyncio.create_task(link.wait_lost())
+    await asyncio.sleep(0.01)
+
+    assert not waiter.done()
+
+    link.close("the driver released the binding")
+
+    assert await waiter is link.lost
+    assert link.lost is not None and link.lost.detail == "the driver released the binding"
+    assert duplex.closed
+    await link.aclose()
 
 
 # --- controls ---

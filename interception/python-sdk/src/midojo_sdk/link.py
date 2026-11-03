@@ -20,6 +20,13 @@ frame the codec refuses, or an answer that matches no request is a *loss*: the
 requests in flight fail with :class:`LinkLost` (reason ``link-lost``), every
 later request fails at once, and the driver seals the evaluation it was
 recording for as incomplete.
+
+Around the frames, one binding exchanges control messages: the driver
+``bind``s it and the service answers ``bound``, the driver ``unbind``s it and
+the service answers ``unbound``, the driver ``ping``s it, and either side may
+``reject`` what it can't accept. :class:`Message` is their envelope, and each
+side validates the body its op names: only the two sides of one binding know
+one.
 """
 
 from __future__ import annotations
@@ -233,6 +240,63 @@ def rejection_error(rejected: Rejection) -> ControlPlaneRejectedError | InvalidR
     return ControlPlaneRejectedError(kind, rejected.detail, late_fact=rejected.late_fact)
 
 
+# --- the binding control messages ---
+
+
+MESSAGE_OPS = ("bind", "bound", "unbind", "unbound", "ping", "rejected")
+"""The control messages a driver and a service exchange around the frames.
+
+``bind`` (driver), ``bound``, ``unbind`` (driver), ``unbound``, ``ping``
+(driver) and ``rejected`` are each one text frame; the two sides of one
+binding are the only ones that know a message's body, so the codec checks the
+envelope and leaves each body to the side that reads it.
+"""
+
+BIND_FIELDS = ("api", "plan", "policy", "upstream_url", "host_tools", "faces")
+"""What a ``bind`` message names: the version, the plan, the tool policy, the upstream and the faces served."""
+
+BOUND_FIELDS = ("tool_url", "tool_token", "tools")
+"""What a ``bound`` message names: the agent's tool endpoint, its token, and the tools the binding serves."""
+
+UNBOUND_FIELDS = ("injection_outcomes",)
+"""What an ``unbound`` message names: every outcome of the released binding, as ``InjectionOutcome.to_data``."""
+
+
+@dataclass(frozen=True)
+class Message:
+    """One control message: ``{"op": op, **fields}``, its fields the body its op names."""
+
+    op: str
+    fields: Mapping[str, Any]
+
+    def __getitem__(self, name: str) -> Any:
+        return self.fields[name]
+
+    def __contains__(self, name: str) -> bool:
+        return name in self.fields
+
+
+def encode_message(op: str, **fields: Any) -> str:
+    """Control message ``op`` with ``fields`` as one text frame."""
+    if op not in MESSAGE_OPS:
+        raise ValueError(f"unknown control message op {op!r}: the binding stream has {list(MESSAGE_OPS)}")
+    return json.dumps({"op": op, **fields}, separators=(",", ":"), sort_keys=True)
+
+
+def decode_message(data: str) -> Message:
+    """The control message ``data`` holds, or :class:`LinkFault` when it isn't one."""
+    try:
+        document = json.loads(data)
+    except (TypeError, ValueError) as e:
+        raise LinkFault(f"the control message is not JSON: {e}") from e
+    if not isinstance(document, dict):
+        raise LinkFault(f"a control message is a JSON object, not {type(document).__name__}")
+    op = document.get("op")
+    if not isinstance(op, str) or op not in MESSAGE_OPS:
+        raise LinkFault(f"unknown control message op {op!r}: the binding stream has {list(MESSAGE_OPS)}")
+    return Message(op, {name: value for name, value in document.items() if name != "op"})
+
+
 # --- the service side of one binding ---
 
 
@@ -244,20 +308,36 @@ class Link:
     the order it applies them. The link never resends anything, and it never
     comes back after a loss: a :class:`RetryingRecorder` around it would only
     replay a request the driver may already have applied.
+
+    ``answer_deadline`` is how long one frame may wait for its answer before
+    the link is lost: a driver that stopped answering ends the binding instead
+    of hanging the call. ``None`` waits for as long as the stream lives.
     """
 
-    def __init__(self, duplex: Duplex) -> None:
+    def __init__(self, duplex: Duplex, *, answer_deadline: float | None = None) -> None:
+        if answer_deadline is not None and (
+            isinstance(answer_deadline, bool) or not isinstance(answer_deadline, int | float) or answer_deadline <= 0
+        ):
+            raise ValueError(f"answer_deadline must be a positive number of seconds or None, not {answer_deadline!r}")
         self._duplex = duplex
+        self._answer_deadline = None if answer_deadline is None else float(answer_deadline)
         self._next_id = 0
         self._pending: dict[int, asyncio.Future[Any]] = {}
         # Requests the caller abandoned (a cancelled tool call): their answers arrive to no one, and are dropped.
         self._abandoned: set[int] = set()
         self._reader: asyncio.Task[None] | None = None
         self._lost: LinkError | None = None
+        self._lost_event = asyncio.Event()
 
     @property
     def lost(self) -> LinkError | None:
         """The loss that ended the link, or None while it's live: a transport that went, or a frame the peer broke."""
+        return self._lost
+
+    async def wait_lost(self) -> LinkError:
+        """The loss that ended the link, waiting for it while the link is still live."""
+        await self._lost_event.wait()
+        assert self._lost is not None
         return self._lost
 
     async def request(self, op: str, args: Mapping[str, Any] | None = None) -> Any:
@@ -283,12 +363,25 @@ class Link:
             self._lose(lost)
             raise lost from e
         try:
-            return await answer
+            return await self._answered(frame_id, answer)
         except asyncio.CancelledError:
             self._abandoned.add(frame_id)
             raise
         finally:
             self._pending.pop(frame_id, None)
+
+    async def _answered(self, frame_id: int, answer: asyncio.Future[Any]) -> Any:
+        """Wait for ``answer``, within the deadline when the link has one; a deadline that passes loses the link."""
+        if self._answer_deadline is None:
+            return await answer
+        try:
+            return await asyncio.wait_for(answer, self._answer_deadline)
+        except TimeoutError:
+            self._lose(LinkLost(f"frame {frame_id} waited more than {self._answer_deadline:g}s for its answer"))
+            # Raise the link's own loss: two requests that timed out together fail as one fact, not two.
+            lost = self._lost
+            assert lost is not None
+            raise lost from None
 
     def close(self, detail: str = "the service closed the binding") -> None:
         """End the link and its stream: the requests in flight fail, and so does every later one."""
@@ -343,6 +436,7 @@ class Link:
     def _lose(self, error: LinkError) -> None:
         if self._lost is None:
             self._lost = error
+        self._lost_event.set()
         for answer in self._pending.values():
             if not answer.done():
                 answer.set_exception(self._lost)
@@ -469,6 +563,7 @@ __all__ = [
     "API",
     "INVALID_REQUEST",
     "LINK_LOST_REASON",
+    "MESSAGE_OPS",
     "OPS",
     "Answer",
     "Duplex",
@@ -479,10 +574,13 @@ __all__ = [
     "LinkLost",
     "LinkRecorder",
     "LinkWorld",
+    "Message",
     "Rejection",
     "decode_answer",
     "decode_frame",
+    "decode_message",
     "encode_answer",
     "encode_frame",
+    "encode_message",
     "rejection_error",
 ]
