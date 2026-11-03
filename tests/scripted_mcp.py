@@ -275,6 +275,9 @@ INITIALIZE = {
     },
 }
 
+WIRE_RESPONSE_DEADLINE_SECONDS = 5.0
+"""How long :func:`wire_session` waits for one response before failing the test."""
+
 
 async def wire_session(server: Server, requests: list[dict[str, Any]]) -> list[str]:
     """Run one session against ``server`` and return each request's response as sent on the wire.
@@ -283,6 +286,10 @@ async def wire_session(server: Server, requests: list[dict[str, Any]]) -> list[s
     ``params``) one at a time with ids 1, 2, ... Each response is its JSON-RPC
     message serialized the way the MCP SDK's stdio and HTTP transports write
     it: ``model_dump_json(by_alias=True, exclude_none=True)``.
+
+    A response that doesn't arrive within
+    :data:`WIRE_RESPONSE_DEADLINE_SECONDS` fails the test, naming the request
+    the session was waiting on, rather than hanging it.
     """
     async with create_client_server_memory_streams() as ((client_read, client_write), server_streams):
         async with anyio.create_task_group() as tasks:
@@ -291,12 +298,19 @@ async def wire_session(server: Server, requests: list[dict[str, Any]]) -> list[s
             async def send(request_id: int, request: dict[str, Any]) -> str:
                 message = JSONRPCRequest(jsonrpc="2.0", id=request_id, **request)
                 await client_write.send(SessionMessage(JSONRPCMessage(message)))
-                while True:
-                    received = await client_read.receive()
-                    if isinstance(received, Exception):
-                        raise received
-                    if getattr(received.message.root, "id", None) == request_id:
-                        return received.message.model_dump_json(by_alias=True, exclude_none=True)
+                try:
+                    with anyio.fail_after(WIRE_RESPONSE_DEADLINE_SECONDS):
+                        while True:
+                            received = await client_read.receive()
+                            if isinstance(received, Exception):
+                                raise received
+                            if getattr(received.message.root, "id", None) == request_id:
+                                return received.message.model_dump_json(by_alias=True, exclude_none=True)
+                except TimeoutError:
+                    raise AssertionError(
+                        f"no response to the {request['method']!r} request (id {request_id}) within "
+                        f"{WIRE_RESPONSE_DEADLINE_SECONDS:g}s"
+                    ) from None
 
             await send(0, INITIALIZE)
             initialized = JSONRPCNotification(jsonrpc="2.0", method="notifications/initialized")
