@@ -1,9 +1,10 @@
 """The driver end of a remote interceptor binding: one outbound WebSocket per evaluation.
 
 A driver dials out to the interceptor service at its binding stream and never
-listens. The socket speaks ``midojo-binding-v1``: the first frame is ``bind``,
-answered by ``bound``; the service then sends ``{id, op, args}`` frames and the
-driver answers each one. :class:`Binding` hands those frames to the driver's
+listens. The handshake offers the subprotocol ``midojo-binding.v1``, and the
+messages inside it belong to the API ``midojo-binding-v1``: the first frame is
+``bind``, answered by ``bound``; the service then sends ``{id, op, args}``
+frames and the driver answers each one. :class:`Binding` hands those frames to the driver's
 ``LinkDispatcher`` through the link core's ``Duplex`` protocol, keeps the
 service's control messages (``unbound``, ``rejected``) for its caller, and
 answers ``unbind`` and ``ping``.
@@ -11,9 +12,11 @@ answers ``unbind`` and ``ping``.
 Liveness (design section 2.6, M5b plan rule 6). The three values are the
 binding's wire contract:
 
-- ``HEARTBEAT_INTERVAL_SECONDS`` (5 s): the driver sends ``ping`` this often.
-  It is an application frame, not a WebSocket-level ping, so a library cannot
-  answer it while the dispatcher is stuck.
+- ``HEARTBEAT_INTERVAL_SECONDS`` (5 s): the driver's dispatcher sends
+  ``ping`` this often, from the loop that reads the service's frames. It is an
+  application frame, not a WebSocket-level ping, so a stalled dispatcher stops
+  pinging and the service expires the binding; the adapter only pings on its
+  own when a caller asks it to (``Binding.open(heartbeat_interval=...)``).
 - ``HEARTBEAT_EXPIRY_SECONDS`` (15 s): the service's default. A binding that
   hears nothing from its driver for this long is lost.
 - ``ANSWER_DEADLINE_SECONDS`` (10 s): the service's default. An answer past
@@ -48,14 +51,23 @@ from websockets.exceptions import InvalidStatus
 from websockets.typing import Subprotocol
 
 from .injection import InjectionPlan
-from .link import API, Duplex, LinkFault, Message, decode_message, encode_message
+from .link import (
+    API,
+    HEARTBEAT_INTERVAL_SECONDS,
+    SUBPROTOCOL,
+    Duplex,
+    LinkFault,
+    Message,
+    decode_message,
+    encode_message,
+)
 
 BIND_PATH = "/v1/bindings"
 MAX_FRAME_BYTES = 16 * 1024 * 1024
 BIND_ANSWER_SECONDS = 10.0
 
 # The three liveness values of the binding's wire contract; see the module docstring.
-HEARTBEAT_INTERVAL_SECONDS = 5.0
+# The interval lives in ``.link``, where the driver's dispatcher reads it without this module's socket library.
 HEARTBEAT_EXPIRY_SECONDS = 15.0
 ANSWER_DEADLINE_SECONDS = 10.0
 
@@ -164,13 +176,15 @@ class Binding(Duplex):
         host_tools: Sequence[str] = (),
         faces: Sequence[str] = ("mcp",),
         timeout: float = BIND_ANSWER_SECONDS,
-        heartbeat_interval: float | None = HEARTBEAT_INTERVAL_SECONDS,
+        heartbeat_interval: float | None = None,
     ) -> Binding:
         """Dial the service, bind one evaluation, and return its driver end.
 
-        ``heartbeat_interval`` is how often the adapter pings the service;
-        ``None`` leaves the heartbeat to the caller, and the service expires
-        the binding after its own expiry.
+        ``heartbeat_interval`` makes the adapter ping the service on a task of
+        its own; the driver's dispatcher sends the heartbeat instead
+        (``LinkDispatcher.serve(heartbeat_interval=)``), so the default is
+        ``None``: a binding whose dispatcher stalled must expire at the
+        service, and a pinger beside the dispatcher would keep it alive.
         """
         if type(credential) is not str or not credential:
             raise ValueError("the interceptor service needs a bind credential")
@@ -181,7 +195,7 @@ class Binding(Duplex):
             websocket = await connect(
                 url,
                 additional_headers={"authorization": f"Bearer {credential}"},
-                subprotocols=[Subprotocol(API)],
+                subprotocols=[Subprotocol(SUBPROTOCOL)],
                 max_size=MAX_FRAME_BYTES,
                 proxy=None,
                 open_timeout=timeout,

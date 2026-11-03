@@ -55,10 +55,11 @@ from midojo_sdk.recorder import RetryingRecorder
 
 import midojo.evaluation_handle as handles
 from midojo.control_plane.client import ControlPlaneClient
+from midojo.evaluation_context import EvaluationContext
 from midojo.evaluation_handle import HANDLE_API_VERSION, LinkLostError
 from midojo.injection_spec import InjectionSpec
 from midojo.interception_host import CREDENTIAL_ENV, URL_ENV, RemoteInterception
-from midojo.interception_service import InterceptorService
+from midojo.interception_service import InterceptorService, Outcome
 from midojo.tool_endpoint import ToolEndpoint
 from tests.binding_driver import serve_app
 from tests.fixtures.scripted_target.upstream import scripted_upstream
@@ -322,6 +323,84 @@ def test_a_lost_link_seals_with_function_calls_incomplete_and_raises_link_lost()
         assert result.interrupted is False
         assert result.snapshot.evidence_status["function_calls"] == "incomplete"
         assert handle.grade().grade.security is None
+
+
+def test_an_unacknowledged_release_after_the_seal_makes_close_report_the_lost_link():
+    """A sealed evaluation whose ``unbind`` isn't acknowledged is still a loss: closing says so instead of only reporting no outcomes."""
+    with serving() as remote:
+        handle = handles.open(
+            episode(), upstream=remote.upstream_url, interception=RemoteInterception(remote.url, CREDENTIAL)
+        )
+        try:
+            assert handle.tool_endpoint is not None
+            assert "41°F" in call(handle.tool_endpoint, city="Boston")
+            snapshot = handle.seal()
+            assert "function_calls" not in snapshot.evidence_status
+            # The service goes after the seal: the release's unbind is never acknowledged.
+            remote.stop_service()
+            with pytest.raises(LinkLostError) as raised:
+                handle.close()
+            assert raised.value.reason == "link-lost"
+            # A host that catches the error can still report it after the close.
+            assert handle.close_error is raised.value
+            result = handle.result
+            assert result is not None
+            # No outcome arrived, and the loss says why, rather than an empty tuple reading as "no injection".
+            assert result.injection_outcomes == ()
+            # The sealed snapshot is evidence: the release changed nothing in it.
+            assert result.snapshot is not None and result.snapshot.snapshot_id == snapshot.snapshot_id
+        finally:
+            with contextlib.suppress(LinkLostError):
+                handle.close()
+
+
+def test_a_service_that_never_answers_the_release_makes_close_report_the_lost_link(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A hung service is a lost link too: the release waits out its deadline, and closing raises ``link-lost``."""
+    import midojo.evaluation_context as contexts
+
+    async def never_acknowledge(self: InterceptorService, stream: Any, link: Any) -> Outcome:
+        """Take the ``unbind`` and never answer it: only the socket's end ends the wait."""
+        await stream.closed.wait()
+        return Outcome(released=False, detail=stream.detail)
+
+    monkeypatch.setattr(InterceptorService, "_outcome", never_acknowledge)
+    monkeypatch.setattr(contexts, "_RELEASE_SECONDS", 0.2)
+    with serving() as remote:
+        handle = handles.open(
+            episode(), upstream=remote.upstream_url, interception=RemoteInterception(remote.url, CREDENTIAL)
+        )
+        try:
+            assert handle.tool_endpoint is not None
+            assert "41°F" in call(handle.tool_endpoint, city="Boston")
+            snapshot = handle.seal()
+            with pytest.raises(LinkLostError) as raised:
+                handle.close()
+            assert raised.value.reason == "link-lost"
+            result = handle.result
+            assert result is not None and result.injection_outcomes == ()
+            assert result.snapshot is not None and result.snapshot.snapshot_id == snapshot.snapshot_id
+        finally:
+            with contextlib.suppress(LinkLostError):
+                handle.close()
+
+
+@pytest.mark.asyncio
+async def test_an_unacknowledged_release_after_the_seal_raises_from_the_async_context():
+    """The asynchronous context reports the same loss: leaving it after an unacknowledged release raises ``link-lost``."""
+    with serving() as remote:
+        context = EvaluationContext(
+            episode(), remote=RemoteInterception(remote.url, CREDENTIAL), upstream_url=remote.upstream_url
+        )
+        with pytest.raises(LinkLostError) as raised:
+            async with context:
+                assert context.binding.tool_endpoint is not None
+                await context.seal()
+                # The service goes after the seal, before the release: the unbind is never acknowledged.
+                remote.stop_service()
+        assert raised.value.reason == "link-lost"
+        assert context.link_error is not None and context.link_error.reason == "link-lost"
 
 
 # --- the listener ---

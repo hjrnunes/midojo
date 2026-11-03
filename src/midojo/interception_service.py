@@ -15,13 +15,17 @@ default. This service is for an agent that can't share the driver's process.
 The stream, per design section 2.6:
 
 - ``GET /v1/bindings`` upgrades with ``Authorization: Bearer <bind
-  credential>`` and the subprotocol ``midojo-binding-v1``; the service refuses
+  credential>`` and the subprotocol ``midojo-binding.v1``; the service refuses
   anything else with 403 before ``accept()`` and never reads a credential from
-  the query string.
+  the query string. The subprotocol's name is not the messages' API name:
+  every frame in the stream belongs to ``midojo-binding-v1``, which ``bind``
+  names.
 - The first frame is ``bind {api, plan, policy, upstream_url, host_tools,
   faces}``: document-form data only. The answer is ``bound {tool_url,
-  tool_token, tools}``; the endpoint is published as part of that answer, so
-  an id reaches an MCP app only once its binding exists.
+  tool_token, tools}``; the endpoint exists before that answer names it, and
+  a request that reaches it before the answer waits for the answer rather
+  than being refused, so an agent that already read ``bound`` never gets a
+  401.
 - ``unbind`` is answered by ``unbound {injection_outcomes}``: every outcome of
   the binding, as ``InjectionOutcome.to_data``.
 - ``ping`` is the driver's heartbeat: a binding that hears no frame within the
@@ -47,7 +51,7 @@ import secrets
 import socket
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import uvicorn
 from midojo_sdk.binding import ANSWER_DEADLINE_SECONDS, HEARTBEAT_EXPIRY_SECONDS
@@ -55,6 +59,7 @@ from midojo_sdk.injection import CapabilityError, Channel, InjectionPlan
 from midojo_sdk.link import (
     API,
     BIND_FIELDS,
+    SUBPROTOCOL,
     Link,
     LinkFault,
     LinkLost,
@@ -79,9 +84,6 @@ BIND_PATH = "/v1/bindings"
 
 FACES_PATH = "/b"
 """Where every binding's faces live: ``/b/<binding id>/mcp`` while that binding exists."""
-
-SUBPROTOCOL = API
-"""The subprotocol the upgrade must ask for: the binding stream's name, ``midojo-binding-v1``."""
 
 DEFAULT_PORT = 8767
 """The port the service listens on by default: one fixed port a driver's URL can name."""
@@ -170,6 +172,8 @@ class _Face:
     token: str
     app: ASGIApp
     path: str
+    bound: asyncio.Event = field(default_factory=asyncio.Event)
+    gone: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 class _Faces:
@@ -179,6 +183,11 @@ class _Faces:
     loss the endpoint says "no such binding is authorized here" rather than
     404, so a client library reads a refusal, not a server that never had the
     binding. The same 401 answers a published id without its own tool token.
+
+    A published face answers only once the service sent its ``bound``: the
+    endpoint exists before the answer names it, so a request that arrives in
+    that window waits for the answer rather than reading a 401 it would never
+    see again. A binding that ends before its answer refuses the request.
     """
 
     def __init__(self) -> None:
@@ -197,7 +206,9 @@ class _Faces:
 
     def remove(self, binding_id: str) -> None:
         """Stop routing to ``binding_id``: its token gets 401 from now on."""
-        self._faces.pop(binding_id, None)
+        face = self._faces.pop(binding_id, None)
+        if face is not None:
+            face.gone.set()
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -214,8 +225,31 @@ class _Faces:
         if face is None or not rest:
             await _refuse(send, 401, b"This binding's bearer token is required")
             return
+        await _named(face)
+        if not face.bound.is_set():
+            await _refuse(send, 401, b"This binding's bearer token is required")
+            return
         child_scope = dict(scope, path="/" + rest, root_path=root + "/" + binding_id)
         await _authorized(face.app, face.token)(child_scope, receive, send)
+
+
+async def _named(face: _Face) -> None:
+    """Wait until ``face`` has been named to its driver, or until the binding went.
+
+    A face that is removed sets ``gone``, so a held request never outlives its binding.
+    """
+    if face.bound.is_set() or face.gone.is_set():
+        return
+    waiting = [
+        asyncio.create_task(face.bound.wait(), name="midojo-binding-bound"),
+        asyncio.create_task(face.gone.wait(), name="midojo-binding-gone"),
+    ]
+    try:
+        await asyncio.wait(waiting, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for task in waiting:
+            task.cancel()
+        await asyncio.gather(*waiting, return_exceptions=True)
 
 
 def _authorized(app: ASGIApp, token: str) -> ASGIApp:
@@ -536,6 +570,9 @@ class InterceptorService:
             await stream.send(self._bound(mounted))
         except LinkLost:
             pass  # the socket went before the answer did; the outcome below ends the binding as a loss
+        else:
+            # The endpoint answers from here on: a request that waited before the answer goes through now.
+            mounted.face.bound.set()
         outcome = await self._outcome(stream, link)
         if outcome.released:
             # Stop routing before leaving the lifespan: a request in that window must not reach a session
@@ -631,7 +668,12 @@ class InterceptorService:
         await _close(websocket, 1008, refused.detail)
 
     async def _mount(self, request: _BindRequest, link: Link) -> _Mounted:
-        """Build the binding's interceptor, enter its lifespan and publish its endpoint, before ``bound`` names it."""
+        """Build the binding's interceptor, enter its lifespan and publish its endpoint.
+
+        The endpoint is published before ``bound`` names it, because the answer
+        carries its URL and token; it answers nothing until the answer was sent
+        (``_Faces`` holds a request until then).
+        """
         binding_id = secrets.token_urlsafe(12)
         token = secrets.token_urlsafe(32)
         allowed, blocked = tool_policy(request.policy)

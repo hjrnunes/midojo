@@ -15,7 +15,9 @@ in-process client, so a body either would refuse answers with the same
 
 A frame whose id is not the one after the last is a *link fault*: the stream
 lost or repeated a frame, and applying the rest would record the evaluation
-wrong. A fault ends the link like a lost transport does, and a lost link is
+wrong. The stream starts at id 0, so a first frame with any other id is a
+fault too: it skipped the binding's first frame, or repeated one this driver
+never applied. A fault ends the link like a lost transport does, and a lost link is
 terminal: the requests in flight fail on the service side, nothing is resumed,
 and the driver seals the evaluation with ``function_calls`` incomplete
 (:meth:`LinkDispatcher.interrupted_evidence`) and raises a handle error with
@@ -24,6 +26,7 @@ reason ``link-lost`` (:meth:`LinkDispatcher.error`).
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Callable, Mapping
 from contextlib import suppress
@@ -42,6 +45,7 @@ from midojo_sdk.link import (
     Rejection,
     decode_frame,
     encode_answer,
+    encode_message,
 )
 from midojo_sdk.recorder import ControlPlaneRejectedError, EnvironmentRevision, InvalidRequestError
 
@@ -80,7 +84,8 @@ class LinkDispatcher:
         self._recorder = client
         self._world = client
         self._clock = clock
-        self._last_id: int | None = None
+        # The stream's first frame is id 0: one below it is the id no frame may carry.
+        self._last_id = -1
         self._lost: LinkError | None = None
         self.applications: list[Application] = []
 
@@ -116,23 +121,33 @@ class LinkDispatcher:
 
         return LinkLostError(str(self._lost))
 
-    async def serve(self, duplex: Duplex) -> None:
+    async def serve(self, duplex: Duplex, *, heartbeat_interval: float | None = None) -> None:
         """Apply frames from ``duplex`` until the link is lost, answering each one.
+
+        ``heartbeat_interval`` is how often the dispatcher sends the
+        application ``ping`` while it waits for a frame; ``None`` sends none.
+        The ping is only sent from this loop, so a dispatcher that is stuck
+        stops pinging and the service expires the binding, as the design's
+        liveness rule intends. The driver's remote interception passes the
+        wire contract's ``HEARTBEAT_INTERVAL_SECONDS``.
 
         A link that ends is gone for good, so the stream closes with it: the
         service's requests in flight fail at once rather than waiting for an
         answer this driver will never send.
         """
         try:
-            await self._serve(duplex)
+            await self._serve(duplex, heartbeat_interval)
         finally:
             with suppress(Exception):
                 duplex.close()
 
-    async def _serve(self, duplex: Duplex) -> None:
+    async def _serve(self, duplex: Duplex, heartbeat_interval: float | None) -> None:
         while self._lost is None:
             try:
-                data = await duplex.receive()
+                data = await self._receive(duplex, heartbeat_interval)
+            except LinkLost as lost:
+                self._lose(lost)
+                return
             except Exception as e:
                 self._lose(LinkLost(f"the binding stream ended: {e}"))
                 return
@@ -141,9 +156,13 @@ class LinkDispatcher:
             except LinkFault as fault:
                 self._lose(fault)
                 return
-            if self._last_id is not None and frame.id != self._last_id + 1:
+            if frame.id != self._last_id + 1:
                 what = "repeated" if frame.id <= self._last_id else "skipped"
-                self._lose(LinkFault(f"frame {frame.id} arrived after {self._last_id}: the stream {what} a frame"))
+                self._lose(
+                    LinkFault(
+                        f"frame {frame.id} arrived where {self._last_id + 1} was expected: the stream {what} a frame"
+                    )
+                )
                 return
             try:
                 answer = await self._answer(frame)
@@ -161,6 +180,19 @@ class LinkDispatcher:
             except Exception as e:
                 self._lose(LinkLost(f"the answer to frame {frame.id} couldn't be sent: {e}"))
                 return
+
+    async def _receive(self, duplex: Duplex, heartbeat_interval: float | None) -> str:
+        """The next frame from ``duplex``, pinging the service while the wait lasts."""
+        if heartbeat_interval is None:
+            return await duplex.receive()
+        while True:
+            try:
+                return await asyncio.wait_for(duplex.receive(), heartbeat_interval)
+            except TimeoutError:
+                try:
+                    await duplex.send(encode_message("ping"))
+                except Exception as e:
+                    raise LinkLost(f"the heartbeat couldn't be sent: {e}") from e
 
     async def _answer(self, frame: Frame) -> Answer:
         try:

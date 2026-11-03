@@ -23,7 +23,7 @@ from urllib.parse import urlsplit
 
 import uvicorn
 from midojo_sdk.injection import InjectionPlan
-from midojo_sdk.link import API, LinkFault, Message, decode_message, encode_message
+from midojo_sdk.link import API, SUBPROTOCOL, LinkFault, Message, decode_message, encode_message
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import InvalidStatus
 from websockets.typing import Subprotocol
@@ -108,7 +108,7 @@ async def _connect(
     url: str,
     *,
     headers: Mapping[str, str] | None = None,
-    subprotocols: Sequence[str] = (API,),
+    subprotocols: Sequence[str] = (SUBPROTOCOL,),
     timeout: float = SERVICE_TIMEOUT,
 ) -> ClientConnection:
     return await asyncio.wait_for(
@@ -128,7 +128,7 @@ async def upgrade(
     credential: str,
     *,
     path: str = "/v1/bindings",
-    subprotocols: Sequence[str] = (API,),
+    subprotocols: Sequence[str] = (SUBPROTOCOL,),
     extra_headers: Mapping[str, str] | None = None,
 ) -> ClientConnection:
     """Upgrade one socket to ``path`` with ``credential`` as the bind credential."""
@@ -140,7 +140,7 @@ async def refusal(
     url: str,
     *,
     headers: Mapping[str, str] | None = None,
-    subprotocols: Sequence[str] = (API,),
+    subprotocols: Sequence[str] = (SUBPROTOCOL,),
 ) -> int | None:
     """The HTTP status the upgrade at ``url`` is refused with, or None when the upgrade was accepted."""
     try:
@@ -182,6 +182,44 @@ async def raw_upgrade_status(url: str, headers: Mapping[str, str]) -> int:
     return int(status.split()[1])
 
 
+async def request(
+    websocket: ClientConnection,
+    *,
+    upstream_url: str,
+    plan: InjectionPlan = InjectionPlan(),
+    policy: Mapping[str, Any] | None = None,
+    host_tools: Sequence[str] = (),
+    faces: Sequence[str] = ("mcp",),
+    api: str = API,
+    fields: Mapping[str, Any] | None = None,
+    op: str = "bind",
+) -> None:
+    """Send one ``bind`` frame and return without reading: a test holds the service before ``bound``."""
+    body: dict[str, Any] = {
+        "api": api,
+        "plan": plan.to_data(),
+        "policy": None if policy is None else dict(policy),
+        "upstream_url": upstream_url,
+        "host_tools": list(host_tools),
+        "faces": list(faces),
+    }
+    body.update(fields or {})
+    await websocket.send(encode_message(op, **body))
+
+
+async def answered(websocket: ClientConnection) -> Bound:
+    """Read the answer to one bind: the ``bound`` it holds, or the ``rejected`` it names."""
+    answer = await asyncio.wait_for(websocket.recv(), SERVICE_TIMEOUT)
+    message = decode_message(answer if isinstance(answer, str) else answer.decode())
+    if message.op != "bound":
+        raise RefusedError(message)
+    return Bound(
+        tool_url=message["tool_url"],
+        tool_token=message["tool_token"],
+        tools=tuple(message["tools"]),
+    )
+
+
 async def bind(
     websocket: ClientConnection,
     *,
@@ -195,25 +233,18 @@ async def bind(
     op: str = "bind",
 ) -> Bound:
     """Send one ``bind`` and read its answer, or raise naming the ``rejected`` the service answered."""
-    body: dict[str, Any] = {
-        "api": api,
-        "plan": plan.to_data(),
-        "policy": None if policy is None else dict(policy),
-        "upstream_url": upstream_url,
-        "host_tools": list(host_tools),
-        "faces": list(faces),
-    }
-    body.update(fields or {})
-    await websocket.send(encode_message(op, **body))
-    answer = await asyncio.wait_for(websocket.recv(), SERVICE_TIMEOUT)
-    message = decode_message(answer if isinstance(answer, str) else answer.decode())
-    if message.op != "bound":
-        raise RefusedError(message)
-    return Bound(
-        tool_url=message["tool_url"],
-        tool_token=message["tool_token"],
-        tools=tuple(message["tools"]),
+    await request(
+        websocket,
+        upstream_url=upstream_url,
+        plan=plan,
+        policy=policy,
+        host_tools=host_tools,
+        faces=faces,
+        api=api,
+        fields=fields,
+        op=op,
     )
+    return await answered(websocket)
 
 
 class RefusedError(AssertionError):
@@ -235,9 +266,9 @@ class RefusedError(AssertionError):
 class _DriverDuplex:
     """The socket as the link core's Duplex: frames in, frames out.
 
-    The service's control messages (``unbound``, ``rejected``) travel on the
-    same socket outside the frame stream, so the reader takes them for the
-    driver and hands the dispatcher only frames.
+    The service's control messages (``bound``, ``unbound``, ``rejected``) travel
+    on the same socket outside the frame stream, so the reader takes them for
+    the driver and hands the dispatcher only frames.
     """
 
     def __init__(self, driver: BindingDriver) -> None:
@@ -269,6 +300,8 @@ class BindingDriver:
     dispatcher: LinkDispatcher
     bound: Bound
     unbound: asyncio.Event = field(default_factory=asyncio.Event)
+    bound_seen: asyncio.Event = field(default_factory=asyncio.Event)
+    bound_message: Message | None = None
     injection_outcomes: tuple[Mapping[str, Any], ...] = ()
     rejected: Message | None = None
     closed: asyncio.Event = field(default_factory=asyncio.Event)
@@ -300,7 +333,7 @@ class BindingDriver:
         policy: Mapping[str, Any] | None = None,
         host_tools: Sequence[str] = (),
         faces: Sequence[str] = ("mcp",),
-        subprotocols: Sequence[str] = (API,),
+        subprotocols: Sequence[str] = (SUBPROTOCOL,),
     ) -> BindingDriver:
         """Upgrade, bind, and start serving frames: the driver's whole side of one binding."""
         websocket = await upgrade(service_url, credential, subprotocols=subprotocols)
@@ -316,7 +349,12 @@ class BindingDriver:
         except BaseException:
             await websocket.close()
             raise
-        driver = cls(websocket=websocket, dispatcher=dispatcher, bound=answered)
+        return cls.attach(websocket, dispatcher, answered)
+
+    @classmethod
+    def attach(cls, websocket: ClientConnection, dispatcher: LinkDispatcher, bound: Bound) -> BindingDriver:
+        """Serve the frames of a socket whose ``bind`` was answered, or whose answer an adapter read."""
+        driver = cls(websocket=websocket, dispatcher=dispatcher, bound=bound)
         driver._tasks = [
             asyncio.create_task(driver.dispatcher.serve(_DriverDuplex(driver)), name="binding-driver-serve"),
             asyncio.create_task(driver._watch_close(), name="binding-driver-close"),
@@ -339,6 +377,11 @@ class BindingDriver:
             message = decode_message(raw)
         except LinkFault:
             return False
+        if message.op == "bound":
+            # A driver that attached before its answer read it has the answer here, not in ``open``.
+            self.bound_message = message
+            self.bound_seen.set()
+            return True
         if message.op == "unbound":
             self.injection_outcomes = tuple(message["injection_outcomes"])
             self.unbound.set()

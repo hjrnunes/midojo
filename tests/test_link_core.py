@@ -262,6 +262,7 @@ def test_the_link_module_imports_with_no_third_party_package_available():
             "import midojo_sdk.link as link",
             "from midojo_sdk import Frame, LinkRecorder, LinkWorld",
             "assert link.API == 'midojo-binding-v1'",
+            "assert link.SUBPROTOCOL == 'midojo-binding.v1'",
             "print('ok')",
         ]
     )
@@ -389,6 +390,23 @@ async def test_a_gap_in_the_ids_ends_the_link_as_a_fault():
         assert "skipped" in fault.detail
         assert rig.session.dispatcher.applied == (0,)
         # The driver closed the stream with the link: the service's side reads the loss, not an answer that never comes.
+        assert (await _lost(rig)).reason == LINK_LOST_REASON
+
+
+@pytest.mark.asyncio
+async def test_a_first_frame_other_than_id_0_ends_the_link_as_a_fault():
+    """The stream starts at id 0, so a first frame with id 1 skipped the binding's first frame."""
+    async with open_rig() as rig:
+        await rig.session.feed(
+            Frame(1, "start_call", {"call_id": "c1", "function": "f", "args": {}, "disposition": "forwarded"})
+        )
+        # A driver that faults ends the stream at once; one that accepted id 1 would still be serving.
+        await asyncio.sleep(0)
+        fault = rig.session.dispatcher.lost
+        assert isinstance(fault, LinkFault)
+        assert "skipped" in fault.detail
+        await rig.session.wait()
+        assert rig.session.dispatcher.applied == ()
         assert (await _lost(rig)).reason == LINK_LOST_REASON
 
 

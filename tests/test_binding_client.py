@@ -30,6 +30,7 @@ import asyncio
 import contextlib
 import json
 import logging
+from typing import NoReturn
 
 import pytest
 from fastmcp import Client
@@ -45,7 +46,6 @@ from midojo_sdk.binding import (
     binding_url,
 )
 from midojo_sdk.injection import Channel, InjectionInstruction, InjectionPlan, InjectionTarget
-from midojo_sdk.link import API
 
 from midojo.control_plane.inprocess_control import InProcessControlClient
 from midojo.delivery import delivery_facts, exposure
@@ -122,7 +122,7 @@ async def test_the_adapter_binds_serves_and_releases_one_evaluation():
             assert binding.bound.tool_token
             assert binding.bound.tools == ("get_weather", "list_alerts")
             assert binding.bound.tool_url.startswith(f"{remote.url}/b/")
-            assert binding.websocket.subprotocol == API
+            assert binding.websocket.subprotocol == "midojo-binding.v1"
             assert binding.websocket.protocol.max_message_size == MAX_FRAME_BYTES
             assert remote.service.published == (binding.bound.tool_url.split("/")[4],)
 
@@ -267,14 +267,19 @@ def test_the_three_liveness_values_are_the_wire_contract():
 
 
 @pytest.mark.asyncio
-async def test_the_heartbeat_keeps_an_idle_binding_and_silence_ends_it():
-    """The adapter's own pings are the heartbeat: they keep an idle binding; without them the service expires it."""
+async def test_the_dispatchers_heartbeat_keeps_an_idle_binding_alive():
+    """The dispatcher pings while it waits for frames, so an idle binding outlives several expiries.
+
+    The binding is opened with no heartbeat of its own: the pings the service
+    sees are the dispatcher's, through the same duplex that answers the
+    service's frames.
+    """
     async with serving(heartbeat_expiry=0.4) as remote:
         opened, dispatcher = remote.open()
-        binding = await Binding.open(remote.url, CREDENTIAL, upstream_url=remote.upstream_url, heartbeat_interval=0.05)
-        serving_frames = asyncio.create_task(dispatcher.serve(binding))
+        binding = await Binding.open(remote.url, CREDENTIAL, upstream_url=remote.upstream_url)
+        serving_frames = asyncio.create_task(dispatcher.serve(binding, heartbeat_interval=0.05))
         try:
-            # Three expiries with no call: only the adapter's pings keep the binding alive.
+            # Three expiries with no call: only the dispatcher's pings keep the binding alive.
             await asyncio.sleep(0.9)
             assert not binding.closed.is_set()
             assert remote.service.published
@@ -285,21 +290,44 @@ async def test_the_heartbeat_keeps_an_idle_binding_and_silence_ends_it():
                 serving_frames.cancel()
                 await serving_frames
 
-        silent_opened, silent_dispatcher = remote.open()
-        silent = await Binding.open(remote.url, CREDENTIAL, upstream_url=remote.upstream_url, heartbeat_interval=None)
-        silent_frames = asyncio.create_task(silent_dispatcher.serve(silent))
+
+class Stalled:
+    """The duplex of a dispatcher that stopped: nothing it reads ever arrives and nothing it sends leaves."""
+
+    def __init__(self, binding: Binding) -> None:
+        self.binding = binding
+
+    async def send(self, data: str) -> None:
+        await asyncio.Event().wait()
+
+    async def receive(self) -> NoReturn:
+        await asyncio.Event().wait()
+        raise AssertionError("a stalled dispatcher never receives a frame")
+
+    def close(self) -> None:
+        self.binding.close()
+
+
+@pytest.mark.asyncio
+async def test_a_stalled_dispatcher_lets_the_binding_expire():
+    """The ping is the dispatcher's work, not a task of its own: a dispatcher stuck in its wait lets the service expire the binding."""
+    async with serving(heartbeat_expiry=0.4) as remote:
+        opened, dispatcher = remote.open()
+        binding = await Binding.open(remote.url, CREDENTIAL, upstream_url=remote.upstream_url)
+        stalled = Stalled(binding)
+        serving_frames = asyncio.create_task(dispatcher.serve(stalled, heartbeat_interval=0.05))
         try:
-            assert remote.service.published == (silent.bound.tool_url.split("/")[4],)
-            await asyncio.wait_for(silent.wait_closed(), 5)
-            assert silent.close_code == LOSS_CLOSE_CODE
-            assert "no heartbeat within 0.4s" in (silent.close_reason or ""), silent.close_reason
+            assert remote.service.published == (binding.bound.tool_url.split("/")[4],)
+            await asyncio.wait_for(binding.wait_closed(), 5)
+            assert binding.close_code == LOSS_CLOSE_CODE
+            assert "no heartbeat within 0.4s" in (binding.close_reason or ""), binding.close_reason
             assert remote.service.published == ()
-            assert (await refused_http(silent.bound.tool_url, silent.bound.tool_token)).status_code == 401
+            assert (await refused_http(binding.bound.tool_url, binding.bound.tool_token)).status_code == 401
         finally:
-            await silent.aclose()
+            await binding.aclose()
             with contextlib.suppress(asyncio.CancelledError):
-                silent_frames.cancel()
-                await silent_frames
+                serving_frames.cancel()
+                await serving_frames
 
 
 class SlowAnswers:

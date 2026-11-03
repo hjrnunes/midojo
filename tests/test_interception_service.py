@@ -40,7 +40,7 @@ from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 from mcp.types import TextContent
 from midojo_sdk.injection import Channel, InjectionInstruction, InjectionPlan, InjectionTarget, payload_digest
-from midojo_sdk.link import API
+from midojo_sdk.link import LinkFault, decode_message
 
 from midojo.control_plane.config import AppConfig
 from midojo.control_plane.link_dispatch import LinkDispatcher
@@ -52,15 +52,17 @@ from midojo.interception_service import (
     LOSS_CLOSE_CODE,
     READY_PREFIX,
     RELEASE_CLOSE_CODE,
-    SUBPROTOCOL,
     InterceptorService,
+    _BindingStream,
     main,
 )
 from tests.binding_driver import (
     BindingDriver,
+    Bound,
     RefusedError,
     raw_upgrade_status,
     refusal,
+    request,
     serve_app,
     upgrade,
 )
@@ -196,22 +198,36 @@ async def refused_http(url: str, token: str | None = None) -> httpx.Response:
 
 @pytest.mark.asyncio
 async def test_the_upgrade_takes_only_the_bind_credential_and_the_subprotocol():
-    """The refused upgrades are HTTP 403 before accept; the accepted one speaks ``midojo-binding.v1``."""
+    """The refused upgrades are HTTP 403 before accept; the accepted one speaks ``midojo-binding.v1``.
+
+    The subprotocol's name is not the message API's name: a socket that offers
+    only ``midojo-binding-v1`` is refused before it is accepted, and the bind
+    it would have sent still names that API.
+    """
     async with serving() as remote:
         url = f"{remote.url}{BIND_PATH}"
         # A bare handshake, so a missing header really is missing.
         assert await raw_upgrade_status(url, {}) == 403, "no credential, no subprotocol"
         assert await raw_upgrade_status(url, {"Authorization": f"Bearer {CREDENTIAL}"}) == 403, "no subprotocol"
-        assert await raw_upgrade_status(url, {"Sec-WebSocket-Protocol": API}) == 403, "no credential"
-        assert await refusal(url, headers={"authorization": "Bearer wrong"}, subprotocols=(API,)) == 403, "wrong one"
-        assert await refusal(url, headers={"authorization": CREDENTIAL}, subprotocols=(API,)) == 403, "no scheme"
+        assert await raw_upgrade_status(url, {"Sec-WebSocket-Protocol": "midojo-binding.v1"}) == 403, "no credential"
+        assert (
+            await refusal(url, headers={"authorization": "Bearer wrong"}, subprotocols=("midojo-binding.v1",)) == 403
+        ), "wrong one"
+        assert await refusal(url, headers={"authorization": CREDENTIAL}, subprotocols=("midojo-binding.v1",)) == 403, (
+            "no scheme"
+        )
+        # The message API's name is not the subprotocol's: a socket offering it is refused before accept.
+        assert (
+            await refusal(url, headers={"authorization": f"Bearer {CREDENTIAL}"}, subprotocols=("midojo-binding-v1",))
+            == 403
+        ), "the message API's name is not a subprotocol"
         # A credential in the query string is never one, however right it is.
         assert await refusal(f"{url}?credential={CREDENTIAL}") == 403, "query credential"
         assert await refusal(f"{url}?token={CREDENTIAL}", headers={"authorization": "Bearer wrong"}) == 403
         assert await refusal(url, subprotocols=("other.v1",), headers={"authorization": f"Bearer {CREDENTIAL}"}) == 403
 
-        websocket = await upgrade(remote.url, CREDENTIAL)
-        assert websocket.subprotocol == SUBPROTOCOL
+        websocket = await upgrade(remote.url, CREDENTIAL, subprotocols=("midojo-binding.v1",))
+        assert websocket.subprotocol == "midojo-binding.v1"
         await websocket.close()
         assert remote.service.published == ()
 
@@ -271,6 +287,56 @@ async def test_a_binding_publishes_its_endpoint_only_once_bound():
         # What the agent saw was recorded before the upstream ran, and the finish after it.
         assert remote.events == [("acked", "frame"), ("forwarded", "get_weather"), ("acked", "frame")]
         await driver.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_request_that_dials_the_endpoint_before_bound_waits_for_it(monkeypatch):
+    """The endpoint exists before ``bound`` names it, so a request waits there instead of reaching the upstream."""
+    sent = asyncio.Event()
+    gate = asyncio.Event()
+    captured: dict[str, Any] = {}
+    send = _BindingStream.send
+
+    async def paused(stream: _BindingStream, data: str) -> None:
+        try:
+            message = decode_message(data)
+        except LinkFault:
+            message = None  # a frame of the link, not a control message
+        if message is not None and message.op == "bound" and "bound" not in captured:
+            captured["bound"] = message
+            sent.set()
+            await gate.wait()
+        await send(stream, data)
+
+    monkeypatch.setattr(_BindingStream, "send", paused)
+    async with serving() as remote:
+        _, dispatcher = remote.open()
+        websocket = await upgrade(remote.url, CREDENTIAL, subprotocols=("midojo-binding.v1",))
+        await request(websocket, upstream_url=remote.upstream_url)
+        await asyncio.wait_for(sent.wait(), 5)
+        message = captured["bound"]
+        tool_url, tool_token = str(message["tool_url"]), str(message["tool_token"])
+        assert remote.service.published == (tool_url.split("/")[4],)
+
+        driver = BindingDriver.attach(websocket, dispatcher, Bound(tool_url=tool_url, tool_token=tool_token, tools=()))
+        held = asyncio.create_task(call(tool_url, tool_token))
+        try:
+            await asyncio.sleep(0.1)
+            # The binding has no ``bound`` yet, so its endpoint holds the request: it is neither
+            # refused with 401 nor forwarded to the upstream.
+            assert not held.done(), "the request waited for bound"
+            assert remote.events == []
+
+            gate.set()
+            assert await asyncio.wait_for(held, 10) == "41F, rain"
+            await asyncio.wait_for(driver.bound_seen.wait(), 5)
+            assert remote.events == [("acked", "frame"), ("forwarded", "get_weather"), ("acked", "frame")]
+            await driver.unbind()
+            await driver.wait_unbound()
+        finally:
+            if not held.done():
+                held.cancel()
+            await driver.aclose()
 
 
 @pytest.mark.asyncio

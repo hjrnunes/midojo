@@ -1,5 +1,10 @@
 """The ``midojo-binding-v1`` frame codec and the service side of a remote interception link.
 
+Two names are easy to confuse, and they are different strings: the WebSocket
+upgrade offers the subprotocol ``midojo-binding.v1`` (:data:`SUBPROTOCOL`),
+and the messages inside the stream carry the API name ``midojo-binding-v1``
+(:data:`API`) in their ``bind``.
+
 An interception layer that runs in its own process records through frames
 instead of HTTP: it sends ``{"id", "op", "args"}`` to the driver and awaits the
 answer, ``{"re", "ok"}`` or ``{"re", "rejected": {"kind", "detail",
@@ -50,7 +55,19 @@ from .recorder import (
 )
 
 API = "midojo-binding-v1"
-"""The binding stream's protocol name: what a driver and a service must agree on to talk."""
+"""The messages' API name: what a driver and a service agree on inside the stream."""
+
+SUBPROTOCOL = "midojo-binding.v1"
+"""The WebSocket subprotocol the upgrade must offer: the handshake's name, not the messages' ``API``."""
+
+HEARTBEAT_INTERVAL_SECONDS = 5.0
+"""How often the driver's dispatcher sends the application ``ping`` while it waits for frames.
+
+Only the loop that reads the service's frames sends it: a WebSocket ping/pong
+can be answered by the socket library while the dispatcher is stuck, and the
+service would never expire an idle binding whose driver stopped applying
+frames. The service's expiry is about three times this interval.
+"""
 
 LINK_LOST_REASON = "link-lost"
 """Why a handle ends when its binding stream is lost: ``HandleError.reason`` on the driver side."""
@@ -561,10 +578,12 @@ def _revision(answer: object) -> EnvironmentRevision:
 
 __all__ = [
     "API",
+    "HEARTBEAT_INTERVAL_SECONDS",
     "INVALID_REQUEST",
     "LINK_LOST_REASON",
     "MESSAGE_OPS",
     "OPS",
+    "SUBPROTOCOL",
     "Answer",
     "Duplex",
     "Frame",

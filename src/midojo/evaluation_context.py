@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 import httpx
 from midojo_sdk.injection import Channel, InjectionOutcome
+from midojo_sdk.link import HEARTBEAT_INTERVAL_SECONDS
 
 from midojo.control_plane.client import ControlClient
 from midojo.control_plane.state import Snapshot
@@ -195,6 +196,8 @@ class EvaluationContext:
         # The outcomes the service reported on an acknowledged release, and the error a lost link ends with.
         self._remote_outcomes: tuple[InjectionOutcome, ...] = ()
         self._link_error: LinkLostError | None = None
+        # The loss the seal already raised: a loss is raised once, and the close reports only a later one.
+        self._reported_link_error: LinkLostError | None = None
         self._serve_task: asyncio.Task[None] | None = None
         self._last_reply: str | None = None
         # Whether the control plane has sealed the evaluation, its snapshot read back or not.
@@ -231,6 +234,19 @@ class EvaluationContext:
     @property
     def link_error(self) -> LinkLostError | None:
         """The error a lost remote link ends the episode with: a loss is final, and the episode keeps its records."""
+        return self._link_error
+
+    @property
+    def pending_link_error(self) -> LinkLostError | None:
+        """The lost link the caller hasn't been told about yet: what leaving the context raises.
+
+        :meth:`seal` raises a loss it finds, and marks it reported. A loss
+        that happens after the seal, the release's own ``unbind`` that is
+        never acknowledged included, is still pending: the caller that closes
+        the context raises it rather than reporting no outcomes.
+        """
+        if self._link_error is None or self._link_error is self._reported_link_error:
+            return None
         return self._link_error
 
     @property
@@ -369,6 +385,8 @@ class EvaluationContext:
             raise ValueError("A remote interception needs its upstream's URL: the service dials the upstream itself")
         episode = self.episode
         dispatcher = LinkDispatcher(remote_control_plane(self.control), session)
+        # The binding carries no pinger of its own: the dispatcher sends the heartbeat from the loop that reads
+        # the service's frames, so a stalled dispatcher lets the service expire the binding (design section 2.6).
         binding = await Binding.open(
             remote.url,
             remote.credential,
@@ -385,7 +403,7 @@ class EvaluationContext:
     async def _serve_remote(self, dispatcher: LinkDispatcher, binding: Binding) -> None:
         """Serve the binding's frames until the link ends: an end the service didn't acknowledge is a loss."""
         try:
-            await dispatcher.serve(binding)
+            await dispatcher.serve(binding, heartbeat_interval=HEARTBEAT_INTERVAL_SECONDS)
         finally:
             # ``unbound`` is the service's acknowledgement that the release ended the binding; without it the link
             # ended on its own, and the episode keeps that error to seal and raise.
@@ -522,6 +540,7 @@ class EvaluationContext:
         # and the caller still learns that the run's evidence is cut by a lost link.
         lost = self._link_error
         if lost is not None:
+            self._reported_link_error = lost
             raise lost
         return self._snapshot
 
@@ -579,6 +598,10 @@ class EvaluationContext:
             except BaseException as sealing:
                 failure = sealing
         raised = await self._release_to_the_end(failure)
+        if raised is None:
+            # Sealed cleanly, then lost before or during the release: the caller sees the loss rather than an
+            # empty ``injection_outcomes`` reading as "no injection".
+            raised = self.pending_link_error
         if raised is not None and raised is not exc:
             raise raised
 
@@ -699,7 +722,9 @@ class EvaluationContext:
         target made after closure is refused and kept as a late fact there:
         its ``unbound`` answer ends the binding and carries the binding's
         injection outcomes, which are the run's. A link that ends without that
-        answer is a loss: the episode keeps the error to seal and report by.
+        answer is a loss, and so is a service that keeps the socket open and
+        never answers: the release stores the error, and a context that
+        sealed cleanly raises it when it is left (:attr:`pending_link_error`).
         """
         binding, dispatcher, serve = self._binding_stream, self._dispatcher, self._serve_task
         self._binding_stream = self._dispatcher = self._serve_task = None
@@ -716,8 +741,15 @@ class EvaluationContext:
         finally:
             if binding.unbound.is_set():
                 self._remote_outcomes = tuple(InjectionOutcome.from_data(data) for data in binding.injection_outcomes)
-            elif self._link_error is None and dispatcher is not None:
-                self._link_error = dispatcher.error()
+            elif self._link_error is None:
+                # No acknowledgement: the outcomes the answer would have carried never arrived, and the link is
+                # lost even when its socket is still open (a hung service answers no unbind).
+                lost = dispatcher.error() if dispatcher is not None else None
+                if lost is None:
+                    from midojo.evaluation_handle import LinkLostError
+
+                    lost = LinkLostError("the service did not acknowledge the release")
+                self._link_error = lost
             if serve is not None:
                 serve.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):

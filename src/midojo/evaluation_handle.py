@@ -313,6 +313,8 @@ class _Resource:
         self.capabilities = runtime_capabilities(runtime)
         self.turns: list[Turn] = []
         self.closed = False
+        # A release that lost the link, raised by the close and readable afterwards.
+        self.release_error: LinkLostError | None = None
 
     # --- what the handle reads ---
 
@@ -351,7 +353,13 @@ class _Resource:
     # --- release ---
 
     def shutdown(self, failure: BaseException | None = None) -> None:
-        """Close the context once, sealing an unsealed evaluation as interrupted, then release everything."""
+        """Close the context once, sealing an unsealed evaluation as interrupted, then release everything.
+
+        A release that found no acknowledgement from the service lost the
+        binding's outcomes, and the closing caller learns it here:
+        ``LinkLostError`` is raised once the release is complete, unless the
+        caller's own ``failure`` is already on its way out.
+        """
         with self.lock:
             if self.closed:
                 return
@@ -364,11 +372,16 @@ class _Resource:
             # Only a run whose end succeeded has deleted its workspace, so only then does its reaper stop.
             ended = False
             if self.loop.thread.is_alive():
+                released: LinkLostError | None = None
                 try:
                     self.loop.call(self.context.__aexit__(type(marker), marker, marker.__traceback__))
                 except BaseException as raised:
                     if raised is not marker:
-                        logger.info("Couldn't release evaluation %s", self.evaluation_id, exc_info=True)
+                        if isinstance(raised, LinkLostError):
+                            # The release lost the link: the closing caller hears it below, not as a cleanup failure.
+                            released = raised
+                        else:
+                            logger.info("Couldn't release evaluation %s", self.evaluation_id, exc_info=True)
                 if self.ends_run:
                     try:
                         self.loop.call(_in_thread(self.runtime.end_run))
@@ -378,10 +391,15 @@ class _Resource:
                 else:
                     # The context ended the run it started, during the release above.
                     ended = not self.run_steps.end_run_failed
+            if failure is None:
+                # The loss the close is the first to report: a body that failed already reports its own failure.
+                self.release_error = released if released is not None else self.context.pending_link_error
             if ended:
                 self._stop_reaper()
             self.loop.stop()
             _release_slot(self.token)
+            if self.release_error is not None:
+                raise self.release_error
 
     def _stop_reaper(self) -> None:
         process = self.reaper
@@ -396,6 +414,9 @@ def _abandon(resource: _Resource) -> None:
     """Close a resource whose handle was garbage collected or whose process is exiting."""
     try:
         resource.shutdown()
+    except LinkLostError:
+        # An unacknowledged release is a report for a caller; an abandoned handle has none to give it to.
+        pass
     except BaseException:
         logger.info("Couldn't close an abandoned episode handle", exc_info=True)
 
@@ -559,6 +580,16 @@ class EvaluationHandle:
         """The run's result once sealed, and None before."""
         return self._resource.result
 
+    @property
+    def close_error(self) -> LinkLostError | None:
+        """The error :meth:`close` raised, once it has raised one, and None otherwise.
+
+        A host that catches the error from the close can still report it
+        afterwards. A remote release the service never acknowledged sets it
+        to the :class:`LinkLostError` the close raised.
+        """
+        return self._resource.release_error
+
     # --- the tool block ---
 
     def tool_block(self, label: str = "midojo") -> dict[str, Any]:
@@ -699,8 +730,10 @@ class EvaluationHandle:
     def close(self) -> None:
         """Seal an unsealed evaluation as interrupted, then release the context, thread and slot.
 
-        Closing twice is a no-op. A call from another process is refused and
-        changes nothing.
+        A release the service never acknowledged raises ``LinkLostError``
+        (``reason`` ``link-lost``) once everything is released: the handle's
+        ``injection_outcomes`` were lost, not empty. Closing twice is a no-op.
+        A call from another process is refused and changes nothing.
         """
         resource = self._resource
         if os.getpid() != resource.owner_pid:
