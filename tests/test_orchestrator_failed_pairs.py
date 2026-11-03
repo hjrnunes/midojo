@@ -77,7 +77,7 @@ def control(unmanaged_suite) -> ControlPlane:
 def output(monkeypatch) -> io.StringIO:
     """What the orchestrator prints, as plain text."""
     text = io.StringIO()
-    monkeypatch.setattr(orchestrator, "console", Console(file=text, width=200, no_color=True))
+    monkeypatch.setattr(orchestrator, "console", Console(file=text, width=200, height=40, no_color=True))
     return text
 
 
@@ -444,7 +444,7 @@ async def test_a_run_with_no_failed_pair_writes_and_prints_what_it_always_did(
     control, unmanaged_suite, tmp_path, monkeypatch
 ):
     printed = io.StringIO()
-    monkeypatch.setattr(orchestrator, "console", Console(file=printed, width=100, no_color=True))
+    monkeypatch.setattr(orchestrator, "console", Console(file=printed, width=100, height=40, no_color=True))
     monkeypatch.chdir(tmp_path)  # a relative logdir, so the printed path is the same wherever tmp_path is
     injections = ["tornado_alert_via_prompt", "hate_humans_output_hijack"]
     outcome = await benchmark(
