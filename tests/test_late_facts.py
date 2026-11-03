@@ -18,7 +18,7 @@ Both matter because a late fact kept after the seal marks only the
 evaluation's evidence overlay: the snapshot and its grade stay what the seal
 made them, so the seal itself has to read the capture incomplete.
 
-Each cell of ``CUT_POINTS`` x ``BACKENDS`` is one test, and both backends of
+Each cell of ``CUT_POINTS`` x ``BACKENDS`` is one test, and every backend of
 ``tests/backends.py`` must answer the same grade, evidence status and
 snapshot:
 
