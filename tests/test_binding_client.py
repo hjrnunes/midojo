@@ -10,12 +10,13 @@ What the groups show:
 
 - the URL: an http(s) or ws(s) service URL becomes the binding stream's
   ws(s) URL in one place, with the path kept.
-- the binding: the adapter answers ``bound``, serves frames, carries the
-  release's outcomes, and refuses a wrong credential or a refused bind without
-  publishing an endpoint.
-- the liveness: pings keep an idle binding, silence ends it as a loss, and an
-  answer past the service's deadline ends it as a loss with the capture
-  incomplete and no second forward.
+- the binding: the adapter answers ``bound``, sends the bind frame the wire
+  names, serves frames, carries the release's outcomes, and refuses a wrong
+  credential or a refused bind without publishing an endpoint.
+- the liveness: pings keep an idle binding, silence ends it as a loss, a
+  stalled dispatcher lets the service expire the binding and reports the loss
+  once it resumes, and an answer past the service's deadline ends it as a loss
+  with the capture incomplete and no second forward.
 - the transport: the client's ``max_size`` is explicit and a frame between
   1 MiB and 16 MiB passes in both directions.
 - parity: a binding made through the console script records the same facts as
@@ -30,7 +31,7 @@ import asyncio
 import contextlib
 import json
 import logging
-from typing import NoReturn
+from typing import Any
 
 import pytest
 from fastmcp import Client
@@ -46,9 +47,12 @@ from midojo_sdk.binding import (
     binding_url,
 )
 from midojo_sdk.injection import Channel, InjectionInstruction, InjectionPlan, InjectionTarget
+from midojo_sdk.link import decode_message
+from websockets.asyncio.client import ClientConnection
 
 from midojo.control_plane.inprocess_control import InProcessControlClient
 from midojo.delivery import delivery_facts, exposure
+from midojo.evaluation_handle import LinkLostError
 from midojo.interception_host import HostInterceptor
 from midojo.interception_service import (
     DEFAULT_ANSWER_DEADLINE_SECONDS,
@@ -143,6 +147,34 @@ async def test_the_adapter_binds_serves_and_releases_one_evaluation():
             with contextlib.suppress(asyncio.CancelledError):
                 serving_frames.cancel()
                 await serving_frames
+
+
+@pytest.mark.asyncio
+async def test_the_adapter_sends_a_bind_frame_naming_the_message_api(monkeypatch):
+    """The upgrade negotiates ``midojo-binding.v1``; the bind it carries names the API ``midojo-binding-v1``.
+
+    The two literals differ by one character and are separate contracts. This
+    reads the frame the adapter actually sends, so a shared test constant can't
+    stand in for either name.
+    """
+    sent: list[Any] = []
+    send = ClientConnection.send
+
+    async def record(connection: ClientConnection, message: Any, *args: Any, **kwargs: Any) -> None:
+        sent.append(message)
+        await send(connection, message, *args, **kwargs)
+
+    monkeypatch.setattr(ClientConnection, "send", record)
+    async with serving() as remote:
+        binding = await Binding.open(remote.url, CREDENTIAL, upstream_url=remote.upstream_url, plan=PLAN)
+        try:
+            assert binding.websocket.subprotocol == "midojo-binding.v1"
+            [raw] = sent
+            message = decode_message(raw.decode() if isinstance(raw, bytes) else raw)
+            assert message.op == "bind"
+            assert message["api"] == "midojo-binding-v1"
+        finally:
+            await binding.aclose()
 
 
 @pytest.mark.asyncio
@@ -292,25 +324,33 @@ async def test_the_dispatchers_heartbeat_keeps_an_idle_binding_alive():
 
 
 class Stalled:
-    """The duplex of a dispatcher that stopped: nothing it reads ever arrives and nothing it sends leaves."""
+    """The duplex of a dispatcher that stopped: what it reads and sends waits until the test resumes it."""
 
     def __init__(self, binding: Binding) -> None:
         self.binding = binding
+        self.resumed = asyncio.Event()
 
     async def send(self, data: str) -> None:
-        await asyncio.Event().wait()
+        await self.resumed.wait()
+        await self.binding.send(data)
 
-    async def receive(self) -> NoReturn:
-        await asyncio.Event().wait()
-        raise AssertionError("a stalled dispatcher never receives a frame")
+    async def receive(self) -> str:
+        await self.resumed.wait()
+        return await self.binding.receive()
 
     def close(self) -> None:
         self.binding.close()
 
 
 @pytest.mark.asyncio
-async def test_a_stalled_dispatcher_lets_the_binding_expire():
-    """The ping is the dispatcher's work, not a task of its own: a dispatcher stuck in its wait lets the service expire the binding."""
+async def test_a_stalled_dispatcher_lets_the_binding_expire_and_reports_the_loss_when_it_resumes():
+    """The ping is the dispatcher's work, not a task of its own: a stalled dispatcher lets the service expire the binding.
+
+    The service's half happens without the driver: close 1011, the endpoint
+    unpublished, the token refused. The driver's half waits for its only reader
+    to resume, which is where the design puts the report. No task beside the
+    dispatcher learns of the loss first.
+    """
     async with serving(heartbeat_expiry=0.4) as remote:
         opened, dispatcher = remote.open()
         binding = await Binding.open(remote.url, CREDENTIAL, upstream_url=remote.upstream_url)
@@ -323,7 +363,22 @@ async def test_a_stalled_dispatcher_lets_the_binding_expire():
             assert "no heartbeat within 0.4s" in (binding.close_reason or ""), binding.close_reason
             assert remote.service.published == ()
             assert (await refused_http(binding.bound.tool_url, binding.bound.tool_token)).status_code == 401
+            # The driver's reader is its reporter, and it is still stalled: nothing has reported the loss yet.
+            assert dispatcher.error() is None
+            assert dispatcher.interrupted_evidence() == ()
+
+            stalled.resumed.set()
+            await asyncio.wait_for(serving_frames, 5)
+            error = dispatcher.error()
+            assert isinstance(error, LinkLostError)
+            assert error.reason == "link-lost"
+            assert dispatcher.interrupted_evidence() == ("function_calls",)
+            snapshot = await remote.control.complete(
+                opened.run_id, opened.id, "done", dispatcher.interrupted_evidence()
+            )
+            assert snapshot.evidence_status["function_calls"] == "incomplete"
         finally:
+            stalled.resumed.set()
             await binding.aclose()
             with contextlib.suppress(asyncio.CancelledError):
                 serving_frames.cancel()

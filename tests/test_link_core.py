@@ -518,8 +518,10 @@ async def test_a_start_call_the_driver_applied_and_the_answer_lost_forwards_noth
         assert incomplete(grade)
         assert snapshot.evidence_status[FUNCTION_CALLS] == "incomplete"
         assert (grade.security, grade.grade_validity.security.status) == (None, "invalid")
+        # The start is the only frame the dispatcher applied: this is the applied case.
+        assert rig.session.dispatcher.applied == (0,)
         error = rig.session.dispatcher.error()
-        assert error is not None and error.reason == "link-lost"
+        assert isinstance(error, HandleError) and error.reason == "link-lost"
 
 
 @pytest.mark.asyncio
@@ -535,6 +537,10 @@ async def test_a_start_call_that_never_reached_the_driver_forwards_nothing_and_t
         assert evaluation.function_calls == ()
         # Nothing in the records shows the loss: the marker is the driver's, not an unfinished call's.
         assert rig.session.dispatcher.interrupted_evidence() == (FUNCTION_CALLS,)
+        # The driver applied nothing, and still reports the loss as the handle's own reason.
+        assert rig.session.dispatcher.applied == ()
+        error = rig.session.dispatcher.error()
+        assert isinstance(error, HandleError) and error.reason == "link-lost"
 
         snapshot = await rig.seal()
         grade = rig.grade()
