@@ -54,6 +54,8 @@ from collections.abc import Callable, Iterator, Sequence
 from types import TracebackType
 from typing import Any, Literal
 
+from midojo_sdk.link import LINK_LOST_REASON
+
 from midojo.control_plane.grading import Verdict
 from midojo.control_plane.grading import grade as grade_snapshot
 from midojo.control_plane.state import Snapshot, Turn
@@ -137,6 +139,17 @@ class LiveEpisodeLimitError(HandleError):
             f"{live} live episodes is the process's limit of {limit}; close a handle before opening another, or "
             f"raise {MAX_LIVE_ENV}"
         )
+
+
+class LinkLostError(HandleError):
+    """The binding stream of a remote interception was lost: the evaluation is sealed as interrupted.
+
+    A lost link is final: the calls it was recording can't be completed, so
+    the handle seals with ``function_calls`` incomplete and raises this from
+    the operation the loss cut short.
+    """
+
+    reason = LINK_LOST_REASON
 
 
 class _ClosedByCaller(Exception):  # noqa: N818 - it marks a close, and never reaches a caller as an error.
