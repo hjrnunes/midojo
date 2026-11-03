@@ -26,6 +26,10 @@ mcp = [
     # request_handlers and run), which a minor release may change, so a new
     # minor is a deliberate upgrade; tests/test_fastmcp_compat.py names the hooks.
     "fastmcp>=3.2.4,<3.3",
+    # binding.py, the driver's WebSocket adapter, imports websockets.asyncio
+    # directly: before this it arrived only as a fastmcp dependency, and the
+    # adapter must outlive that arrangement. The API it uses is in 16 and 17.
+    "websockets>=16,<18",
 ]
 langchain = [
     "langchain>=1.4",

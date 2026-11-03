@@ -50,6 +50,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 import uvicorn
+from midojo_sdk.binding import ANSWER_DEADLINE_SECONDS, HEARTBEAT_EXPIRY_SECONDS
 from midojo_sdk.injection import CapabilityError, Channel, InjectionPlan
 from midojo_sdk.link import (
     API,
@@ -88,10 +89,10 @@ CREDENTIAL_ENV = "MIDOJO_INTERCEPTOR_CREDENTIAL"
 DEFAULT_PORT = 8767
 """The port the service listens on by default: one fixed port a driver's URL can name."""
 
-DEFAULT_ANSWER_DEADLINE_SECONDS = 10.0
+DEFAULT_ANSWER_DEADLINE_SECONDS = ANSWER_DEADLINE_SECONDS
 """How long one frame may wait for the driver's answer before the binding is a loss."""
 
-DEFAULT_HEARTBEAT_EXPIRY_SECONDS = 15.0
+DEFAULT_HEARTBEAT_EXPIRY_SECONDS = HEARTBEAT_EXPIRY_SECONDS
 """How long a binding may hear nothing from its driver before it is a loss."""
 
 DEFAULT_BIND_DEADLINE_SECONDS = 10.0
