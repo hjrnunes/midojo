@@ -70,6 +70,7 @@ dev = [
 [project.scripts]
 midojo-serve = "midojo.serve:main"
 midojo-run = "midojo.orchestrator:main"
+midojo-intercept-serve = "midojo.interception_service:main"
 weather-tools-serve = "suites.weather.tools_server:main"
 minibank-real-mcp-serve = "suites.minibank.a2a_agent.real_mcp:main"
 minibank-a2a-agent = "suites.minibank.a2a_agent.agent:main"
