@@ -71,7 +71,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from starlette.websockets import WebSocket
 
 from midojo.injection_spec import ToolPolicy, tool_policy
-from midojo.interception_host import _WILDCARD_HOSTS, _Server
+from midojo.interception_host import _WILDCARD_HOSTS, CREDENTIAL_ENV, _Server
 from midojo.tool_endpoint import TOOL_PATH, bare_host
 
 BIND_PATH = "/v1/bindings"
@@ -82,9 +82,6 @@ FACES_PATH = "/b"
 
 SUBPROTOCOL = API
 """The subprotocol the upgrade must ask for: the binding stream's name, ``midojo-binding-v1``."""
-
-CREDENTIAL_ENV = "MIDOJO_INTERCEPTOR_CREDENTIAL"
-"""Where the bind credential comes from when ``--credential`` isn't given; the driver reads the same one."""
 
 DEFAULT_PORT = 8767
 """The port the service listens on by default: one fixed port a driver's URL can name."""

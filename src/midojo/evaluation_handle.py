@@ -53,16 +53,17 @@ import weakref
 from collections.abc import Callable, Iterator, Sequence
 from types import TracebackType
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from midojo_sdk.link import LINK_LOST_REASON
 
 from midojo.control_plane.grading import Verdict
 from midojo.control_plane.grading import grade as grade_snapshot
 from midojo.control_plane.state import Snapshot, Turn
-from midojo.evaluation_context import EvaluationContext, EvaluationResult, EvaluationStep
+from midojo.evaluation_context import EvaluationContext, EvaluationResult, EvaluationStep, remote_control_plane
 from midojo.injection_spec import InjectionSpec, InterceptionSettings, tool_policy
 from midojo.injection_spec_document import InjectionSpecDocumentError
-from midojo.interception_host import HostInterception
+from midojo.interception_host import CREDENTIAL_ENV, URL_ENV, HostInterception, RemoteInterception
 from midojo.runtimes import AgentRuntime, RuntimeCapabilities, is_disposable, runtime_capabilities
 from midojo.tool_endpoint import ToolEndpoint
 
@@ -334,7 +335,7 @@ class _Resource:
     # --- calls ---
 
     def usable(self) -> None:
-        """Refuse a call from another process, or on a closed handle, before it touches anything."""
+        """Refuse a call from another process, on a closed handle, or after a lost link, before it touches anything."""
         if os.getpid() != self.owner_pid:
             raise HandleOwnerError(
                 f"The evaluation handle {self.evaluation_id} belongs to process {self.owner_pid}; this is process "
@@ -342,6 +343,10 @@ class _Resource:
             )
         if self.closed:
             raise HandleClosedError(f"The evaluation handle {self.evaluation_id} is closed")
+        # A remote link that ended is final: the episode keeps its records, and every later call says so.
+        lost = self.context.link_error
+        if lost is not None:
+            raise lost
 
     # --- release ---
 
@@ -571,8 +576,8 @@ class EvaluationHandle:
                     f"The injection spec {self.evaluation_id} runs without host interception, so it has no tool endpoint; "
                     "open it with an upstream for a tool block"
                 )
-            interceptor = self._resource.context.interceptor
-            names = self._resource.loop.call(interceptor.tool_names()) if interceptor is not None else []
+            # The host interceptor's tools, or the ones a remote service answered the binding with.
+            names = self._resource.loop.call(self._resource.context.tool_names())
         return {
             "type": "mcp",
             "server_label": label,
@@ -738,6 +743,41 @@ def _resolve_upstream(episode: InjectionSpec, upstream: Any, interception: HostI
     )
 
 
+def _remote_from_environment() -> RemoteInterception | None:
+    """The service the environment names, if any: both names are required together, and neither keeps it here."""
+    url, credential = os.environ.get(URL_ENV), os.environ.get(CREDENTIAL_ENV)
+    if url is None and credential is None:
+        return None
+    if url is None or credential is None:
+        missing = URL_ENV if url is None else CREDENTIAL_ENV
+        raise ValueError(
+            f"A remote interception needs both {URL_ENV} and {CREDENTIAL_ENV}, and {missing} is missing: set both, "
+            "or neither to run the interceptor in this process"
+        )
+    return RemoteInterception(url, credential)
+
+
+def _remote_upstream_url(episode: InjectionSpec, upstream: Any) -> str:
+    """The URL a remote interceptor mirrors: the service dials it itself, so it must be one, never a server here."""
+    source: Any = upstream
+    if source is None and episode.interception is not None:
+        source = episode.interception.upstream
+    if source is None:
+        raise InjectionSpecDocumentError(
+            "upstream not supplied: a remote interception mirrors an MCP server's URL, from upstream= to open, or "
+            "from interception.upstream in the episode's document"
+        )
+    if type(source) is not str:
+        raise ValueError(
+            f"A remote interception needs its upstream's MCP URL, not a {type(source).__name__} in this process: "
+            "start the upstream yourself and pass its URL"
+        )
+    parts = urlsplit(source)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise ValueError(f"A remote interception's upstream must be an http(s) URL with a host, not {source!r}")
+    return source
+
+
 def _interception(episode: InjectionSpec, upstream: Any, given: HostInterception | None) -> HostInterception:
     """The host interception one evaluation runs: the given one, or the episode's settings, with its tool policy."""
     settings = given
@@ -768,7 +808,7 @@ def open(
     *,
     runtime: AgentRuntime | None = None,
     upstream: Any = None,
-    interception: HostInterception | None = None,
+    interception: HostInterception | RemoteInterception | None = None,
     control: Any = None,
     run_id: str | None = None,
     reset: bool = False,
@@ -783,11 +823,18 @@ def open(
     the MCP server the interceptor mirrors; without it, the episode's
     ``interception.upstream``, and without either the call raises
     :class:`~midojo.injection_spec_document.InjectionSpecDocumentError` before anything is
-    acquired. ``interception`` is a whole host-interception setting that wins
-    over the episode's, which is how a caller changes the port or the bind
-    host; the episode's tool policy still applies. ``control`` is a control
-    plane or client; without one, the episode runs in a control plane in this
-    process. ``max_live`` lowers this process's cap (never raises it), and
+    acquired. ``interception`` is a whole interception setting that wins over
+    the episode's, which is how a caller changes the port or the bind host; the
+    episode's tool policy still applies. A
+    :class:`~midojo.interception_host.RemoteInterception` runs the interceptor
+    in that service instead: the handle dials it, the service mirrors
+    ``upstream`` (then necessarily its URL), and the records still land in this
+    process's control plane. Without ``interception``, a service named in both
+    ``MIDOJO_INTERCEPTOR_URL`` and ``MIDOJO_INTERCEPTOR_CREDENTIAL`` is used
+    the same way; with neither name set the interceptor runs in this process,
+    as before. ``control`` is a control plane or client; without one, the
+    episode runs in a control plane in this process.
+    ``max_live`` lowers this process's cap (never raises it), and
     ``repeat_of`` is the key of the run this episode repeats, which a runtime
     that isolates neither by reset nor by a fresh target refuses.
 
@@ -798,15 +845,34 @@ def open(
     the episode would otherwise be compiled by the served control plane after
     a sandbox exists.
 
-    ``open`` refuses in this order: a missing upstream, a runtime the episode
-    cannot build or whose run ``run_id`` does not name, and a repeat the
-    runtime cannot isolate, before any sandbox, port or live-episode slot;
-    then the live-episode cap and the interceptor's bind, each before it takes
+    ``open`` refuses in this order: a missing upstream, an ``interception``
+    that is neither a host nor a remote interception, a remote interception
+    whose control client isn't in this process, a runtime the episode cannot
+    build or whose run ``run_id`` does not name, and a repeat the runtime
+    cannot isolate, before any sandbox, port or live-episode slot; then the
+    live-episode cap and the interceptor's dial or bind, each before it takes
     the resource it names.
     """
     if not isinstance(episode, InjectionSpec):
         raise TypeError(f"open expects an InjectionSpec, not {type(episode).__name__}")
-    upstream = _resolve_upstream(episode, upstream, interception)
+    if interception is not None and not isinstance(interception, HostInterception | RemoteInterception):
+        raise TypeError(
+            f"interception must be a HostInterception or a RemoteInterception, not {type(interception).__name__}"
+        )
+    remote = interception if isinstance(interception, RemoteInterception) else None
+    if interception is None:
+        # Neither name set keeps the interceptor in this process, as it always was.
+        remote = _remote_from_environment()
+    # A remote interception is no host interception: the context takes the host settings apart from the service,
+    # so no upstream object is ever resolved for one.
+    host_interception: HostInterception | None = None if isinstance(interception, RemoteInterception) else interception
+    upstream_url: str | None = None
+    if remote is not None:
+        upstream_url = _remote_upstream_url(episode, upstream)
+        # The binding's frames are recorded here, whatever serves them: refuse a control client elsewhere first.
+        remote_control_plane(control)
+    else:
+        upstream = _resolve_upstream(episode, upstream, host_interception)
     if runtime is None:
         # Before a context, a runtime or a port exists: an uninstalled provider is a named gap.
         episode.check_runtime_available()
@@ -835,7 +901,10 @@ def open(
         context = EvaluationContext(
             episode,
             runtime=runtime,
-            interception=_interception(episode, upstream, interception),
+            # A remote interception names a service; a host one is the episode's own settings and tool policy.
+            interception=None if remote is not None else _interception(episode, upstream, host_interception),
+            remote=remote,
+            upstream_url=upstream_url,
             control=control,
             run_id=run_id,
             reset=reset,

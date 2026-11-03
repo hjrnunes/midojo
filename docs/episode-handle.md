@@ -25,7 +25,7 @@ Entering the handle starts the runtime, opens the evaluation, starts the interce
 | --- | --- |
 | `runtime` | The agent's runtime. Without one, the injection spec's own runtime is built, so `open` first calls `spec.check_runtime_available()` and raises `MissingCapabilityError` for a provider that isn't installed. |
 | `upstream` | The MCP server the interceptor mirrors. Without it, the spec's `interception.upstream`; with neither, `open` raises `InjectionSpecDocumentError` before it acquires anything. |
-| `interception` | A whole `HostInterception`, which wins over the spec's settings. It's how you change the interceptor's port or bind host; the spec's tool policy still applies. |
+| `interception` | A whole `HostInterception` or `RemoteInterception`, which wins over the spec's settings. A `HostInterception` is how you change the interceptor's port or bind host; the spec's tool policy still applies. A `RemoteInterception` runs the interceptor in a service instead. See [Run the interceptor in a service](#run-the-interceptor-in-a-service). |
 | `control` | A control plane or client. Without one, the spec runs on a control plane in this process. |
 | `run_id` | The run to open the evaluation in, with a `ControlPlaneClient`, and only with the runtime that run already owns. See [When `run_id` applies](#when_run_id-applies). |
 | `reset` | Reset the target before the evaluation, on a runtime that declares it can. |
@@ -35,12 +35,14 @@ Entering the handle starts the runtime, opens the evaluation, starts the interce
 `open` checks its arguments in a fixed order, so the first refusal names what to fix. Steps 1 to 5 allocate nothing, so they run before any sandbox, port or live slot. The last two steps are the cap and the bind, and each refuses before it takes the slot or binds the port:
 
 1. The spec is an `InjectionSpec`; otherwise `TypeError`.
-2. The upstream: `upstream=` or the spec's `interception.upstream`; with neither, `InjectionSpecDocumentError`.
-3. The runtime: without `runtime=`, that the spec's own provider is installed, else `MissingCapabilityError`.
-4. `run_id`: with `run_id=`, that the runtime you pass has a run open under it, else `ValueError`. See [When `run_id` applies](#when_run_id-applies).
-5. The repeat: `repeat_of` on a runtime that can't isolate the target, else `RepeatWithoutResetError`.
-6. The cap: an open handle too many, else `LiveEpisodeLimitError`.
-7. The bind: the interceptor's port and host, else `HandleError`.
+2. `interception=`: a `HostInterception`, a `RemoteInterception` or nothing; anything else is a `TypeError`.
+3. The upstream: `upstream=` or the spec's `interception.upstream`; with neither, `InjectionSpecDocumentError`. A remote interception needs its URL, an `http(s)` string the service dials, else `ValueError`.
+4. A remote interception's control: a control plane in this process, else `ValueError`.
+5. The runtime: without `runtime=`, that the spec's own provider is installed, else `MissingCapabilityError`.
+6. `run_id`: with `run_id=`, that the runtime you pass has a run open under it, else `ValueError`. See [When `run_id` applies](#when_run_id-applies).
+7. The repeat: `repeat_of` on a runtime that can't isolate the target, else `RepeatWithoutResetError`.
+8. The cap: an open handle too many, else `LiveEpisodeLimitError`.
+9. The dial or the bind: a service's refusal of the binding (`BindingRefusedError`), or the interceptor's port and host (`HandleError`).
 
 ### When `run_id` applies
 
@@ -69,6 +71,14 @@ This replaces orch's `BlockingInterception`: the policy lives in the injection s
 
 The handle's interceptor is the only place that enforces a policy. `midojo.open_evaluation` starts no interceptor of its own, so it never applies `spec.tools`, and it refuses an injection spec whose policy blocks a tool unless the `interception` you pass blocks the same tools: a policy that silently did nothing would look like evidence of safety. Drive a spec that has a policy with this handle, or with an interception layer that enforces the policy itself.
 
+## Run the interceptor in a service
+
+`interception=RemoteInterception(url, credential)` runs each evaluation's interceptor in the interceptor service at `url` instead of in the driver's process. Without the option, a service named in both `MIDOJO_INTERCEPTOR_URL` and `MIDOJO_INTERCEPTOR_CREDENTIAL` is used the same way; set one without the other and `open` refuses it naming both, and set neither and the interceptor runs in this process, as before.
+
+The service holds the interceptor and the agent's tool endpoint; the driver holds the evaluation. Each evaluation opens one `midojo-binding-v1` stream, and the driver dials out to it: a driver with a live remote binding holds no listening socket at all. The interceptor's records, its environment reads and changes, and the injection outcomes all cross that stream, so they land in the driver's own control plane: the binding records through a `LinkRecorder` (never retry-wrapped, since a lost answer must not cause a second forward) and its environment through a `LinkWorld`. `upstream` must then be the MCP server's URL, because the service dials it: `open` refuses a server object in the driver's process. `tool_block()` lists the tools the service answered the binding with, and `result.injection_outcomes` are the ones its release reported.
+
+Start the service with `midojo-intercept-serve --credential ...` (or `InterceptorService(credential).start()`); it prints the driver's URL. A lost link is final: the evaluation keeps what the driver recorded, seals with `function_calls` incomplete, and the handle raises `LinkLostError` (`reason` `link-lost`) for every call after it. An acknowledged release after the seal is not a loss.
+
 ## Ownership, caps and failures
 
 Each handle runs one loop thread, named `midojo-episode-handle`. The context lives in the thread that opened the handle, so a handle used from another process (a `fork`ed child, say) raises `HandleOwnerError` and changes nothing: the message names the owning process and the current one. Calls that a handle made before returning are the only writes, which is why the check comes before any work.
@@ -86,7 +96,7 @@ The reaper belongs to the handle, which starts it. An asynchronous driver, one t
 `midojo.evaluation_handle` is the synchronous driver API, and this is what stays stable within a 0.x minor release:
 
 - The names in `HANDLE_METHODS`, and the properties and methods above.
-- The exception classes in the module, and their `reason` strings: `HandleError` (`handle-error`), `HandleOwnerError` (`handle-owner`), `HandleClosedError` (`handle-closed`), `SendTurnUnsupported` (`send-turn-unsupported`), `RepeatWithoutResetError` (`repeat-without-reset`) and `LiveEpisodeLimitError` (`live-episode-limit`).
+- The exception classes in the module, and their `reason` strings: `HandleError` (`handle-error`), `HandleOwnerError` (`handle-owner`), `HandleClosedError` (`handle-closed`), `SendTurnUnsupported` (`send-turn-unsupported`), `RepeatWithoutResetError` (`repeat-without-reset`), `LiveEpisodeLimitError` (`live-episode-limit`) and `LinkLostError` (`link-lost`).
 - `HANDLE_API_VERSION`, which is 1, and `DEFAULT_MAX_LIVE_EPISODES`.
 - New keyword arguments to `open` and `send_turn` are appended with defaults, so existing calls keep working.
 

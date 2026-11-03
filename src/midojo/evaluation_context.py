@@ -49,9 +49,13 @@ from midojo.tool_endpoint import ToolEndpoint
 from midojo.types import InterceptionMode
 
 if TYPE_CHECKING:
+    from midojo_sdk.binding import Binding
+
+    from midojo.control_plane.link_dispatch import LinkDispatcher
     from midojo.control_plane.models import CreateEvaluationResponse
     from midojo.control_plane.service import ControlPlane
-    from midojo.interception_host import HostInterception, HostInterceptor
+    from midojo.evaluation_handle import LinkLostError
+    from midojo.interception_host import HostInterception, HostInterceptor, RemoteInterception
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +69,9 @@ ResetOutcome = Literal["reset", "not_requested", "unsupported"]
 
 # What the seal of an episode cut short by a failure or a cancellation marks incomplete.
 INTERRUPTED_EVIDENCE = (FUNCTION_CALLS, "turns", "agent_output")
+
+# How long a remote binding's release waits for the service's ``unbound`` answer before the link counts as lost.
+_RELEASE_SECONDS = 10.0
 
 T = TypeVar("T")
 
@@ -101,8 +108,9 @@ class AgentBinding:
 class EvaluationResult:
     """What one run of an injection spec left: its sealed snapshot, and the host-side facts about the run.
 
-    ``injection_outcomes`` are the host interceptor's outcomes for the plan's
-    tool-output placements (empty in in-agent mode). ``reset`` says whether the
+    ``injection_outcomes`` are the interceptor's outcomes for the plan's
+    tool-output placements (empty in in-agent mode), reported by the host
+    interceptor or, in remote mode, by the service on release. ``reset`` says whether the
     target was reset before the injection spec (see :data:`ResetOutcome`).
     ``interrupted`` is True when a failure or a cancellation cut the run short
     before the control plane sealed it: it was sealed with what was collected,
@@ -142,6 +150,8 @@ class EvaluationContext:
         *,
         runtime: AgentRuntime | None = None,
         interception: HostInterception | None = None,
+        remote: RemoteInterception | None = None,
+        upstream_url: str | None = None,
         control: ControlPlane | ControlClient | None = None,
         run_id: str | None = None,
         reset: bool = False,
@@ -156,6 +166,11 @@ class EvaluationContext:
             episode.check_runtime_available()
         self.runtime: AgentRuntime = runtime if runtime is not None else episode.new_runtime()
         self.interception = interception
+        # A remote interception runs the interceptor elsewhere: its upstream is a URL the service dials. The
+        # caller names it apart from the host interception, so this module needs none of the host interceptor's
+        # imports for typing alone.
+        self._remote = remote
+        self._upstream_url = upstream_url
         self.run_id = run_id
         self._control_given = control
         self._reset_requested = reset
@@ -172,6 +187,15 @@ class EvaluationContext:
         self._session_token: str | None = None
         self._binding: AgentBinding | None = None
         self._interceptor: HostInterceptor | None = None
+        # The remote interception's binding stream: the service's duplex, the dispatcher serving its frames and the
+        # tools it answered ``bound`` with. The interceptor itself never runs in this process.
+        self._binding_stream: Binding | None = None
+        self._dispatcher: LinkDispatcher | None = None
+        self._remote_tools: tuple[str, ...] = ()
+        # The outcomes the service reported on an acknowledged release, and the error a lost link ends with.
+        self._remote_outcomes: tuple[InjectionOutcome, ...] = ()
+        self._link_error: LinkLostError | None = None
+        self._serve_task: asyncio.Task[None] | None = None
         self._last_reply: str | None = None
         # Whether the control plane has sealed the evaluation, its snapshot read back or not.
         self._control_sealed = False
@@ -205,6 +229,22 @@ class EvaluationContext:
         return self._interceptor
 
     @property
+    def link_error(self) -> LinkLostError | None:
+        """The error a lost remote link ends the episode with: a loss is final, and the episode keeps its records."""
+        return self._link_error
+
+    @property
+    def _host_mode(self) -> bool:
+        """Whether the agent gets only a tool endpoint: one the host interceptor serves, or the remote service does."""
+        return self.interception is not None or self._remote is not None
+
+    async def tool_names(self) -> tuple[str, ...]:
+        """The tools the binding's endpoint serves: the host interceptor's, or what the service answered ``bound``."""
+        if self._interceptor is not None:
+            return tuple(await self._interceptor.tool_names())
+        return self._remote_tools
+
+    @property
     def sealed(self) -> Snapshot:
         """The sealed snapshot: immutable evidence, named by ``evaluation_id`` and ``snapshot_id``."""
         if self._snapshot is None:
@@ -224,10 +264,10 @@ class EvaluationContext:
         return EvaluationResult(
             evaluation_id=self.evaluation_id,
             snapshot=self._snapshot,
-            interception="host" if self.interception is not None else "agent",
+            interception="host" if self._host_mode else "agent",
             reset=self.reset_outcome,
             interrupted=self.interrupted,
-            injection_outcomes=interceptor.injection_outcomes if interceptor is not None else (),
+            injection_outcomes=interceptor.injection_outcomes if interceptor is not None else self._remote_outcomes,
             snapshot_error=self._snapshot_error,
         )
 
@@ -282,7 +322,10 @@ class EvaluationContext:
                 self.reset_outcome = "unsupported"
         await self._open()
         assert self._session_token is not None
-        if self.interception is not None:
+        if self._remote is not None:
+            with self._progress("interceptor"):
+                await self._bind_remote()
+        elif self.interception is not None:
             with self._progress("interceptor"):
                 # The environment only for the suite's simulated tools: a mirror alone records and forwards.
                 tools = self.interception.tools
@@ -296,7 +339,7 @@ class EvaluationContext:
                 self._binding = AgentBinding(tool_endpoint=await self._interceptor.start())
         else:
             self._binding = AgentBinding(session_token=self._session_token)
-        binding = self._binding
+        binding = self.binding
 
         def set_up() -> None:
             runtime.setup(
@@ -314,6 +357,41 @@ class EvaluationContext:
             self._set_up = True
             await _in_thread(set_up)
 
+    async def _bind_remote(self) -> None:
+        """Dial the interceptor service and serve its binding: the interceptor runs there, its records stay here."""
+        from midojo_sdk.binding import Binding
+
+        from midojo.control_plane.link_dispatch import LinkDispatcher
+
+        remote, session = self._remote, self._session_token
+        assert remote is not None and session is not None
+        if self._upstream_url is None:
+            raise ValueError("A remote interception needs its upstream's URL: the service dials the upstream itself")
+        episode = self.episode
+        dispatcher = LinkDispatcher(remote_control_plane(self.control), session)
+        binding = await Binding.open(
+            remote.url,
+            remote.credential,
+            upstream_url=self._upstream_url,
+            plan=episode.plan.for_channels(Channel.TOOL_OUTPUT),
+            policy=None if episode.tools is None else episode.tools.to_data(),
+        )
+        self._binding_stream, self._dispatcher = binding, dispatcher
+        self._remote_tools = binding.bound.tools
+        self._binding = AgentBinding(tool_endpoint=ToolEndpoint(binding.bound.tool_url, binding.bound.tool_token))
+        # The binding's frames are served here, in this process, while the agent works against the service.
+        self._serve_task = asyncio.create_task(self._serve_remote(dispatcher, binding), name="midojo-remote-binding")
+
+    async def _serve_remote(self, dispatcher: LinkDispatcher, binding: Binding) -> None:
+        """Serve the binding's frames until the link ends: an end the service didn't acknowledge is a loss."""
+        try:
+            await dispatcher.serve(binding)
+        finally:
+            # ``unbound`` is the service's acknowledgement that the release ended the binding; without it the link
+            # ended on its own, and the episode keeps that error to seal and raise.
+            if not binding.unbound.is_set() and dispatcher.lost is not None:
+                self._link_error = dispatcher.error()
+
     async def _open(self) -> None:
         """Open the evaluation: the episode itself in process, or a suite's episode in a run."""
         from midojo.control_plane.inprocess_control import InProcessControlClient
@@ -322,14 +400,14 @@ class EvaluationContext:
         if self.run_id is None:
             if not isinstance(self.control, InProcessControlClient):
                 raise ValueError("Outside a run, an episode is opened in a control plane in this process")
-            mode: InterceptionMode = "host" if self.interception is not None else "agent"
+            mode: InterceptionMode = "host" if self._host_mode else "agent"
             opened = await self.control.open_evaluation(episode, interception=mode)
             self._evaluation_id, self._session_token, self.turns = opened.id, opened.session_token, opened.turns
             return
         if episode.user_task_id is None:
             raise ValueError("In a run, the control plane compiles the episode from its suite: it needs a user_task_id")
         # The run's control plane compiles the same suite pair, and its turns are the ones the host sends.
-        host: dict[str, InterceptionMode] = {"interception": "host"} if self.interception is not None else {}
+        host: dict[str, InterceptionMode] = {"interception": "host"} if self._host_mode else {}
         run_id, user_task_id, key = self.run_id, episode.user_task_id, uuid.uuid4().hex
 
         async def create() -> CreateEvaluationResponse:
@@ -436,9 +514,15 @@ class EvaluationContext:
                         await self._observe()
                 finally:
                     await self._teardown()
-                await self._complete(output)
+                # A link that ended before the seal left the calls it carried unconfirmed: the seal says so.
+                await self._complete(output, self._seal_incomplete())
         await self._read_snapshot()
         assert self._snapshot is not None
+        # A remote link that ended before the seal is final: the episode is sealed (its function calls incomplete)
+        # and the caller still learns that the run's evidence is cut by a lost link.
+        lost = self._link_error
+        if lost is not None:
+            raise lost
         return self._snapshot
 
     async def _close(self) -> None:
@@ -599,8 +683,68 @@ class EvaluationContext:
         await attempt("tear down the runtime", self._teardown)
         if self._interceptor is not None:
             await attempt("stop the interceptor", self._interceptor.stop)
+        if self._binding_stream is not None:
+            await attempt("release the remote binding", self._release_remote)
         await attempt("end the runtime's run", self._end_run)
         return errors
+
+    def _seal_incomplete(self) -> tuple[str, ...]:
+        """The evidence a lost remote link leaves incomplete at the seal, if the link was lost before it."""
+        return self._dispatcher.interrupted_evidence() if self._dispatcher is not None else ()
+
+    async def _release_remote(self) -> None:
+        """Release the remote binding: an acknowledged ``unbind`` reports the outcomes, an end without it is a loss.
+
+        The service releases the binding after the seal, so a call the
+        target made after closure is refused and kept as a late fact there:
+        its ``unbound`` answer ends the binding and carries the binding's
+        injection outcomes, which are the run's. A link that ends without that
+        answer is a loss: the episode keeps the error to seal and report by.
+        """
+        binding, dispatcher, serve = self._binding_stream, self._dispatcher, self._serve_task
+        self._binding_stream = self._dispatcher = self._serve_task = None
+        if binding is None:
+            return
+        try:
+            if dispatcher is not None and dispatcher.lost is None:
+                try:
+                    await binding.unbind()
+                    await asyncio.wait_for(binding.wait_unbound(), _RELEASE_SECONDS)
+                except Exception:
+                    # An end instead of the acknowledgement: the loss kept below is the fact, not a cleanup error.
+                    pass
+        finally:
+            if binding.unbound.is_set():
+                self._remote_outcomes = tuple(InjectionOutcome.from_data(data) for data in binding.injection_outcomes)
+            elif self._link_error is None and dispatcher is not None:
+                self._link_error = dispatcher.error()
+            if serve is not None:
+                serve.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await serve
+            await binding.aclose()
+
+
+def remote_control_plane(control: ControlPlane | ControlClient | None) -> ControlPlane:
+    """The control plane a remote interception's records go through: the one in this process.
+
+    The interceptor runs in a service, but its records do not: the binding's
+    frames are applied by a control plane in this process, so a remote
+    interception refuses an HTTP client before anything is dialed.
+    """
+    from midojo.control_plane.inprocess_control import InProcessControlClient
+    from midojo.control_plane.service import ControlPlane
+
+    if control is None:
+        return ControlPlane({})
+    if isinstance(control, ControlPlane):
+        return control
+    if isinstance(control, InProcessControlClient):
+        return control.plane
+    raise ValueError(
+        f"A remote interception records through a control plane in this process, not {type(control).__name__}: "
+        "leave control= out to build one here, or pass a ControlPlane"
+    )
 
 
 def _refused(error: BaseException) -> bool:

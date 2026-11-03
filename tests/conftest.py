@@ -24,6 +24,13 @@ def no_control_token(monkeypatch):
     monkeypatch.delenv("MIDOJO_CONTROL_TOKEN", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def no_remote_interceptor(monkeypatch):
+    """Tests run the host interceptor in process unless they name the remote interceptor's service themselves."""
+    monkeypatch.delenv("MIDOJO_INTERCEPTOR_URL", raising=False)
+    monkeypatch.delenv("MIDOJO_INTERCEPTOR_CREDENTIAL", raising=False)
+
+
 @pytest.fixture(scope="session", autouse=True)
 def every_snapshot_is_named_by_the_sdk_digest():
     """One implementation names a snapshot: every snapshot the suite builds is checked (architecture 2.1.1)."""

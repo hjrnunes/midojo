@@ -58,6 +58,12 @@ _WILDCARD_HOSTS = {"0.0.0.0", "::", ""}
 # How long stopping waits for the target's open connections before closing them.
 _SHUTDOWN_SECONDS = 2
 
+URL_ENV = "MIDOJO_INTERCEPTOR_URL"
+"""Where a handle finds the interceptor service when it is opened without ``interception=``: its base URL."""
+
+CREDENTIAL_ENV = "MIDOJO_INTERCEPTOR_CREDENTIAL"
+"""The service's bind credential: it comes with :data:`URL_ENV`, and neither name alone selects a service."""
+
 HostTools = Callable[[MidojoMCP], None]
 """Registers a suite's simulated tools, blocks and denials on one evaluation's interceptor (its ``MidojoMCP``)."""
 
@@ -306,3 +312,31 @@ class HostInterception:
             allowed=self.allowed,
             blocked=self.blocked,
         )
+
+
+@dataclass(frozen=True)
+class RemoteInterception:
+    """Run each evaluation's interceptor in the interceptor service at ``url``, not in the driver's process.
+
+    The driver dials the service instead of listening: one ``midojo-binding-v1``
+    stream per evaluation carries the interceptor's recording and environment
+    calls back to the driver's own control plane, and the service gives the
+    agent only a tool endpoint of its own (see
+    :mod:`midojo.interception_service`). ``credential`` is the service's bind
+    credential: the service refuses a binding without it, and the agent never
+    sees it.
+
+    The upstream still comes from ``open(upstream=...)`` (or the injection
+    spec's ``interception.upstream``), as a URL the service dials itself. An
+    injection spec without this option runs the interceptor in the driver's
+    process, as before.
+    """
+
+    url: str
+    credential: str = field(repr=False)
+
+    def __post_init__(self) -> None:
+        for name in ("url", "credential"):
+            value = getattr(self, name)
+            if type(value) is not str or not value:
+                raise ValueError(f"a remote interception's {name} must be a non-empty str, not {value!r}")

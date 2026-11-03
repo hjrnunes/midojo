@@ -63,6 +63,11 @@ class InProcessControlClient:
     def __init__(self, control: ControlPlane) -> None:
         self._control = control
 
+    @property
+    def plane(self) -> ControlPlane:
+        """The control plane this client writes through: a driver serving a binding stream applies frames to it."""
+        return self._control
+
     async def __aenter__(self) -> InProcessControlClient:
         return self
 
