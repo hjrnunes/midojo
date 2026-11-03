@@ -323,6 +323,33 @@ def test_the_interception_and_tool_settings_round_trip() -> None:
     assert InjectionSpec.from_document(spec.to_document()) == spec
 
 
+def test_a_tool_policy_carries_the_document_form_a_binding_sends() -> None:
+    spec = InjectionSpec.from_document(_settings_document())
+
+    assert spec.tools is not None
+    data = spec.tools.to_data()
+    # One form for both directions: a binding's ``policy`` is the spec document's ``tools`` value.
+    assert data == spec.to_document()["tools"]
+    assert ToolPolicy.from_data(json.loads(json.dumps(data))) == spec.tools
+    # What a binding may leave out decodes to the policy a spec without it gets.
+    assert ToolPolicy.from_data({"allowed": ["lookup_order"]}) == ToolPolicy(("lookup_order",))
+
+
+def test_a_policy_is_decoded_only_from_the_document_form() -> None:
+    refused: list[Any] = [
+        [],
+        {"allowed": "lookup_order"},
+        {"write_disposition": {"default": "forward"}},
+        {"allowed": [], "unknown": 1},
+        {"allowed": [], "write_disposition": {"default": "forward", "extra": 1}},
+        {"allowed": [], "write_disposition": {"tools": "get_weather"}},
+        {"allowed": [], "write_disposition": {"default": "sideways", "tools": {}}},
+    ]
+    for data in refused:
+        with pytest.raises(ValueError):
+            ToolPolicy.from_data(data)
+
+
 def test_the_settings_are_frozen_data() -> None:
     spec = InjectionSpec.from_document(_settings_document())
 

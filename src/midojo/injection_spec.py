@@ -237,6 +237,45 @@ class ToolPolicy:
         }
         object.__setattr__(self, "write_disposition", MappingProxyType(overrides))
 
+    def to_data(self) -> dict[str, Any]:
+        """The policy in the injection spec's document form, the way a binding's ``policy`` message carries it."""
+        return {
+            "allowed": list(self.allowed),
+            "write_disposition": {
+                "default": self.write_disposition_default,
+                "tools": dict(self.write_disposition),
+            },
+        }
+
+    @classmethod
+    def from_data(cls, data: Mapping[str, Any]) -> ToolPolicy:
+        """Decode :meth:`to_data`'s form, the injection spec document's ``tools`` value."""
+        if not isinstance(data, Mapping):
+            raise ValueError(f"a tool policy is an object, not {type(data).__name__}")
+        unknown = set(data) - {"allowed", "write_disposition"}
+        if unknown:
+            raise ValueError(f"a tool policy has unknown fields: {sorted(unknown)}")
+        allowed = data.get("allowed")
+        if not isinstance(allowed, list):
+            raise ValueError("a tool policy names the tools it allows, as a list")
+        disposition = data.get("write_disposition", {})
+        if not isinstance(disposition, Mapping):
+            raise ValueError("a tool policy's write_disposition is an object")
+        unknown = set(disposition) - {"default", "tools"}
+        if unknown:
+            raise ValueError(f"a tool policy's write_disposition has unknown fields: {sorted(unknown)}")
+        overrides = disposition.get("tools", {})
+        if not isinstance(overrides, Mapping):
+            raise ValueError("a tool policy's write_disposition.tools is an object")
+        try:
+            return cls(
+                tuple(allowed),
+                write_disposition_default=disposition.get("default", "forward"),
+                write_disposition=dict(overrides),
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"invalid tool policy data: {exc}") from None
+
 
 def tool_policy(tools: ToolPolicy | None) -> tuple[frozenset[str] | None, tuple[str, ...]]:
     """The interceptor's view of a policy: the tools to mirror, and the tools to block.
