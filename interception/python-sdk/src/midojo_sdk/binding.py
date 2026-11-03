@@ -23,12 +23,21 @@ binding's wire contract:
 The adapter sets the client's ``max_size`` explicitly: the library's default
 is 1 MiB, below the largest frame the service may send. The sender is one
 lock, so the dispatcher's answers and the heartbeat's pings never interleave.
+
+Logging. ``websockets`` logs every handshake header at DEBUG, the bind
+credential's ``authorization`` header included, and a host that logs at DEBUG
+to a file (Garak does) would keep it. The adapter hands the connection its own
+logger, :data:`WEBSOCKETS_LOGGER`, which redacts an authorization header's
+value before the record leaves it, so the credential appears in no log and the
+rest of the protocol's DEBUG output stays available.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -51,6 +60,32 @@ HEARTBEAT_EXPIRY_SECONDS = 15.0
 ANSWER_DEADLINE_SECONDS = 10.0
 
 _SCHEMES = {"http": "ws", "https": "wss", "ws": "ws", "wss": "wss"}
+
+_AUTHORIZATION = re.compile(r"(?i)(authorization:\s*bearer\s+)\S+")
+REDACTED = "<redacted>"
+
+
+class RedactedAuthorization(logging.Filter):
+    """Replace a handshake's bearer credential with ``<redacted>`` in a log record.
+
+    ``websockets`` writes each header of the handshake request at DEBUG, as
+    ``> authorization: Bearer <credential>``. The filter formats the record,
+    redacts that one header's value and keeps every other record untouched.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        redacted = _AUTHORIZATION.sub(rf"\g<1>{REDACTED}", message)
+        if redacted != message:
+            record.msg = redacted
+            record.args = ()
+        return True
+
+
+WEBSOCKETS_LOGGER = logging.getLogger("midojo_sdk.binding.websockets")
+"""The logger the binding's WebSocket connection writes to; it redacts the bind credential."""
+
+WEBSOCKETS_LOGGER.addFilter(RedactedAuthorization())
 
 
 def binding_url(service_url: str) -> str:
@@ -150,6 +185,7 @@ class Binding(Duplex):
                 max_size=MAX_FRAME_BYTES,
                 proxy=None,
                 open_timeout=timeout,
+                logger=WEBSOCKETS_LOGGER,
             )
         except InvalidStatus as refused:
             raise BindingRefusedError(

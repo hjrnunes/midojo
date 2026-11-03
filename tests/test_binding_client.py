@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 
 import pytest
 from fastmcp import Client
@@ -38,6 +39,7 @@ from midojo_sdk.binding import (
     HEARTBEAT_EXPIRY_SECONDS,
     HEARTBEAT_INTERVAL_SECONDS,
     MAX_FRAME_BYTES,
+    WEBSOCKETS_LOGGER,
     Binding,
     BindingRefusedError,
     binding_url,
@@ -156,6 +158,33 @@ async def test_the_adapter_refuses_a_wrong_credential_and_a_refused_bind():
             await Binding.open(remote.url, CREDENTIAL, upstream_url="http://127.0.0.1:9/mcp")
         assert refused.value.kind == "upstream_unavailable"
         assert remote.service.published == ()
+
+
+@pytest.mark.asyncio
+async def test_the_adapter_keeps_the_bind_credential_out_of_the_websockets_debug_log():
+    """websockets logs every handshake header at DEBUG; the adapter redacts the bearer credential in them."""
+    lines: list[str] = []
+
+    class Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            lines.append(record.getMessage())
+
+    handler = Collect()
+    level = WEBSOCKETS_LOGGER.level
+    WEBSOCKETS_LOGGER.setLevel(logging.DEBUG)
+    WEBSOCKETS_LOGGER.addHandler(handler)
+    try:
+        async with serving() as remote:
+            binding = await Binding.open(remote.url, CREDENTIAL, upstream_url=remote.upstream_url)
+            await binding.aclose()
+    finally:
+        WEBSOCKETS_LOGGER.removeHandler(handler)
+        WEBSOCKETS_LOGGER.setLevel(level)
+
+    headers = [line for line in lines if "authorization" in line.lower()]
+    assert headers, "the handshake headers are logged, so the redaction has something to hide"
+    assert [line for line in lines if CREDENTIAL in line] == []
+    assert all("<redacted>" in line for line in headers)
 
 
 @pytest.mark.asyncio
