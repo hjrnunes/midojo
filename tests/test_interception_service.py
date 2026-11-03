@@ -11,7 +11,8 @@ What the groups show:
   credential in the query string is never one; a refused upgrade is HTTP 403
   before the socket is accepted.
 - the binding: ``bind`` is validated and answered ``rejected {kind, detail}``
-  when it isn't one; the endpoint exists only once ``bound`` named it; a call
+  when it isn't one; the endpoint exists only once ``bound`` named it, and a
+  request held for it is refused with 401 when the binding ends first; a call
   records ``start_call`` before the upstream runs and ``finish_call_detailed``
   after.
 - two bindings: each has its own tool token, its own records and its own
@@ -337,6 +338,70 @@ async def test_a_request_that_dials_the_endpoint_before_bound_waits_for_it(monke
             if not held.done():
                 held.cancel()
             await driver.aclose()
+
+
+@pytest.mark.parametrize(
+    "wait_until_closed",
+    [True, False],
+    ids=["service-observes-close-before-send", "client-aborts-before-send"],
+)
+@pytest.mark.asyncio
+async def test_a_held_request_gets_401_if_the_binding_ends_before_bound(monkeypatch, wait_until_closed):
+    """A request held before ``bound`` is refused 401 when its binding ends before the answer lands.
+
+    The answer and the loss race: the sender's queue takes ``bound`` for a peer that has already
+    aborted, so a held request can wake with the binding answered and gone. What the endpoint
+    answers then is the contract's 401 for an ended binding, never a 500 from an app whose
+    lifespan the loss already left.
+    """
+    reached = asyncio.Event()
+    gate = asyncio.Event()
+    captured: dict[str, Any] = {}
+    send = _BindingStream.send
+
+    async def paused(stream: _BindingStream, data: str) -> None:
+        try:
+            message = decode_message(data)
+        except LinkFault:
+            message = None  # a frame of the link, not a control message
+        if message is not None and message.op == "bound" and "stream" not in captured:
+            captured["bound"] = message
+            captured["stream"] = stream
+            reached.set()
+            await gate.wait()
+        await send(stream, data)
+
+    monkeypatch.setattr(_BindingStream, "send", paused)
+    async with serving() as remote:
+        websocket = await upgrade(remote.url, CREDENTIAL, subprotocols=("midojo-binding.v1",))
+        held: asyncio.Task[httpx.Response] | None = None
+        try:
+            await request(websocket, upstream_url=remote.upstream_url)
+            await asyncio.wait_for(reached.wait(), 5)
+            message = captured["bound"]
+            held = asyncio.create_task(refused_http(str(message["tool_url"]), str(message["tool_token"])))
+            await asyncio.sleep(0.1)
+            assert not held.done(), "the request waited for bound"
+            assert remote.events == []
+
+            # The driver goes while the answer is still queued. Whether the service has read the
+            # disconnect when the queue takes the frame is the race this test pins.
+            websocket.transport.abort()
+            if wait_until_closed:
+                await asyncio.wait_for(captured["stream"].closed.wait(), 5)
+            gate.set()
+
+            response = await asyncio.wait_for(held, 5)
+            assert response.status_code == 401, (response.status_code, remote.events, remote.service.published)
+            assert response.headers["www-authenticate"] == "Bearer"
+            assert remote.events == [], "an ended binding never reaches the upstream"
+            assert remote.service.published == ()
+        finally:
+            gate.set()
+            if held is not None and not held.done():
+                held.cancel()
+                await asyncio.gather(held, return_exceptions=True)
+            websocket.transport.abort()
 
 
 @pytest.mark.asyncio

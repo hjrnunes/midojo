@@ -226,7 +226,9 @@ class _Faces:
             await _refuse(send, 401, b"This binding's bearer token is required")
             return
         await _named(face)
-        if not face.bound.is_set():
+        # A binding that ended takes precedence over the answer it sent: the answer can go out to a
+        # driver that already went, and its app is on its way out with it. An ended binding is a 401.
+        if face.gone.is_set() or not face.bound.is_set():
             await _refuse(send, 401, b"This binding's bearer token is required")
             return
         child_scope = dict(scope, path="/" + rest, root_path=root + "/" + binding_id)
