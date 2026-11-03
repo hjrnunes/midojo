@@ -1,15 +1,15 @@
 """Delivery facts checked against records MiDojo doesn't keep: the upstream's log and the client's.
 
 Each test runs one MCP session through a ``MidojoMCP`` mirror of
-``tests.logging_mcp.LoggingMCP``, recording on an in-process control plane.
-Two records are independent of the interceptor: the upstream's log of what it
-served (``LoggingMCP.served``) and the raw JSON-RPC responses the client
-received over the wire. The expectations are literal values written by hand
-from those two records, never from MiDojo's own output: a payload is emitted
-in a part of the result exactly when the client's copy of that part carries
-the transformed payload where the instruction placed it and the served copy
-doesn't, and a call no instruction placed anything in reaches the client
-exactly as it was served.
+``tests.logging_mcp.LoggingMCP``, recording on an in-process control plane,
+called directly or over a link. Two records are independent of the
+interceptor: the upstream's log of what it served (``LoggingMCP.served``) and
+the raw JSON-RPC responses the client received over the wire. The expectations
+are literal values written by hand from those two records, never from MiDojo's
+own output: a payload is emitted in a part of the result exactly when the
+client's copy of that part carries the transformed payload where the
+instruction placed it and the served copy doesn't, and a call no instruction
+placed anything in reaches the client exactly as it was served.
 
 A placement also names what it placed and where: the digest of the payload,
 the digest of the text it wrote, and its slot (the target in the plan
@@ -45,6 +45,7 @@ from midojo.control_plane.inprocess import InProcessAgentClient
 from midojo.control_plane.service import ControlPlane
 from midojo.delivery import Exposure, delivery_facts, exposure
 from midojo.types import FunctionCallRecord
+from tests.link_transport import LinkAgent
 from tests.logging_mcp import LoggingMCP, Served
 from tests.scripted_mcp import wire_session
 from tests.slot_literals import NOT_PLACED, codec_target, digest, placed
@@ -112,22 +113,34 @@ def control(suite) -> ControlPlane:
     return ControlPlane({"weather": suite}, config=AppConfig(closure_wait_seconds=0))
 
 
-async def session(control: ControlPlane, plan: InjectionPlan, requests: list[dict[str, Any]]) -> Session:
-    """Run ``requests`` through a mirror given ``plan``'s tool-output part, and against the upstream directly."""
+async def session(
+    control: ControlPlane, plan: InjectionPlan, requests: list[dict[str, Any]], *, transport: str = "direct"
+) -> Session:
+    """Run ``requests`` through a mirror given ``plan``'s tool-output part, and against the upstream directly.
+
+    ``transport`` decides how the mirror records: called in process, or over
+    a link whose driver applies the frames to the same control plane.
+    """
+
     upstream = LoggingMCP()
     run = control.create_run("weather")
     evaluation = control.create_evaluation(run.id, "weather_new_york")
+    link = LinkAgent(control, evaluation.session_token) if transport == "link" else None
     mcp = MidojoMCP(
         "proxy",
-        recorder=InProcessAgentClient(control, evaluation.session_token),
+        recorder=link or InProcessAgentClient(control, evaluation.session_token),
         upstream_transport=upstream.transport,
         plan=plan.for_channels(Channel.TOOL_OUTPUT),
         evaluation_id=evaluation.id,
     )
     await mcp.mirror_upstream()
-    raw = await wire_session(mcp._fastmcp._mcp_server, requests)
-    direct_raw = await wire_session(LoggingMCP().server, requests)
-    snapshot = await control.complete(run.id, evaluation.id, "done")
+    try:
+        raw = await wire_session(mcp._fastmcp._mcp_server, requests)
+        direct_raw = await wire_session(LoggingMCP().server, requests)
+        snapshot = await control.complete(run.id, evaluation.id, "done")
+    finally:
+        if link is not None:
+            await link.aclose()
     return Session(
         served=upstream.served,
         received=[json.loads(response)["result"] for response in raw],
@@ -233,6 +246,40 @@ async def test_a_mirrored_placement_is_emitted_in_both_parts_the_client_got(cont
     assert fact.emitted == ["structured_content", "content_block"]
     assert (fact.payload_digest, fact.placed_digest) == (digest(PAYLOAD), digest(PAYLOAD))
     assert fact.slot is not None and fact.slot.model_dump() == placed(PAYLOAD, PAYLOAD, NOTE_2)["slot"]
+    seen = s.exposure()
+    assert (seen.emitted, seen.agent_tool_result, seen.model_input) == ("exposed", "unknown", "unknown")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["direct", "link"])
+async def test_a_mirrored_placement_is_emitted_over_a_link_as_it_is_in_process(control, transport):
+    """A link's detailed record is corroborated by the client's own wire copy, as the in-process one is."""
+
+    s = await session(
+        control,
+        InjectionPlan((structured("list_notes", ("notes", RecordSelector("NOTE-2"), "body")),)),
+        [call("list_notes")],
+        transport=transport,
+    )
+
+    expected = {"notes": [{"id": "NOTE-1", "body": "first"}, {"id": "NOTE-2", "body": "second" + PAYLOAD}]}
+    assert s.received[0]["structuredContent"] == expected
+    assert s.received[0]["content"] == [{"type": "text", "text": json.dumps(expected, indent=2)}]
+    assert_recorded_as_received(s)
+
+    [outcome] = s.outcomes(0)
+    assert (outcome["status"], outcome["emitted"]) == ("applied", ["structured_content", "content_block"])
+    assert outcome["slot"]["id"] == digest(
+        '{"content_block_index":null,"content_block_type":null,'
+        '"structured_content_path":["notes",{"equals":"NOTE-2","field":"id"},"body"],'
+        '"surface":"structured_content","template_key":null,"template_path":[],"tool":"list_notes"}'
+    )
+    [fact] = delivery_facts(s.plan, s.records)
+    assert (fact.emitted, fact.payload_digest, fact.placed_digest) == (
+        ["structured_content", "content_block"],
+        digest(PAYLOAD),
+        digest(PAYLOAD),
+    )
     seen = s.exposure()
     assert (seen.emitted, seen.agent_tool_result, seen.model_input) == ("exposed", "unknown", "unknown")
 

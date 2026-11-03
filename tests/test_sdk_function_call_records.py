@@ -617,6 +617,9 @@ async def test_a_finish_with_an_outcome_at_occurrence_0_other_than_an_empty_unma
         )
     if backend.in_process:
         assert isinstance(refused.value.__cause__, ValidationError)
+    elif backend.local:
+        # The link's driver validates the body in process, as the in-process client does: no HTTP edge answers 422.
+        assert isinstance(refused.value, InvalidRequestError)
     else:
         assert isinstance(refused.value, InvalidHTTPRequestError)
         assert refused.value.response.status_code == 422

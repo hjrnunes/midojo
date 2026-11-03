@@ -45,9 +45,13 @@ import pytest
 from midojo_sdk.snapshot import verified
 
 from midojo.control_plane.client import snapshot_from_response
+from midojo.control_plane.config import AppConfig
+from midojo.control_plane.inprocess_control import InProcessControlClient
 from midojo.control_plane.models import SnapshotResponse
+from midojo.control_plane.service import ControlPlane
 from midojo.control_plane.state import snapshot_digest
 from midojo.episode import Episode
+from tests.link_transport import LinkAgent
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "inconclusive_vectors"
 MANIFEST = json.loads((FIXTURES / "MANIFEST.json").read_text(encoding="utf-8"))
@@ -310,6 +314,72 @@ def test_the_recipe_reproduces_every_case_it_committed(tmp_path):
     for case in CASES:
         generated = json.loads((tmp_path / case / "snapshot.json").read_text(encoding="utf-8"))
         verified(generated)
+
+
+# The cases the recipe seals with the control plane's own writes, not through the episode handle.
+CONTROL_PLANE_CASES = ("capture-incomplete", "unknown-delivery")
+
+
+async def _over_the_link(built: Episode, case: dict[str, Any]) -> Any:
+    """``run_in_control_plane``'s writes, with the layer's calls sent over a link instead of called in process.
+
+    The turns and the seal stay on the control plane side, as they do in an agent-mode
+    evaluation: only the layer's calls cross the binding.
+    """
+
+    control = ControlPlane({}, config=AppConfig(closure_wait_seconds=0))
+    client = InProcessControlClient(control)
+    opened = await client.open_episode(built, interception="host")
+    agent = LinkAgent(control, opened.session_token)
+    turns = opened.turns
+    if turns is None or built.environment_type is None:
+        raise ValueError("the seed episode names no turns or no environment type to run")
+    replies: list[str] = []
+    try:
+        for index, turn in enumerate(case["turns"]):
+            await client.start_turn(None, opened.id, turns[index])
+            unfinished = turn.get("unfinished")
+            if unfinished is not None:
+                name, arguments = unfinished
+                await agent.start_call(call_id=f"call-{index}", function=name, args=arguments, disposition="forwarded")
+            finished = turn.get("finished")
+            if finished is not None:
+                name, arguments = finished
+                await agent.start_call(call_id=f"call-{index}", function=name, args=arguments, disposition="forwarded")
+                await agent.finish_call(
+                    call_id=f"call-{index}",
+                    function=name,
+                    args=arguments,
+                    result=json.dumps({"order_id": arguments["order_id"], "status": "open"}),
+                    disposition="forwarded",
+                )
+            await client.record_turn_reply(None, opened.id, index, turn["reply"])
+            replies.append(turn["reply"])
+        await client.complete_evaluation(None, opened.id, replies[-1])
+        return await client.snapshot(None, opened.id, environment_type=built.environment_type)
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["direct", "link"])
+@pytest.mark.parametrize("case", CONTROL_PLANE_CASES)
+async def test_a_case_seals_to_its_committed_vector_on_both_paths(case, transport):
+    """The layer's calls seal the vector the recipe committed, called in process or sent over a link."""
+
+    generate = _generate()
+    recording = json.loads((FIXTURES / "recording.json").read_text(encoding="utf-8"))
+    built = generate.case_document(generate.seed_episode(recording), case)
+    written = recording["cases"][case]
+
+    if transport == "link":
+        snapshot = await _over_the_link(built, written)
+    else:
+        snapshot = await generate.run_in_control_plane(recording, built, written)
+
+    document = generate.served(snapshot, built.environment_type)
+    assert settled(document) == settled(read(case, "snapshot.json")), f"{case}: sealed another vector"
+    assert capture_complete(document) is read(case, "expected.json")["midojo"]["capture_complete"], f"{case}: capture"
 
 
 def _sync() -> ModuleType:

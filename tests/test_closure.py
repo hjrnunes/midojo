@@ -1,13 +1,20 @@
 """Staged closure, the seal and late facts, over the control plane's HTTP routes."""
 
+import asyncio
 import threading
 import time
 
 import pytest
 from fastapi.testclient import TestClient
+from midojo_sdk.recorder import ControlPlaneRejectedError
 
 from midojo.control_plane.config import AppConfig
+from midojo.control_plane.inprocess import InProcessAgentClient
 from midojo.control_plane.main import create_app
+from midojo.control_plane.service import ById, ControlPlane
+from midojo.control_plane.state import Stage
+from midojo.episode import Episode
+from tests.link_transport import LinkAgent
 
 
 def _completed(client: TestClient, agent_output: str = "New York is 72°F and sunny") -> str:
@@ -268,3 +275,73 @@ def test_a_revoked_session_records_nothing(client):
     evaluation = client.get(url).json()
     assert evaluation["stage"] == "open"
     assert ([call["complete"] for call in evaluation["function_calls"]], evaluation["late_facts"]) == ([False], [])
+
+
+# --- the closure wait over a link ---
+
+CLOSING_EPISODE = Episode(
+    turns=["what is the weather in New York?"],
+    utility={"output_contains": "sunny"},
+    environment={"weather_alerts": []},
+)
+
+
+async def _closing_wait_over(transport: str):
+    """The closure-wait scenario, with the layer's calls sent the way ``transport`` sends them."""
+
+    control = ControlPlane({}, config=AppConfig(closure_wait_seconds=5))
+    opened = control.open_evaluation(CLOSING_EPISODE)
+    link = LinkAgent(control, opened.session_token) if transport == "link" else None
+    agent = link or InProcessAgentClient(control, opened.session_token)
+    try:
+        await agent.start_call(call_id="c1", function="get_weather", args={"city": "New York"}, disposition="forwarded")
+        closing = asyncio.create_task(control.close(None, opened.id))
+        for _ in range(100):
+            stage = control.evaluation(ById(None, opened.id)).stage
+            if stage is Stage.CLOSING:
+                break
+            assert stage is not Stage.COLLECTING, "the closure wait ended before c1 finished"
+            await asyncio.sleep(0)
+        else:
+            pytest.fail("the evaluation never started closing")
+
+        with pytest.raises(ControlPlaneRejectedError) as refused:
+            await agent.start_call(
+                call_id="c2", function="get_weather", args={"city": "Paris"}, disposition="forwarded"
+            )
+        await agent.finish_call(
+            call_id="c1",
+            function="get_weather",
+            args={"city": "New York"},
+            result="72°F, sunny",
+            disposition="forwarded",
+        )
+        closed = await asyncio.wait_for(closing, 4)
+        await control.complete(None, opened.id, "done")
+        evaluation = control.evaluation(ById(None, opened.id))
+        return {
+            "refusal": (refused.value.kind.value, refused.value.late_fact),
+            "stage": closed.stage,
+            "calls": [(call.call_id, call.complete) for call in evaluation.function_calls],
+            "late": [(fact.event, fact.call_id, fact.by) for fact in evaluation.late_facts],
+            "evidence_status": evaluation.evidence_status,
+        }
+    finally:
+        if link is not None:
+            await link.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["direct", "link"])
+async def test_a_call_during_the_closure_wait_is_a_late_fact_over_a_link(transport):
+    """A link tells the same closure story: the wait ends with the admitted call, and the refused one is a late fact."""
+
+    closed = await _closing_wait_over(transport)
+
+    assert closed == {
+        "refusal": ("closing", True),
+        "stage": Stage.COLLECTING,
+        "calls": [("c1", True)],
+        "late": [("start_call", "c2", "agent")],
+        "evidence_status": {"function_calls": "incomplete"},
+    }
