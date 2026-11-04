@@ -708,7 +708,7 @@ def _records(outcomes: Sequence[InjectionOutcome]) -> list[InjectionRecord]:
     for outcome in outcomes:
         record: InjectionRecord = {
             "instruction_index": outcome.instruction_index,
-            "probe_key": outcome.probe_key,
+            "slot_key": outcome.slot_key,
             "occurrence": outcome.occurrence,
             "status": outcome.status.value,
             "detail": outcome.detail,

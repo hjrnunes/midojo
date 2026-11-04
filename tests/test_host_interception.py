@@ -117,7 +117,7 @@ async def test_the_interceptor_records_in_its_evaluation_and_applies_the_plan(co
     ]
     # The sealed records are what the interceptor returned: a text-only result has no structured part.
     assert [(c.result, c.structured_content) for c in calls] == [(f"41°F, rain\n{PAYLOAD}", None), ("no alerts", None)]
-    assert [[(o.status, o.probe_key) for o in sealed_outcomes(c)] for c in calls] == [
+    assert [[(o.status, o.slot_key) for o in sealed_outcomes(c)] for c in calls] == [
         [("applied", "weather_alert:main")],
         [],
     ]
@@ -213,7 +213,7 @@ async def test_host_interceptor_places_a_selected_record_in_the_text_and_seals_w
     )
     # The sealed record is exactly what the interceptor returned, text and structured parts, with the outcome.
     assert (record.result, record.structured_content, record.error) == (agent_text(result), injected, None)
-    assert [(o.instruction_index, o.probe_key, o.occurrence, o.status, o.detail) for o in sealed_outcomes(record)] == [
+    assert [(o.instruction_index, o.slot_key, o.occurrence, o.status, o.detail) for o in sealed_outcomes(record)] == [
         (0, "notes:body", 1, "applied", outcome.detail)
     ]
 
@@ -351,7 +351,7 @@ async def test_host_interceptor_places_a_payload_only_on_the_call_whose_argument
     assert [(c.args, c.result, c.structured_content) for c in calls] == [
         ({"order_id": order["order_id"]}, json.dumps(order, separators=(",", ":")), order) for order in expected
     ]
-    assert [[(o.probe_key, o.occurrence, o.status, o.detail) for o in sealed_outcomes(c)] for c in calls] == [
+    assert [[(o.slot_key, o.occurrence, o.status, o.detail) for o in sealed_outcomes(c)] for c in calls] == [
         [("orders:item", o.occurrence, o.status.value, o.detail)] for o in interceptor.injection_outcomes
     ]
 
@@ -446,7 +446,7 @@ async def test_host_interceptor_places_a_payload_only_on_the_result_whose_record
     ]
     # The sealed records are what the agent got, each with its own outcome.
     assert [(c.args, c.structured_content) for c in calls] == [({"patient_id": r["patient_id"]}, r) for r in expected]
-    assert [[(o.probe_key, o.occurrence, o.status, o.detail) for o in sealed_outcomes(c)] for c in calls] == [
+    assert [[(o.slot_key, o.occurrence, o.status, o.detail) for o in sealed_outcomes(c)] for c in calls] == [
         [("referrals:reason", o.occurrence, o.status.value, o.detail)] for o in interceptor.injection_outcomes
     ]
     unmatched = sealed_outcomes(calls[1])[0]

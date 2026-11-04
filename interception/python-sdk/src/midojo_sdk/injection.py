@@ -521,6 +521,10 @@ class CapabilityError(ValueError):
 class InjectionOutcome:
     """How one instruction fared on one call, with the delivery facts of the interceptor's own boundary.
 
+    ``slot_key`` names the instruction's slot; a record the interceptor made
+    before the rename carries it as ``probe_key``, which :meth:`from_data`
+    still reads.
+
     ``selected`` is whether the instruction's exact selector matched a place
     in the call's result. ``transformation`` is the transformation applied to
     the payload, None when the payload was never transformed (the occurrence
@@ -551,7 +555,7 @@ class InjectionOutcome:
     """
 
     instruction_index: int
-    probe_key: str | None
+    slot_key: str | None
     scope: str
     call_id: str
     tool: str
@@ -588,7 +592,7 @@ class InjectionOutcome:
         """The outcome as fresh JSON data: every field, its enums by value, its slot as the plan codec's form."""
         return {
             "instruction_index": self.instruction_index,
-            "probe_key": self.probe_key,
+            "slot_key": self.slot_key,
             "scope": self.scope,
             "call_id": self.call_id,
             "tool": self.tool,
@@ -606,9 +610,13 @@ class InjectionOutcome:
 
     @classmethod
     def from_data(cls, data: Mapping[str, Any]) -> InjectionOutcome:
-        """Decode :meth:`to_data`'s form; every field must be there."""
+        """Decode :meth:`to_data`'s form; every field must be there.
+
+        A record the interceptor made before the rename names the
+        instruction's slot key ``probe_key``; this reader takes that name too.
+        """
         try:
-            value = _object(data, "outcome")
+            value = _renamed_slot_key(_object(data, "outcome"))
             _only_fields(value, set(_OUTCOME_FIELDS), "outcome")
             missing = set(_OUTCOME_FIELDS) - set(value)
             if missing:
@@ -618,9 +626,9 @@ class InjectionOutcome:
                 raise TypeError("emitted must be a list")
             transformation = value["transformation"]
             slot = value["slot"]
-            probe_key = value["probe_key"]
-            if probe_key is not None:
-                _optional_str(probe_key, "probe_key")
+            slot_key = value["slot_key"]
+            if slot_key is not None:
+                _optional_str(slot_key, "slot_key")
             payload_digest = value["payload_digest"]
             if payload_digest is not None:
                 _optional_str(payload_digest, "payload_digest")
@@ -631,7 +639,7 @@ class InjectionOutcome:
                 raise TypeError("selected must be a bool")
             return cls(
                 instruction_index=_count(value["instruction_index"], "instruction_index"),
-                probe_key=probe_key,
+                slot_key=slot_key,
                 scope=_str(value["scope"], "scope"),
                 call_id=_str(value["call_id"], "call_id"),
                 tool=_str(value["tool"], "tool"),
@@ -652,7 +660,7 @@ class InjectionOutcome:
 
 _OUTCOME_FIELDS = (
     "instruction_index",
-    "probe_key",
+    "slot_key",
     "scope",
     "call_id",
     "tool",
@@ -1000,6 +1008,26 @@ def _object(value: Any, what: str) -> dict[str, Any]:
     if type(value) is not dict or any(type(key) is not str for key in value):
         raise TypeError(f"{what} must be a JSON object")
     return value
+
+
+# The field an outcome recorded before the rename names the instruction's slot key with.
+LEGACY_SLOT_KEY = "probe_key"
+
+
+def _renamed_slot_key(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Return ``value`` with an old ``probe_key`` read as ``slot_key``.
+
+    An interceptor recorded an outcome's slot key as ``probe_key`` before the
+    rename; :meth:`InjectionOutcome.from_data` reads both forms, so a record
+    made earlier still decodes. A record that names ``slot_key`` keeps it: the
+    old name is dropped, so a record that names both reads as ``slot_key``.
+    """
+
+    if LEGACY_SLOT_KEY not in value:
+        return dict(value)
+    renamed = {name: item for name, item in value.items() if name != LEGACY_SLOT_KEY}
+    renamed.setdefault("slot_key", value[LEGACY_SLOT_KEY])
+    return renamed
 
 
 def _only_fields(value: Mapping[str, Any], allowed: set[str], what: str) -> None:

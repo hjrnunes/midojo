@@ -402,7 +402,7 @@ async def test_both_implementations_record_the_same_call(client, backend):
     await agent.start_call(call_id="c1", function="get_weather", args={"city": "Boston"}, disposition="forwarded")
     outcome: InjectionRecord = {
         "instruction_index": 0,
-        "probe_key": "p:main",
+        "slot_key": "p:main",
         "occurrence": 1,
         "status": "partial",
         "detail": "d",
@@ -469,7 +469,7 @@ async def test_an_outcome_without_delivery_facts_leaves_them_unreported(client, 
     run_id, eval_id, token = new_evaluation(client)
     outcome: InjectionRecord = {
         "instruction_index": 0,
-        "probe_key": None,
+        "slot_key": None,
         "occurrence": 1,
         "status": "applied",
         "detail": "d",
@@ -505,7 +505,7 @@ async def test_a_finish_replays_only_with_the_same_structured_content_and_outcom
     agent = backend.agent(token)
     outcome: InjectionRecord = {
         "instruction_index": 0,
-        "probe_key": None,
+        "slot_key": None,
         "occurrence": 1,
         "status": "applied",
         "detail": "d",
@@ -547,7 +547,7 @@ async def test_a_finish_replays_only_with_the_same_structured_content_and_outcom
 @pytest.mark.asyncio
 async def test_an_unknown_injection_status_is_an_invalid_request(client, backend):
     _, _, token = new_evaluation(client)
-    outcome = {"instruction_index": 0, "probe_key": None, "occurrence": 1, "status": "half", "detail": "d"}
+    outcome = {"instruction_index": 0, "slot_key": None, "occurrence": 1, "status": "half", "detail": "d"}
     with pytest.raises(InvalidRequestError):
         await backend.agent(token).finish_call_detailed(
             call_id="c1",
@@ -562,7 +562,7 @@ async def test_an_unknown_injection_status_is_an_invalid_request(client, backend
 
 UNCOUNTED: InjectionRecord = {
     "instruction_index": 0,
-    "probe_key": None,
+    "slot_key": None,
     "occurrence": 0,
     "status": "unmatched",
     "detail": "d",

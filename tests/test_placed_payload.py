@@ -277,7 +277,7 @@ async def test_an_outcome_that_placed_nothing_records_no_digest_or_slot(instruct
 def outcome(**changes: Any) -> InjectionOutcome:
     fields: dict[str, Any] = {
         "instruction_index": 0,
-        "probe_key": None,
+        "slot_key": None,
         "scope": "s",
         "call_id": "c",
         "tool": "lookup",
@@ -400,8 +400,10 @@ class Shop(Environment):
     notes: list[str] = Field(default_factory=list)
 
 
-# A snapshot's ID as the control plane computed it before outcomes recorded what they placed. It must never change.
-PINNED_SNAPSHOT_ID = "sha256:6435d6bfa175fd7afc232cfb77c5cf6b162b1102c21e17ccc216160ce9297e6a"
+# A snapshot's ID as the control plane computes it with outcomes that record no placement and name their slot
+# key ``slot_key`` (the rename changed the sealed bytes; a snapshot sealed before it keeps the ID it was sealed
+# with, because the digest hashes the document it reads).
+PINNED_SNAPSHOT_ID = "sha256:b2c78a932a200e81c2606b7e19847560a764e296d61368886cd70d5c166c882c"
 
 
 def snapshot(*outcome_changes: dict[str, Any]) -> Snapshot:
@@ -409,7 +411,7 @@ def snapshot(*outcome_changes: dict[str, Any]) -> Snapshot:
     outcomes = [
         CallInjectionOutcome(
             instruction_index=0,
-            probe_key="exfil:note",
+            slot_key="exfil:note",
             occurrence=1,
             status="applied",
             detail="exact selector matched; mirrored text re-serialised",
@@ -419,7 +421,7 @@ def snapshot(*outcome_changes: dict[str, Any]) -> Snapshot:
         ),
         CallInjectionOutcome(
             instruction_index=1,
-            probe_key=None,
+            slot_key=None,
             occurrence=0,
             status="unmatched",
             detail="call argument 'order_id' is 'ORD-102', not 'ORD-101'; result unchanged",
@@ -429,7 +431,7 @@ def snapshot(*outcome_changes: dict[str, Any]) -> Snapshot:
         ),
         CallInjectionOutcome(
             instruction_index=2,
-            probe_key=None,
+            slot_key=None,
             occurrence=2,
             status="skipped_occurrence",
             detail="occurrence rule did not select this call",
@@ -539,7 +541,7 @@ async def test_a_snapshot_with_the_placement_fields_is_served_and_rebuilt_over_h
     instruction = structured(transformation=Transformation.JSON_STRING, mode=InjectionMode.REPLACE)
     record: InjectionRecord = {
         "instruction_index": 0,
-        "probe_key": None,
+        "slot_key": None,
         "occurrence": 1,
         "status": "applied",
         "detail": "d",

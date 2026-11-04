@@ -194,7 +194,7 @@ def test_an_injection_outcome_round_trips_through_its_document_form():
     slot = InjectionSlot(InjectionTarget(tool="get_weather"), InjectionMode.APPEND)
     outcome = InjectionOutcome(
         instruction_index=0,
-        probe_key="weather_alert:main",
+        slot_key="weather_alert:main",
         scope="eval-1",
         call_id="call-1",
         tool="get_weather",
@@ -213,6 +213,56 @@ def test_an_injection_outcome_round_trips_through_its_document_form():
     decoded = InjectionOutcome.from_data(json.loads(json.dumps(outcome.to_data())))
 
     assert decoded == outcome
+
+
+def test_an_outcome_recorded_before_the_rename_still_reads_its_slot_key():
+    # The interception layer recorded the instruction's slot key as probe_key before the rename.
+    recorded = {
+        "instruction_index": 0,
+        "probe_key": "weather_alert:main",
+        "scope": "eval-1",
+        "call_id": "call-1",
+        "tool": "get_weather",
+        "occurrence": 1,
+        "admission_order": 2,
+        "status": "applied",
+        "detail": "appended a content block",
+        "selected": True,
+        "transformation": "identity",
+        "emitted": ["content_block"],
+        "payload_digest": payload_digest("PAYLOAD"),
+        "placed_digest": payload_digest("PAYLOAD"),
+        "slot": None,
+    }
+
+    decoded = InjectionOutcome.from_data(recorded)
+
+    assert decoded.slot_key == "weather_alert:main"
+    assert decoded.to_data()["slot_key"] == "weather_alert:main"
+    assert "probe_key" not in decoded.to_data()
+
+
+def test_an_outcome_that_names_both_keys_keeps_slot_key():
+    recorded = {
+        "instruction_index": 0,
+        "slot_key": "t:main",
+        "probe_key": "t:other",
+        "scope": "eval-1",
+        "call_id": "call-1",
+        "tool": "get_weather",
+        "occurrence": 1,
+        "admission_order": 1,
+        "status": "unmatched",
+        "detail": "the selector did not match",
+        "selected": False,
+        "transformation": None,
+        "emitted": [],
+        "payload_digest": None,
+        "placed_digest": None,
+        "slot": None,
+    }
+
+    assert InjectionOutcome.from_data(recorded).slot_key == "t:main"
 
 
 def test_an_injection_outcome_document_that_is_not_one_is_a_value_error():

@@ -110,7 +110,7 @@
           {
             "plan_instruction_index": 0,
             "channel": "environment_state",
-            "probe_key": "hate_humans_output_hijack:main",
+            "slot_key": "hate_humans_output_hijack:main",
             "placed_by": "host",
             "exposure": {
               "emitted": "unknown",
@@ -129,7 +129,7 @@
           {
             "plan_instruction_index": 0,
             "channel": "runtime_file",
-            "probe_key": "itinerary_exfil_via_email:main",
+            "slot_key": "itinerary_exfil_via_email:main",
             "placed_by": "host",
             "exposure": {
               "emitted": "unknown",
@@ -148,7 +148,7 @@
           {
             "plan_instruction_index": 0,
             "channel": "user_prompt",
-            "probe_key": "tornado_alert_via_prompt:main",
+            "slot_key": "tornado_alert_via_prompt:main",
             "placed_by": "host",
             "exposure": {
               "emitted": "exposed",

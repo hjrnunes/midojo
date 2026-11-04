@@ -42,7 +42,7 @@ def email(*, blocked: bool = False, complete: bool = True, call_id: str = "c1") 
 def read_file(emitted: list[Any] | None) -> FunctionCallRecord:
     outcome = CallInjectionOutcome(
         instruction_index=0,
-        probe_key="t:main",
+        slot_key="t:main",
         occurrence=1,
         status="applied",
         detail="d",

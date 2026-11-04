@@ -141,7 +141,7 @@ async def sealed(control: ControlPlane, upstream: CallToolResult, *instructions:
 
 def outcome_rows(record) -> list[tuple[int, str | None, int, str, str]]:
     assert record.injection_outcomes is not None
-    return [(o.instruction_index, o.probe_key, o.occurrence, o.status, o.detail) for o in record.injection_outcomes]
+    return [(o.instruction_index, o.slot_key, o.occurrence, o.status, o.detail) for o in record.injection_outcomes]
 
 
 @pytest.mark.asyncio

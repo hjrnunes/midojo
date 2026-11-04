@@ -4,7 +4,7 @@ A *delivery fact* is what the component that places an injection did at its
 own boundary, recorded as it happened: for a tool-output instruction, what the
 interceptor selected, transformed and emitted in one call's result (each
 sealed call's ``injection_outcomes``, :class:`midojo.types.CallInjectionOutcome`).
-A fact references its instruction by index and probe key; the plan holds
+A fact references its instruction by index and slot key; the plan holds
 none. The interceptor numbers instructions within the plan's tool-output
 part, the plan it was given; a report names both indexes apart:
 ``interceptor_instruction_index`` as the call recorded it, and
@@ -36,7 +36,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from typing import Literal
 
 from midojo_sdk.injection import Channel, InjectionInstruction, InjectionPlan
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from midojo.observations import FUNCTION_CALLS, EvidenceStatus
 from midojo.types import (
@@ -57,6 +57,26 @@ ExposureStatus = Literal["exposed", "not_exposed", "unknown"]
 # (the environment, the turns, the runtime's files) before the agent runs.
 PlacedBy = Literal["interceptor", "host"]
 
+# The field name a document recorded before the rename carries: MiDojo reads it as ``slot_key``.
+LEGACY_SLOT_KEY = "probe_key"
+
+
+def _renamed_slot_key(data: object) -> object:
+    """Return ``data`` with an old ``probe_key`` read as ``slot_key``.
+
+    A delivery document, or a call record, recorded before the rename names
+    the instruction's slot key ``probe_key``. MiDojo reads both forms, so a
+    document it wrote earlier still reads. A mapping that already names
+    ``slot_key`` is returned as it is.
+    """
+
+    if isinstance(data, Mapping) and LEGACY_SLOT_KEY in data and "slot_key" not in data:
+        renamed = dict(data)
+        renamed["slot_key"] = renamed.pop(LEGACY_SLOT_KEY)
+        return renamed
+    return data
+
+
 # The boundaries each channel's payload can cross. A turn message isn't a tool result.
 _BOUNDARIES: Mapping[Channel, tuple[ExposureBoundary, ...]] = {
     Channel.TOOL_OUTPUT: EXPOSURE_BOUNDARIES,
@@ -75,7 +95,7 @@ class DeliveryFact(BaseModel):
     call recorded it; ``plan_instruction_index`` is the same instruction's
     index in the episode's plan, the index :class:`InstructionExposure` uses,
     or None when no tool-output instruction of the plan has that place and
-    probe key and targets the call's tool (or any tool). ``selected``, ``transformation`` and ``emitted`` are None when
+    slot key and targets the call's tool (or any tool). ``selected``, ``transformation`` and ``emitted`` are None when
     the interceptor didn't report them. ``payload_digest``, ``placed_digest`` and ``slot`` say what a placement
     (``applied``, ``partial``, ``fallback``) placed and where (see `midojo.types.CallInjectionOutcome`): None for any other
     outcome, or when the interceptor didn't report them.
@@ -87,7 +107,7 @@ class DeliveryFact(BaseModel):
     turn: int | None
     interceptor_instruction_index: int
     plan_instruction_index: int | None
-    probe_key: str | None
+    slot_key: str | None
     occurrence: int
     status: InjectionStatus
     selected: bool | None
@@ -97,17 +117,24 @@ class DeliveryFact(BaseModel):
     placed_digest: str | None = None
     slot: CallInjectionSlot | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _read_legacy_slot_key(cls, data: object) -> object:
+        """Read a fact recorded before the rename, whose ``probe_key`` names this ``slot_key``."""
+
+        return _renamed_slot_key(data)
+
 
 def delivery_facts(plan: InjectionPlan, function_calls: Iterable[FunctionCallRecord]) -> list[DeliveryFact]:
     """Every delivery fact the recorded calls carry, in call then instruction order, with ``plan``'s index of each."""
     tool_output = _tool_output_indexes(plan)
 
-    def plan_index(interceptor_index: int, probe_key: str | None, function: str) -> int | None:
+    def plan_index(interceptor_index: int, slot_key: str | None, function: str) -> int | None:
         if not 0 <= interceptor_index < len(tool_output):
             return None
         index = tool_output[interceptor_index]
         instruction = plan.instructions[index]
-        if instruction.probe_key != probe_key or instruction.target.tool not in (None, function):
+        if instruction.probe_key != slot_key or instruction.target.tool not in (None, function):
             return None
         return index
 
@@ -118,8 +145,8 @@ def delivery_facts(plan: InjectionPlan, function_calls: Iterable[FunctionCallRec
             disposition=call.disposition,
             turn=call.turn,
             interceptor_instruction_index=outcome.instruction_index,
-            plan_instruction_index=plan_index(outcome.instruction_index, outcome.probe_key, call.function),
-            probe_key=outcome.probe_key,
+            plan_instruction_index=plan_index(outcome.instruction_index, outcome.slot_key, call.function),
+            slot_key=outcome.slot_key,
             occurrence=outcome.occurrence,
             status=outcome.status,
             selected=outcome.selected,
@@ -149,10 +176,17 @@ class InstructionExposure(BaseModel):
 
     plan_instruction_index: int
     channel: str
-    probe_key: str | None
+    slot_key: str | None
     placed_by: PlacedBy
     exposure: dict[ExposureBoundary, ExposureStatus]
     reason: str
+
+    @model_validator(mode="before")
+    @classmethod
+    def _read_legacy_slot_key(cls, data: object) -> object:
+        """Read an exposure recorded before the rename, whose ``probe_key`` names this ``slot_key``."""
+
+        return _renamed_slot_key(data)
 
 
 class Exposure(BaseModel):
@@ -189,7 +223,7 @@ def exposure(
     A tool-output instruction is placed by the interceptor, which is given
     the plan's tool-output part (``plan.for_channels(Channel.TOOL_OUTPUT)``):
     its facts are those whose index is the instruction's place in that part
-    and whose probe key is the instruction's. It is ``emitted`` when a fact
+    and whose slot key is the instruction's. It is ``emitted`` when a fact
     names a part of the result that carries it. It is ``not_exposed`` only
     when the record says it can't have been: ``function_calls`` is complete,
     and every call to the instruction's tool that ran finished with a fact
@@ -221,7 +255,7 @@ def exposure(
             InstructionExposure(
                 plan_instruction_index=index,
                 channel=instruction.channel.value,
-                probe_key=instruction.probe_key,
+                slot_key=instruction.probe_key,
                 placed_by="interceptor" if instruction.channel is Channel.TOOL_OUTPUT else "host",
                 exposure={boundary: _past(boundary, emitted) for boundary in boundaries},
                 reason=reason,
@@ -291,8 +325,8 @@ def _tool_output_emitted(
             gaps.append(f"call {call.call_id} reported no delivery fact for instruction {interceptor_index}")
             continue
         for outcome in facts:
-            if outcome.probe_key != instruction.probe_key:
-                gaps.append(f"call {call.call_id} names instruction {interceptor_index} with another probe")
+            if outcome.slot_key != instruction.probe_key:
+                gaps.append(f"call {call.call_id} names instruction {interceptor_index} with another slot key")
             elif outcome.emitted:
                 return "exposed", f"emitted in {', '.join(outcome.emitted)} of call {call.call_id}"
             elif outcome.emitted is None:

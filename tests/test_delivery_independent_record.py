@@ -225,7 +225,7 @@ async def test_a_mirrored_placement_is_emitted_in_both_parts_the_client_got(cont
     assert s.outcomes(0) == [
         {
             "instruction_index": 0,
-            "probe_key": "t:main",
+            "slot_key": "t:main",
             "occurrence": 1,
             "status": "applied",
             "detail": "exact selector matched; mirrored text re-serialised",
@@ -335,7 +335,7 @@ async def test_a_partial_placement_leaves_the_text_blocks_as_served(control):
     [outcome] = s.outcomes(0)
     assert outcome == {
         "instruction_index": 0,
-        "probe_key": "t:main",
+        "slot_key": "t:main",
         "occurrence": 1,
         "status": "partial",
         "detail": "exact selector matched structured content only; text content is not a single text block "
@@ -385,7 +385,7 @@ async def test_a_call_argument_miss_and_a_skipped_occurrence_leave_the_result_as
     assert s.outcomes(0) == [
         {
             "instruction_index": 0,
-            "probe_key": "t:main",
+            "slot_key": "t:main",
             "occurrence": 0,
             "status": "unmatched",
             "detail": "call argument 'order_id' is 'ORD-101', not 'ORD-102'; result unchanged",
@@ -403,7 +403,7 @@ async def test_a_call_argument_miss_and_a_skipped_occurrence_leave_the_result_as
     assert s.outcomes(2) == [
         {
             "instruction_index": 0,
-            "probe_key": "t:main",
+            "slot_key": "t:main",
             "occurrence": 2,
             "status": "skipped_occurrence",
             "detail": "occurrence rule did not select this call",
@@ -436,7 +436,7 @@ async def test_a_result_record_miss_leaves_the_result_as_served(control):
         miss
         == {
             "instruction_index": 0,
-            "probe_key": "t:main",
+            "slot_key": "t:main",
             "occurrence": 0,
             "status": "unmatched",
             "detail": "result field 'referral_id' is 'REF-2', not 'REF-1'; result unchanged",
@@ -503,7 +503,7 @@ async def test_a_payload_over_its_size_limit_leaves_the_result_as_served(control
         outcome
         == {
             "instruction_index": 0,
-            "probe_key": "t:main",
+            "slot_key": "t:main",
             "occurrence": 1,
             "status": "too_large",
             "detail": "transformed payload exceeds size_limit",
@@ -546,7 +546,7 @@ async def test_a_strict_miss_leaves_the_result_as_served(control):
         outcome
         == {
             "instruction_index": 0,
-            "probe_key": "t:main",
+            "slot_key": "t:main",
             "occurrence": 1,
             "status": "unmatched",
             "detail": "record selector [id='NOTE-9'] matched no records; result unchanged",

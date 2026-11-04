@@ -869,7 +869,7 @@ async def test_a_mirrored_text_block_is_re_serialised_in_its_own_style(style, mo
     assert finish["injection_outcomes"] == [
         {
             "instruction_index": 0,
-            "probe_key": None,
+            "slot_key": None,
             "occurrence": 1,
             "status": "applied",
             "detail": MIRRORED,
@@ -1205,7 +1205,7 @@ async def test_only_the_call_with_matching_arguments_is_changed_and_the_others_s
         [
             {
                 "instruction_index": 0,
-                "probe_key": None,
+                "slot_key": None,
                 "occurrence": o.occurrence,
                 "status": o.status,
                 "detail": o.detail,

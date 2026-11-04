@@ -678,7 +678,7 @@ def _outcome(
 ) -> InjectionOutcome:
     return InjectionOutcome(
         instruction_index=index,
-        probe_key=instruction.probe_key,
+        slot_key=instruction.probe_key,
         scope=scope,
         call_id=call_id,
         tool=tool,

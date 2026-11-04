@@ -80,7 +80,7 @@ def outcome(call: placement.CallView, status: OutcomeStatus, detail: str, **fiel
     """One instruction's outcome on ``call``, as an engine of your own reports it."""
     return InjectionOutcome(
         instruction_index=0,
-        probe_key=None,
+        slot_key=None,
         scope=call.scope,
         call_id=call.call_id,
         tool=call.tool,

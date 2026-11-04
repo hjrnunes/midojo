@@ -2,7 +2,20 @@ import uuid
 from typing import Annotated, Any, Literal
 
 from midojo_sdk.injection import InjectionSlot
-from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, StringConstraints, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ModelWrapValidatorHandler,
+    PrivateAttr,
+    SerializeAsAny,
+    StringConstraints,
+    model_serializer,
+    model_validator,
+)
+
+# The name an outcome recorded before the slot-key rename spells its slot key with.
+LEGACY_SLOT_KEY = "probe_key"
 
 # A suite name is also a URL path segment. Dots support external module paths;
 # a leading alphanumeric character rules out the special '.' and '..' segments.
@@ -112,7 +125,14 @@ class CallInjectionOutcome(BaseModel):
     """
 
     instruction_index: int = Field(ge=0, description="The instruction's index in the interceptor's plan.")
-    probe_key: str | None = Field(default=None, description="The instruction's probe, when it names one.")
+    slot_key: str | None = Field(
+        default=None,
+        description=(
+            "The instruction's slot key, when it names one. A record made before the rename carries it as "
+            "`probe_key`, which this model still reads and dumps back under that name, so a recorded snapshot "
+            "keeps its ID."
+        ),
+    )
     occurrence: int = Field(
         ge=0,
         description=(
@@ -165,6 +185,41 @@ class CallInjectionOutcome(BaseModel):
             "block instead, as `detail` says). Only for a placement; None otherwise or when not reported."
         ),
     )
+
+    # Whether this record was read under the name it was recorded with (see `_read_legacy_slot_key`).
+    _recorded_with_legacy_slot_key: bool = PrivateAttr(default=False)
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _read_legacy_slot_key(
+        cls, data: object, handler: ModelWrapValidatorHandler["CallInjectionOutcome"]
+    ) -> "CallInjectionOutcome":
+        """Read a record made before the rename, whose ``probe_key`` names this ``slot_key``.
+
+        The interception layer recorded the instruction's slot key under the
+        old name, so a record from before the rename still reads as it did,
+        and it keeps the name it was recorded with: a sealed snapshot re-served
+        from it keeps the ``snapshot_id`` it was sealed with, because the digest
+        hashes the document, not this model.
+        """
+
+        legacy = False
+        renamed: object = data
+        if isinstance(data, dict) and LEGACY_SLOT_KEY in data and "slot_key" not in data:
+            legacy = True
+            renamed = {("slot_key" if name == LEGACY_SLOT_KEY else name): value for name, value in data.items()}
+        model = handler(renamed)
+        model._recorded_with_legacy_slot_key = legacy
+        return model
+
+    @model_serializer(mode="wrap")
+    def _write_the_recorded_slot_key(self, handler: Any) -> dict:
+        """Dump the slot key under the name the record was read with."""
+
+        data = handler(self)
+        if self._recorded_with_legacy_slot_key and "slot_key" in data:
+            return {(LEGACY_SLOT_KEY if name == "slot_key" else name): value for name, value in data.items()}
+        return data
 
     @model_validator(mode="after")
     def _uncounted_only_when_unmatched(self) -> "CallInjectionOutcome":

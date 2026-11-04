@@ -26,7 +26,6 @@
           "occurrence": 1,
           "payload_digest": "sha256:7f4b8d84dcfcb4014d66b58a4125375cba25459915f9e032611a3ce273f1fbcd",
           "placed_digest": "sha256:7f4b8d84dcfcb4014d66b58a4125375cba25459915f9e032611a3ce273f1fbcd",
-          "probe_key": "planted_item:seed_0",
           "selected": true,
           "slot": {
             "id": "sha256:aeb3f88dea6fed35c3fa2f9206e322448c2a860c85b98325486e889d40c3ef6c",
@@ -46,6 +45,7 @@
               "tool": "lookup_order"
             }
           },
+          "slot_key": "planted_item:seed_0",
           "status": "applied",
           "transformation": "identity"
         }
@@ -91,7 +91,7 @@
   "pre_environment": {},
   "run_id": null,
   "sealed_at": "2026-01-01T00:00:00.069000+00:00",
-  "snapshot_id": "sha256:4cbceb987ea741912ca54883c4ef95b95a7e24cb264d7fc94f927f5c15cf0b76",
+  "snapshot_id": "sha256:ee08301e7d7de4b031ad67388268fba151b5c10ac8d3fe79a3d45f55d413dc45",
   "turns": [
     {
       "ended_at": "2026-01-01T00:00:00.062000+00:00",

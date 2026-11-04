@@ -214,7 +214,7 @@ def test_open_takes_a_remote_interception_and_keeps_the_handle_api_version():
         result = handle.result
         assert result is not None and result.snapshot is not None
         assert result.interception == "host" and not result.interrupted
-        assert [outcome.probe_key for outcome in result.injection_outcomes] == ["w:main"]
+        assert [outcome.slot_key for outcome in result.injection_outcomes] == ["w:main"]
 
 
 def test_the_environment_names_the_remote_interception_when_no_option_is_given(monkeypatch: pytest.MonkeyPatch):

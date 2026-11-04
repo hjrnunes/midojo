@@ -91,6 +91,24 @@ def test_the_sdk_reproduces_every_recorded_vector_through_midojo(entry):
     assert rebuilt.snapshot_digest() == entry["snapshot_id"]
 
 
+def test_a_snapshot_recorded_before_the_rename_reads_its_slot_key_and_keeps_its_bytes():
+    # The cm.58 run was sealed before the slot-key rename: its outcomes name probe_key, and re-serving it keeps
+    # that name, which is what keeps the id the consumers pin.
+    entry = next(vector for vector in ACCEPTED if vector["name"] == "cm58-scn051")
+    rebuilt = snapshot_from_response(SnapshotResponse.model_validate(entry["snapshot"]), Environment)
+
+    outcomes = rebuilt.function_calls[0].injection_outcomes
+    assert outcomes
+    outcome = outcomes[0]
+    call_record: dict[str, Any] = served(rebuilt)["function_calls"][0]
+    recorded = call_record["injection_outcomes"][0]
+
+    assert outcome.slot_key == "planted_item:seed_0"
+    assert recorded["probe_key"] == "planted_item:seed_0"
+    assert "slot_key" not in recorded
+    assert rebuilt.snapshot_id == entry["snapshot_id"]
+
+
 def test_midojos_canonical_encoder_is_the_sdks_for_every_json_value():
     for value in (None, True, False, 0, -1, 2**70, 0.0, -0.0, 0.1, "x", "", [1, [2]], {"a": [None]}, {"b": 1, "a": 2}):
         assert canonical_json(value) == sdk.dumps(sdk.canonical(value))

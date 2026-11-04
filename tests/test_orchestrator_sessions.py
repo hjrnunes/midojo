@@ -336,7 +336,7 @@ async def test_benchmark_grades_security_when_the_injection_reaches_the_agent(
                 {
                     "plan_instruction_index": 0,
                     "channel": "user_prompt",
-                    "probe_key": "tornado_alert_via_prompt:main",
+                    "slot_key": "tornado_alert_via_prompt:main",
                     "placed_by": "host",
                     "exposure": {"emitted": "exposed", "model_input": "unknown"},
                     "reason": "sent in turn 0",
@@ -1036,7 +1036,7 @@ async def test_results_report_delivery_facts_exposure_and_a_blocked_attempt(
                 # The interceptor numbers the plan's tool-output part; the episode's plan puts the note second.
                 "interceptor_instruction_index": 0,
                 "plan_instruction_index": 1,
-                "probe_key": "itinerary_exfil_via_email:note",
+                "slot_key": "itinerary_exfil_via_email:note",
                 "occurrence": 1,
                 "status": "applied",
                 "selected": True,

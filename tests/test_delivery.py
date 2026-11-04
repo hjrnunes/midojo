@@ -43,10 +43,10 @@ def plan(*instructions: InjectionInstruction) -> InjectionPlan:
     return InjectionPlan(instructions, probe_payloads=tuple(keys.items()))
 
 
-def outcome(index: int = 0, *, emitted: list[Any] | None, status: Any = "applied", probe_key: str | None = "t:main"):
+def outcome(index: int = 0, *, emitted: list[Any] | None, status: Any = "applied", slot_key: str | None = "t:main"):
     return CallInjectionOutcome(
         instruction_index=index,
-        probe_key=probe_key,
+        slot_key=slot_key,
         occurrence=1,
         status=status,
         detail="d",
@@ -109,7 +109,7 @@ def test_delivery_facts_flatten_each_calls_outcomes_and_name_the_call():
         turn=None,
         interceptor_instruction_index=0,
         plan_instruction_index=0,
-        probe_key="t:main",
+        slot_key="t:main",
         occurrence=1,
         status="applied",
         selected=True,
@@ -129,7 +129,7 @@ def test_an_emitted_payload_is_exposed_at_the_interceptor_and_unknown_past_it():
     # The interceptor records a result before returning it, and no model input is observed.
     assert boundaries(report) == ("exposed", "unknown", "unknown")
     [item] = report.instructions
-    assert (item.placed_by, item.channel, item.probe_key) == ("interceptor", "tool_output", "t:main")
+    assert (item.placed_by, item.channel, item.slot_key) == ("interceptor", "tool_output", "t:main")
     assert item.reason == "emitted in content_block of call c1"
 
 
@@ -156,7 +156,7 @@ def test_a_blocked_call_never_carries_a_payload():
         ([call(complete=False)], COMPLETE, "call c1 is unfinished"),
         ([call(outcomes=None)], COMPLETE, "call c1 reported no delivery facts"),
         ([call(outcomes=[outcome(emitted=None)])], COMPLETE, "call c1 didn't report what it emitted"),
-        ([call(outcomes=[outcome(emitted=[], probe_key="t:other")])], COMPLETE, "with another probe"),
+        ([call(outcomes=[outcome(emitted=[], slot_key="t:other")])], COMPLETE, "with another slot key"),
         # A detailed finish that names no fact for the instruction doesn't show it wasn't placed: the layer may
         # not have had this plan (a mirror given none finishes with an empty list).
         ([call(outcomes=[])], COMPLETE, "call c1 reported no delivery fact for instruction 0"),
@@ -194,12 +194,38 @@ def test_an_interceptor_index_is_the_place_in_the_plans_tool_output_part():
     assert (fact.interceptor_instruction_index, fact.plan_instruction_index) == (0, 1)
 
 
-def test_a_fact_whose_probe_isnt_the_instructions_names_no_plan_instruction():
-    calls = [call(outcomes=[outcome(0, emitted=[], probe_key="t:other")])]
+def test_a_fact_whose_slot_key_isnt_the_instructions_names_no_plan_instruction():
+    calls = [call(outcomes=[outcome(0, emitted=[], slot_key="t:other")])]
 
     [fact] = delivery_facts(plan(tool_output()), calls)
 
     assert (fact.interceptor_instruction_index, fact.plan_instruction_index) == (0, None)
+
+
+def test_a_call_recorded_before_the_rename_still_names_its_instruction():
+    # The layer recorded the instruction's slot key as probe_key before the rename.
+    recorded = call().model_dump()
+    recorded["injection_outcomes"] = [
+        {
+            "instruction_index": 0,
+            "probe_key": "t:main",
+            "occurrence": 1,
+            "status": "applied",
+            "detail": "d",
+            "selected": True,
+            "transformation": "identity",
+            "emitted": ["content_block"],
+        }
+    ]
+
+    [fact] = delivery_facts(plan(tool_output()), [FunctionCallRecord.model_validate(recorded)])
+    report = exposure(
+        plan(tool_output()), [FunctionCallRecord.model_validate(recorded)], turns=1, evidence_status=COMPLETE
+    )
+
+    assert (fact.slot_key, fact.plan_instruction_index, fact.emitted) == ("t:main", 0, ["content_block"])
+    assert report.instructions[0].slot_key == "t:main"
+    assert boundaries(report) == ("exposed", "unknown", "unknown")
 
 
 def test_a_fact_on_a_call_to_another_tool_names_no_plan_instruction():

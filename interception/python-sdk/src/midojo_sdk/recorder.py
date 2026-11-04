@@ -100,7 +100,7 @@ class InjectionRecord(TypedDict):
     """
 
     instruction_index: int
-    probe_key: str | None
+    slot_key: str | None
     occurrence: int
     status: str
     detail: str
