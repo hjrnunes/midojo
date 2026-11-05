@@ -3,9 +3,11 @@
 Build [MiDojo](https://github.com/asago-ai/midojo) interception layers in Python. An interception layer stands between an agent and its tools during an evaluation: it reads and updates the evaluation's simulated environment, and attempts to record every call the agent makes, by default on the MiDojo control plane.
 
 ```sh
-pip install "midojo-sdk[mcp]"        # fake MCP servers
+pip install "midojo-sdk[mcp]"        # fake MCP servers (also installs FastMCP and websockets)
 pip install "midojo-sdk[langchain]"  # LangChain agents
 ```
+
+The `mcp` extra includes `websockets` because `midojo_sdk.binding` imports it directly.
 
 ## Fake MCP servers
 
@@ -45,7 +47,7 @@ The SDK attempts to record each call with its arguments and the result it return
 
 ## Injection plans
 
-Pass an exact frozen `InjectionPlan` as `MidojoMCP(..., plan=plan)`. For an episode plan containing host template channels, select the MCP-owned part with `episode.plan.for_channels(Channel.TOOL_OUTPUT)`. `append` is the one default because an unqualified content selector can preserve the upstream result without guessing a field. Unqualified content-block `replace` replaces the first text block and leaves `structuredContent` unchanged. MidojoMCP supports exact content-block and structured-content selectors on mirrored results, and `mirror_upstream()` validates targeted tool names before serving calls. A non-empty plan requires an upstream; registering a simulated tool is rejected when a named or all-tools instruction would match it.
+Pass an exact frozen `InjectionPlan` as `MidojoMCP(..., plan=plan)`. For an injection spec's plan containing host template channels, select the MCP-owned part with `spec.plan.for_channels(Channel.TOOL_OUTPUT)`, where `spec` is the injection spec (`midojo.InjectionSpec`). `append` is the one default because an unqualified content selector can preserve the upstream result without guessing a field. Unqualified content-block `replace` replaces the first text block and leaves `structuredContent` unchanged. MidojoMCP supports exact content-block and structured-content selectors on mirrored results, and `mirror_upstream()` validates targeted tool names before serving calls. A non-empty plan requires an upstream; registering a simulated tool is rejected when a named or all-tools instruction would match it.
 
 A structured-content path uses string keys, non-negative integer indexes, and frozen `RecordSelector("NOTE-1")` steps to select the sole list record whose `id` equals `"NOTE-1"`; `field="sku"` selects a custom identifier field. The plain-data/JSON selector shape is `{"field": "id", "equals": "NOTE-1"}` (`field` may be omitted for `id`), exposed by `InjectionPlan.to_data()`/`from_data()` and `to_json()`/`from_json()`. A plain key against a list fails strictly—for example, `field 'NOTE-1' requires an object, got list`—so record ids must use a selector step. A single-record lookup chosen by the call's argument is matched on the call instead: `InjectionTarget(tool="lookup_order", surface=SelectorSurface.STRUCTURED_CONTENT, structured_content_path=("item",), call_arguments={"order_id": "ORD-102"})` (or `(name, value)` pairs, `(("order_id", "ORD-102"),)`: either way `target.call_arguments` is the pairs sorted by name), in JSON `"call_arguments": {"order_id": "ORD-102"}` (left out when empty), places the payload only on calls whose top-level arguments include each named one with an equal JSON scalar of the same type; any other call to the tool is left unchanged with an `unmatched` outcome at occurrence 0, and occurrence rules count only matching calls. A single-object result whose record id is in the result only (`get_referral(patient_id)` answering `{"referral_id": "REF-1", ...}`) is matched on the result instead: `InjectionTarget(tool="get_referral", surface=SelectorSurface.STRUCTURED_CONTENT, structured_content_path=("reason",), result_record=RecordSelector("REF-1", field="referral_id"))`, in JSON `"result_record": {"field": "referral_id", "equals": "REF-1"}` (left out when None; `field` omitted means `id`), places the payload only on a result whose structured content is an object whose `field` equals the value exactly, as the list record selector matches. Use `call_arguments` when the id is an argument of the call and `result_record` when it is only in the result; both may be given, and both must match. Any other result, one without structured content included (a `content_block` target is decided by the structured content too), is left unchanged with an `unmatched` outcome at occurrence 0 (`result field 'referral_id' is 'REF-2', not 'REF-1'; result unchanged`, `result field 'referral_id' is missing; result unchanged`, `result has no structured content to match field 'referral_id'; result unchanged`), and so is a call whose upstream produced no result; occurrence rules count only the results that match, in the order they come back. `InterceptorCapability.result_record` declares support (`MidojoMCP` has it), and `capability_gaps` reports a `result_record` gap otherwise.
 
@@ -63,7 +65,7 @@ When `recorder=` is injected, a non-empty plan also requires `evaluation_id=`. T
 
 There is no session-end hook that both identifies the scope and leaves outcomes available for inspection. A long-lived MidojoMCP serving many session-backed evaluations therefore retains its engine's counters and outcomes for each seen scope until process exit. Prefer one interceptor per evaluation where the deployment permits it.
 
-Automated generator output should go through `instruction_from_generator_for_plan(output, episode.plan)`. It accepts only tools, structured-content field paths, and modes listed in that plan's `generator_permissions`.
+Automated generator output should go through `instruction_from_generator_for_plan(output, spec.plan)`. It accepts only tools, structured-content field paths, and modes listed in that plan's `generator_permissions`.
 
 ## Placement engines
 
@@ -86,6 +88,16 @@ A server checks the plan only when its engine declares one (`placement.Planned`)
 `MidojoMCP(name, recorder=..., world=...)` records through `recorder` and gives simulated tools `world`; without them it uses the control plane at `control_plane_url` for the request's session. Forwarding (`mirror_upstream`) needs only a recorder: a server built with a recorder and no `control_plane_url` has no environment, and `ctx.env` raises. Both implementations raise `midojo_sdk.recorder.ControlPlaneRejectedError` when the control plane refuses an event, with its `kind` (a `RejectionKind`, such as `call_conflict` or `session_closed`) and `late_fact`, and `midojo_sdk.recorder.InvalidRequestError` for a request the API can't take as sent, such as a `call_id` over 256 characters (over HTTP it's the 422, and also an `httpx.HTTPStatusError`); over HTTP, any other failure is an `httpx` error. Each recorder sends an event once: wrap one in `RetryingRecorder(recorder, retryable=midojo_sdk.client.transient)` to resend after a transport error or a 5xx, as `MidojoMCP` does with the control plane's. A rejection or an invalid request is never resent, whatever `retryable` says. `ControlPlaneRecorder(client)` and `ToolContext(client=...)` still work, deprecated.
 
 A record is what the agent asked for and what the layer returned to it, not proof the agent received the result, nor of an effect; the environment is what simulated tools did; what a forwarded call did to a real system is neither, and a runtime observes it. Nothing makes them one transaction: a record, an environment change and a real tool's effect each commit, or fail, on their own.
+
+## Remote interception and the rubric judge
+
+Three modules support a remote interceptor and a judge service; most interception layers don't need them:
+
+- `midojo_sdk.link` holds the `midojo-binding-v1` frame codec and the service side of a remote interception link: `LinkRecorder` and `LinkWorld` record and read the environment through frames instead of HTTP. It imports only the standard library and `midojo_sdk`.
+- `midojo_sdk.binding` is the driver's end of that link: `Binding` dials out to the interceptor service over one WebSocket per evaluation, with the subprotocol `midojo-binding.v1`. It needs the `mcp` extra (`websockets`).
+- `midojo_sdk.rubric_judge` is a strict yes/no semantic judge for a reply oracle. It builds the evidence and the request from a rubric and the recorded calls, and checks the response. It imports only the standard library.
+
+The [MiDojo README](https://github.com/asago-ai/midojo#run-the-interceptor-as-a-separate-service) describes how to run the interceptor service.
 
 ## LangChain agents
 

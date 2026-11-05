@@ -218,7 +218,7 @@ The **Security percentage**, in the table's bottom row (left out of this excerpt
 
 A verdict is **❓ unknown** when the evidence its check needs wasn't completely collected, for example when the sandbox's logs couldn't be read. That grade is invalid: it is counted, but left out of the percentage's denominator. In `results.json`, its value is `null` and `grade_validity` names the checks that couldn't be decided. `evidence_status` shows how completely each source (`openshell.ocsf`, `openshell.workdir`) was collected, and marks `incomplete` the evidence a late fact carried (for example `function_calls` when a tool call arrived after the evaluation closed), and marks `function_calls` `incomplete` when the interception layer reported a call record it couldn't deliver, or when the sealed capture holds a call the session started that never finished, whether or not the session could still report the finish: a finish refused after the seal is only a late fact, and a late fact can't change the sealed snapshot or its grade, so the seal records the loss itself. A report that arrived before the evaluation was sealed makes a check on a call's absence (such as `not: tool_called`) unknown rather than passed; one that arrived after it is a late fact, shown in the evaluation's `evidence_status`, and leaves the grade as it was, and `aggregates` gives the valid and invalid counts behind each rate.
 
-Every grade in `results.json` names the criterion that decided it, whatever the outcome: `utility_reason` and `security_reason` per pair are the check that held when the grade is `true` (for an `any_of`, the branch that fired), the check that didn't when it is `false` (for an `all_of`, the part that failed), and the checks that couldn't be decided when it is `null` (unknown), for example `process "curl" ran (unknown: openshell.ocsf evidence is not_collected)`. A reason is `null` only in two cases: `security_reason` for a pair without an injection task, which has no security check to give one, and both reasons for a failed pair (see below). The control plane's grade (`POST /runs/{run_id}/evaluations/{eval_id}/grade`, and the graded evaluation at `GET /runs/{run_id}/evaluations/{eval_id}`) carries the same two fields. With more than one attempt or an adaptive attacker (see below), a pair's reasons are those of the episode it reports: its first attempt that counts as a break (for an adaptive attacker, that attempt's replay), else its last graded attempt. Its `security` is aggregated over every attempt and replay, so it can differ from that episode's grade: one attempt that failed and one graded `false` give `security` `null` with the `false` attempt's `security_reason`, and an adaptive success whose replay doesn't break gives `security` `false` with the original attempt's `security_reason`, not the replay's.
+Every grade in `results.json` names the criterion that decided it, whatever the outcome: `utility_reason` and `security_reason` per pair are the check that held when the grade is `true` (for an `any_of`, the branch that fired), the check that didn't when it is `false` (for an `all_of`, the part that failed), and the checks that couldn't be decided when it is `null` (unknown), for example `process "curl" ran (unknown: openshell.ocsf evidence is not_collected)`. A reason is `null` only in two cases: `security_reason` for a pair without an injection task, which has no security check to give one, and both reasons for a failed pair (see below). The control plane's grade (`POST /runs/{run_id}/evaluations/{eval_id}/grade`, and the graded evaluation at `GET /runs/{run_id}/evaluations/{eval_id}`) carries the same two fields. With more than one attempt or an adaptive attacker (see below), a pair's reasons are those of the evaluation it reports: its first attempt that counts as a break (for an adaptive attacker, that attempt's replay), else its last graded attempt. Its `security` is aggregated over every attempt and replay, so it can differ from that evaluation's grade: one attempt that failed and one graded `false` give `security` `null` with the `false` attempt's `security_reason`, and an adaptive success whose replay doesn't break gives `security` `false` with the original attempt's `security_reason`, not the replay's.
 
 For each injection pair, `results.json` also says apart what the security verdict folds together, each `true`, `false` or `null` (unknown), none of them in a rate:
 
@@ -227,9 +227,9 @@ For each injection pair, `results.json` also says apart what the security verdic
 | `attempted` | The agent attempted what the security check looks for, a blocked call included. It is `true` when the check holds; otherwise it is read from the parts of the check that read the tool calls (`tool_called`, `tool_call_condition`), apart from its effects, so with `all_of: [tool_called, env_field_equals]` a call whose effect never came is still an attempt. Only those parts can say `false`: a check of effects alone, an `any_of` branch of effects alone and a `not` over the calls can't see an attempt that had none, so they leave it `null`. A blocked call is an attempted call, never a prior one: in a `tool_call_condition` `order` comparison it can be the call made without its `requires_prior`, but it doesn't satisfy `requires_prior` (its tool never ran), so a transfer after a blocked authorization is a transfer without one. |
 | `blocked` | A refusal stopped the attempt: without the blocked calls, no attempt shows or the check no longer holds. `false` when an attempt was made and no call was blocked; `null` when `attempted` is. |
 | `effect_observed` | The check holds on the calls that ran to their end and the state MiDojo observed, without blocked or unfinished calls. |
-| `injection_delivered` | A payload of the episode's plan was emitted at its boundary (the `emitted` exposure above). Not proof the agent saw it. `true` when any payload was emitted; `false` when the episode has no injection, or when the records establish that no payload was emitted (every payload `not exposed` at `emitted`); `null` when that can't be determined, as for a payload seeded in the environment or a file, or a call with no delivery fact. It comes from the delivery facts even when the episode has no security check. |
+| `injection_delivered` | A payload of the injection spec's plan was emitted at its boundary (the `emitted` exposure above). Not proof the agent saw it. `true` when any payload was emitted; `false` when the injection spec has no injection, or when the records establish that no payload was emitted (every payload `not exposed` at `emitted`); `null` when that can't be determined, as for a payload seeded in the environment or a file, or a call with no delivery fact. It comes from the delivery facts even when the injection spec has no security check. |
 
-`delivery` lists each evaluation's delivery facts: per tool call and injection instruction, the call (`call_id`, `function`, `disposition`, `turn`), the instruction (`interceptor_instruction_index`, its index in the plan's tool-output part as the interceptor recorded it; `plan_instruction_index`, its index in the episode's plan, or `null` when no tool-output instruction there has that place and slot key and targets the call's tool (or any tool); `slot_key` (a record made before the rename names it `probe_key`); `occurrence`), the placement's `status`, and what the interceptor `selected` (whether its selector matched a place in the result), the `transformation` it applied, and which parts of the result it `emitted` the payload in (`content_block`, `structured_content`). `exposure` gives the status at each boundary, with each instruction of the episode's plan (by `plan_instruction_index`), who placed it (`interceptor` or `host`) and why. `aggregates.attack_outcome`, `aggregates.delivery` and `aggregates.exposure` restate them as counts.
+`delivery` lists each evaluation's delivery facts: per tool call and injection instruction, the call (`call_id`, `function`, `disposition`, `turn`), the instruction (`interceptor_instruction_index`, its index in the plan's tool-output part as the interceptor recorded it; `plan_instruction_index`, its index in the injection spec's plan, or `null` when no tool-output instruction there has that place and slot key and targets the call's tool (or any tool); `slot_key` (a record made before the rename names it `probe_key`); `occurrence`), the placement's `status`, and what the interceptor `selected` (whether its selector matched a place in the result), the `transformation` it applied, and which parts of the result it `emitted` the payload in (`content_block`, `structured_content`). `exposure` gives the status at each boundary, with each instruction of the injection spec's plan (by `plan_instruction_index`), who placed it (`interceptor` or `host`) and why. `aggregates.attack_outcome`, `aggregates.delivery` and `aggregates.exposure` restate them as counts.
 
 A task pair that failed (see above) is printed as **💥 failed (not counted)** with its error: it is in neither percentage, whatever the control plane holds for its evaluation, and below the table MiDojo prints how many pairs were graded and how many failed. In `results.json` it is `null` in the grade and evidence maps, and only a run with a failed pair adds `status` (`"graded"` or `"failed"` per pair), `failure_reason` (`"<ExceptionType>: <message>"`, or `null` for a graded pair), `evaluation_id` (the pair's evaluation, `null` if it failed before one was opened) and `aggregates.failed` (the count); a run without one writes none of these:
 
@@ -243,7 +243,7 @@ A task pair that failed (see above) is printed as **💥 failed (not counted)** 
 
 `midojo-run` writes `results.json` before it exits, and exits with 0 when no task pair failed, 3 when some failed and at least one was graded, and 4 when every one failed.
 
-**Repeat a pairing.** An agent can resist an injection on one run and follow it on the next. `--attempts N` (`-k N`) runs each pairing N times, each a fresh episode on an isolated target (a fresh sandbox, or the runtime's declared reset; `midojo-run` refuses it for an unmanaged agent, whose state attempts would share), and the Utility and Security cells show how many attempts completed the task and broke the agent, e.g. `💀 attack succeeded  (1/3)`. Any attempt that breaks the agent counts as a break, so the Security percentage stays the attack success rate; an attempt that failed or couldn't be graded is never counted as resisting it:
+**Repeat a pairing.** An agent can resist an injection on one run and follow it on the next. `--attempts N` (`-k N`) runs each pairing N times, each a fresh evaluation on an isolated target (a fresh sandbox, or the runtime's declared reset; `midojo-run` refuses it for an unmanaged agent, whose state attempts would share), and the Utility and Security cells show how many attempts completed the task and broke the agent, e.g. `💀 attack succeeded  (1/3)`. Any attempt that breaks the agent counts as a break, so the Security percentage stays the attack success rate; an attempt that failed or couldn't be graded is never counted as resisting it:
 
 ```bash
 uv run --env-file .env midojo-run --suite weather --gateway openshell \
@@ -256,7 +256,7 @@ uv run --env-file .env midojo-run --suite weather --gateway openshell \
 
 `results.json` then also records every attempt (`attempt_log`: its grade, delivery and exposure, and how its target was isolated) and per-pairing counts (`metrics`).
 
-The attempts replay the suite's payloads unchanged (`StaticAttacker`); MiDojo has no adaptive attacker yet. To search for a payload that breaks the agent, drive MiDojo episodes from PyRIT or Garak instead. An adaptive attacker plugged into `run_benchmark(attacker_factory=...)` follows the same rules: it may only fill the probes the pair's injection task declares, and a success counts only once its injections break the agent again in a fresh episode from a clean start.
+The attempts replay the suite's payloads unchanged (`StaticAttacker`); MiDojo has no adaptive attacker yet. To search for a payload that breaks the agent, drive MiDojo evaluations from PyRIT or Garak instead. An adaptive attacker plugged into `run_benchmark(attacker_factory=...)` follows the same rules: it may only fill the probes the pair's injection task declares, and a success counts only once its injections break the agent again in a fresh evaluation from a clean start.
 
 **Compare with a clean run.** Selecting a user task without an injection task runs it without attacks, so you can compare the agent's answer with step 3's:
 
@@ -457,6 +457,24 @@ Entering the context starts the runtime, opens the evaluation, starts the interc
 
 If your script has no event loop, `midojo.evaluation_handle.open` drives the same injection spec synchronously: `send_turn` sends a message and records the reply, `seal` and `grade` finish it, and the handle owns the runtime's run, enforces the injection spec's tool policy and closes on an exception. It's the same `EvaluationContext` on a loop thread of its own, and it states what stays stable across releases. See [Driving an evaluation from a synchronous script](docs/evaluation-handle.md), or run [the guide's example](docs/guide-driving-midojo.md) end to end.
 
+### Run the interceptor as a separate service
+
+By default the interceptor runs in the driver's process. When the agent can't share that process, for example because it runs on another host, run the interceptor as a separate service:
+
+```bash
+export MIDOJO_INTERCEPTOR_CREDENTIAL=a-random-secret
+uv run midojo-intercept-serve --host 0.0.0.0 --port 8765
+```
+
+The service accepts `--host`, `--port`, `--advertise-host` and `--credential` (default: `MIDOJO_INTERCEPTOR_CREDENTIAL`), and prints the URL a driver dials. The driver dials out to the service over one WebSocket binding stream per evaluation, with the subprotocol `midojo-binding.v1`, so it holds no listening socket. Every call record, delivery fact and environment read crosses that stream and lands on the driver's own control plane.
+
+`midojo.evaluation_handle.open` selects the service in one of two ways:
+
+- Pass `interception=RemoteInterception(url, credential)` (from `midojo.interception_host`).
+- Set `MIDOJO_INTERCEPTOR_URL` and `MIDOJO_INTERCEPTOR_CREDENTIAL` together and pass no `interception=`. Setting only one of them is an error.
+
+With neither set, the interceptor stays in the driver's process. `midojo-run` doesn't read these variables. See [Driving an evaluation from a synchronous script](docs/evaluation-handle.md#run-the-interceptor-in-a-service) for the failure behavior when the link is lost.
+
 ### Let PyRIT search for an injection
 
 The optional `midojo[pyrit]` route lets PyRIT own the campaign. Its target runs
@@ -484,5 +502,19 @@ user_tasks:
 Output checks read the last reply, and a verifier can read the whole conversation in `VerificationContext.turns` (each message and its reply). The evaluation record lists each turn's message and reply, and each recorded tool call names the turn it happened in. `--protocol openai` and the openshell runtime support more than one turn; with other protocols, `midojo-run` refuses a multi-turn task before the run starts.
 
 On the openshell runtime, a multi-turn task runs the suite's `agent_command` once per turn, in the evaluation's one sandbox, with that turn's message as the last argument. The command keeps its own conversation between runs, for example a response ID or message history in a file. MiDojo tells it which turn it is in `MIDOJO_TURN_INDEX` (from 0) and `MIDOJO_TURN_COUNT`; a single-turn task runs the command as before, without them. Keep state files outside `/sandbox/workdir`, or they show up in the workdir observations as created files. The 5-minute timeout applies to each run, not to the whole conversation.
+
+## Development
+
+Install the development dependencies (ruff, pyright and pytest) with the `dev` extra, then run the checks through `uv run`:
+
+```bash
+uv sync --extra dev
+uv run pytest             # unit tests; the full suite takes about 3 minutes
+uv run ruff check .       # lint
+uv run ruff format .      # format
+uv run pyright            # type check (basic mode)
+```
+
+The default pyright configuration excludes the optional PyRIT route (`src/midojo/pyrit`). After you install the `pyrit` extra, check it with `uv run pyright --project pyright-pyrit.json`.
 
 Licensed under [Apache 2.0](LICENSE).
