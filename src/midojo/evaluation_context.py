@@ -31,6 +31,7 @@ import contextlib
 import contextvars
 import logging
 import uuid
+import warnings
 from collections.abc import Awaitable, Callable, Coroutine
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
@@ -851,8 +852,9 @@ async def _in_thread(function: Callable[..., T], /, *args: Any, **kwargs: Any) -
 
 
 def open_evaluation(
-    injection_spec: InjectionSpec,
+    injection_spec: InjectionSpec | None = None,
     *,
+    episode: InjectionSpec | None = None,
     runtime: AgentRuntime | None = None,
     interception: HostInterception | None = None,
     control: ControlPlane | ControlClient | None = None,
@@ -861,6 +863,10 @@ def open_evaluation(
     progress: Callable[[EvaluationStep], AbstractContextManager[object]] | None = None,
 ) -> EvaluationContext:
     """A context that runs the injection spec once, and seals its evaluation when it's left.
+
+    ``episode`` is the deprecated old name of ``injection_spec``: it still opens
+    that injection spec, with a ``DeprecationWarning``, for one cycle. Pass one
+    of the two, never both.
 
     ``runtime`` is where the agent runs. By default it's a fresh one from the
     injection spec (``injection_spec.new_runtime()``), whose run the context starts
@@ -902,6 +908,15 @@ def open_evaluation(
     pass already blocks it too, rather than opening with the block silently
     unenforced.
     """
+    if episode is not None:
+        if injection_spec is not None:
+            raise TypeError(
+                "open_evaluation() got injection_spec and its deprecated alias episode: pass only injection_spec"
+            )
+        warnings.warn("episode= is deprecated; use injection_spec=", DeprecationWarning, stacklevel=2)
+        injection_spec = episode
+    if injection_spec is None:
+        raise TypeError("open_evaluation() missing 1 required positional argument: 'injection_spec'")
     _, blocked = tool_policy(injection_spec.tools)
     if blocked and not (interception is not None and set(blocked) <= set(interception.blocked)):
         raise ValueError(

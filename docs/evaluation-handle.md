@@ -96,7 +96,7 @@ The reaper belongs to the handle, which starts it. An asynchronous driver, one t
 `midojo.evaluation_handle` is the synchronous driver API, and this is what stays stable within a 0.x minor release:
 
 - The names in `HANDLE_METHODS`, and the properties and methods above.
-- The exception classes in the module, and their `reason` strings: `HandleError` (`handle-error`), `HandleOwnerError` (`handle-owner`), `HandleClosedError` (`handle-closed`), `SendTurnUnsupported` (`send-turn-unsupported`), `RepeatWithoutResetError` (`repeat-without-reset`), `LiveEvaluationLimitError` (`live-episode-limit`) and `LinkLostError` (`link-lost`).
+- The exception classes in the module, and their `reason` strings: `HandleError` (`handle-error`), `HandleOwnerError` (`handle-owner`), `HandleClosedError` (`handle-closed`), `SendTurnUnsupported` (`send-turn-unsupported`), `RepeatWithoutResetError` (`repeat-without-reset`), `LiveEvaluationLimitError` (`live-evaluation-limit`) and `LinkLostError` (`link-lost`).
 - `HANDLE_API_VERSION`, which is 1, and `DEFAULT_MAX_LIVE_EVALUATIONS`.
 - New keyword arguments to `open` and `send_turn` are appended with defaults, so existing calls keep working.
 

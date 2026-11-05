@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import warnings
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from types import ModuleType
@@ -133,6 +134,10 @@ class MidojoInjectionSpecTarget(PromptTarget):
     use :meth:`from_suite`, which also checks the probe key. ``drive`` sends
     the episode's benign turns using ``ep.turn`` and the agent's binding.
 
+    ``episode_for_payload`` is the deprecated old name of
+    ``injection_spec_for_payload``: it still compiles the candidate, with a
+    ``DeprecationWarning``, for one cycle. Pass one of the two, never both.
+
     A supplied runtime belongs to a run the caller starts and ends. Every
     evaluation requests its declared reset, or uses its disposable target.
     Sends and scorer replays are serialized on this instance; do not share
@@ -143,13 +148,31 @@ class MidojoInjectionSpecTarget(PromptTarget):
     def __init__(
         self,
         *,
-        injection_spec_for_payload: Callable[[str], InjectionSpec],
+        injection_spec_for_payload: Callable[[str], InjectionSpec] | None = None,
+        episode_for_payload: Callable[[str], InjectionSpec] | None = None,
         surface: InjectionPlan,
         drive: Callable[[EvaluationContext], Awaitable[None]],
         runtime: AgentRuntime,
         interception: HostInterception | None = None,
         control: ControlPlane | None = None,
     ) -> None:
+        if episode_for_payload is not None:
+            if injection_spec_for_payload is not None:
+                raise TypeError(
+                    "MidojoInjectionSpecTarget.__init__() got injection_spec_for_payload and its deprecated "
+                    "alias episode_for_payload: pass only injection_spec_for_payload"
+                )
+            warnings.warn(
+                "episode_for_payload= is deprecated; use injection_spec_for_payload=",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            injection_spec_for_payload = episode_for_payload
+        if injection_spec_for_payload is None:
+            raise TypeError(
+                "MidojoInjectionSpecTarget.__init__() missing 1 required keyword-only argument: "
+                "'injection_spec_for_payload'"
+            )
         if len(surface.instructions) != 1 or len(surface.probe_payloads) > 1:
             raise OutOfSurfaceError("a PyRIT target requires exactly one declared injection instruction")
         isolation = attempt_isolation(runtime)
