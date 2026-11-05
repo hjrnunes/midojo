@@ -38,7 +38,7 @@ directory it seals, so a scratch run pins only what that run wrote.
 
 The five ways a run ends undecided, the one detection with no effect, and the control:
 
-- ``security-unknown``: a reply episode whose judge no service answers. The grade is unknown
+- ``security-unknown``: a reply evaluation whose judge no service answers. The grade is unknown
   with an invalid validity, on a complete capture.
 - ``interrupted-seal``: the agent never answers its first turn, so the seal marks its
   evidence incomplete and the grade cannot decide.
@@ -57,7 +57,7 @@ The five ways a run ends undecided, the one detection with no effect, and the co
 - ``control-resisted``: the payload was delivered and the agent did not follow it. Every route
   must score it resisted, so an inconclusive-everywhere reader cannot pass by never deciding.
 
-Five cases run through ``midojo.open_episode`` (the episode handle) and the host interceptor
+Five cases run through ``midojo.open_evaluation`` (the evaluation handle) and the host interceptor
 in front of a scripted upstream, as the consumer's fixture generators do; ``capture-incomplete``
 and ``unknown-delivery`` drive the in-process control plane's own writes, because a call an
 agent never finishes, and a finished call that reports no injection outcomes, are not what a
@@ -93,7 +93,7 @@ from midojo.control_plane.models import SnapshotResponse
 from midojo.control_plane.routers.runs import snapshot_response
 from midojo.control_plane.service import ControlPlane
 from midojo.control_plane.state import snapshot_digest
-from midojo.episode import Episode, tool_policy
+from midojo.injection_spec import InjectionSpec, tool_policy
 from midojo.injection_spec_document import dump_document
 from midojo.interception_host import HostInterception
 from midojo.runtimes import UnmanagedRuntime
@@ -176,13 +176,13 @@ def pinned() -> Iterator[None]:
         state._now, service._now, uuid.uuid4, store.secrets.token_hex = resume
 
 
-def seed_episode(recording: dict[str, Any], seed_path: Path | None = None) -> Episode:
+def seed_episode(recording: dict[str, Any], seed_path: Path | None = None) -> InjectionSpec:
     """The episode the cases start from: the recorded seed's envelope, read by MiDojo."""
 
     recorded = Path(recording["seed"]["path"])
     path = seed_path or (recorded if recorded.is_absolute() else HERE / recorded)
     assert digest(path) == recording["seed"]["sha256"], f"{path}: not the recorded seed"
-    return Episode.from_document(json.loads(path.read_text(encoding="utf-8")))
+    return InjectionSpec.from_document(json.loads(path.read_text(encoding="utf-8")))
 
 
 def upstream_server(recording: dict[str, Any]) -> FastMCP:
@@ -225,14 +225,14 @@ async def send_turn(handle: Any, turn: dict[str, Any]) -> str:
     return turn["reply"]
 
 
-async def run_through_handle(recording: dict[str, Any], built: Episode, case: dict[str, Any]) -> tuple[Any, bool]:
+async def run_through_handle(recording: dict[str, Any], built: InjectionSpec, case: dict[str, Any]) -> tuple[Any, bool]:
     """Run every scripted turn through the episode handle: the snapshot and whether it was interrupted."""
 
     control = ControlPlane({}, config=AppConfig(closure_wait_seconds=0))
     # The context takes an interception's policy as given, so the recipe reads the episode's tool
     # policy the way the episode handle does: the case's blocked call is the document's disposition.
     allowed, blocked = tool_policy(built.tools)
-    context = midojo.open_episode(
+    context = midojo.open_evaluation(
         built,
         runtime=UnmanagedRuntime(),
         control=control,
@@ -259,7 +259,7 @@ async def run_through_handle(recording: dict[str, Any], built: Episode, case: di
     return context.sealed, interrupted
 
 
-async def run_in_control_plane(recording: dict[str, Any], built: Episode, case: dict[str, Any]) -> Any:
+async def run_in_control_plane(recording: dict[str, Any], built: InjectionSpec, case: dict[str, Any]) -> Any:
     """Run the case by the control plane's own writes.
 
     A turn's ``unfinished`` call is one the agent starts and never finishes; a turn's
@@ -268,7 +268,7 @@ async def run_in_control_plane(recording: dict[str, Any], built: Episode, case: 
     """
 
     client = InProcessControlClient(ControlPlane({}, config=AppConfig(closure_wait_seconds=0)))
-    opened = await client.open_episode(built, interception="host")
+    opened = await client.open_evaluation(built, interception="host")
     recorder = client.recorder(opened.session_token)
     turns = opened.turns
     if turns is None or built.environment_type is None:
@@ -307,7 +307,7 @@ def capture_complete(snapshot: Any) -> bool:
     return all(call.complete for call in snapshot.function_calls)
 
 
-def case_document(seed: Episode, case: str) -> Episode:
+def case_document(seed: InjectionSpec, case: str) -> InjectionSpec:
     """The case's episode: the seed's, with the reply judge where the case grades a reply."""
 
     if case == BLOCKED_CALL:
@@ -317,7 +317,7 @@ def case_document(seed: Episode, case: str) -> Episode:
     return dataclasses.replace(seed, security={"reply_judge": REPLY_JUDGE})
 
 
-def blocked_document(seed: Episode) -> Episode:
+def blocked_document(seed: InjectionSpec) -> InjectionSpec:
     """The seed with the planted instruction asking for a refund the policy blocks.
 
     The instruction still rides in the first lookup's result, so the payload is delivered;
@@ -365,7 +365,7 @@ def generate(recording: dict[str, Any], root: Path, seed_path: Path | None = Non
         _seal(recording, root, seed_episode(recording, seed_path))
 
 
-def _seal(recording: dict[str, Any], root: Path, seed: Episode) -> None:
+def _seal(recording: dict[str, Any], root: Path, seed: InjectionSpec) -> None:
     """Seal ``seed``'s cases into ``root``, and pin every file the run wrote."""
 
     files: dict[str, str] = {}

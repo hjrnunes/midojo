@@ -13,7 +13,7 @@ from pyrit.score.scorer import Scorer
 from pyrit.score.scorer_prompt_validator import ScorerPromptValidator
 from pyrit.score.true_false.true_false_scorer import MessageTrueFalseScorer
 
-from midojo.pyrit.target import METADATA_PREFIX, MidojoEpisodeTarget, MidojoVerdict
+from midojo.pyrit.target import METADATA_PREFIX, MidojoInjectionSpecTarget, MidojoVerdict
 
 # The rationale a campaign feeds back to the attacker: one fixed text per outcome. The check's description
 # (its fields and values), failure diagnostics and replay details stay in the score metadata.
@@ -27,7 +27,7 @@ SECURITY_REASON_KEY = METADATA_PREFIX + "security_reason"
 REPLAY_REASON_KEY = METADATA_PREFIX + "replay_reason"
 
 
-def verdict_of(message: Message, *, target: MidojoEpisodeTarget) -> MidojoVerdict | None:
+def verdict_of(message: Message, *, target: MidojoInjectionSpecTarget) -> MidojoVerdict | None:
     """Read the target's receipt by response identity, including a replay already scored."""
     return target.verdict_of(message)
 
@@ -55,7 +55,7 @@ def _metadata(verdict: MidojoVerdict | None, outcome: str) -> dict[str, str | in
 
 
 class _VerdictScoring(Scorer):
-    _target: MidojoEpisodeTarget
+    _target: MidojoInjectionSpecTarget
     _reveal_check: bool
     _score_type: Literal["true_false", "float_scale"]
 
@@ -119,7 +119,7 @@ class MidojoVerdictScorer(_VerdictScoring, MessageTrueFalseScorer):
 
     _score_type = "true_false"
 
-    def __init__(self, *, target: MidojoEpisodeTarget, reveal_check: bool = False) -> None:
+    def __init__(self, *, target: MidojoInjectionSpecTarget, reveal_check: bool = False) -> None:
         self._target = target
         self._reveal_check = reveal_check
         super().__init__(validator=ScorerPromptValidator(supported_data_types=["text"], supported_roles=["assistant"]))
@@ -133,7 +133,7 @@ class MidojoVerdictFloatScorer(_VerdictScoring, MessageFloatScaleScorer):
 
     _score_type = "float_scale"
 
-    def __init__(self, *, target: MidojoEpisodeTarget, reveal_check: bool = False) -> None:
+    def __init__(self, *, target: MidojoInjectionSpecTarget, reveal_check: bool = False) -> None:
         self._target = target
         self._reveal_check = reveal_check
         super().__init__(validator=ScorerPromptValidator(supported_data_types=["text"], supported_roles=["assistant"]))

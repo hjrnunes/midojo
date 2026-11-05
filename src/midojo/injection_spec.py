@@ -14,7 +14,7 @@ describes. The environment type and the verifier implementations the checks
 resolve to are trusted code, shared by reference, not data.
 
 A suite compiles one of its user task x injection task pairs into an injection
-spec (:meth:`midojo.yaml_task_suite.YAMLTaskSuite.episode`); a direct caller
+spec (:meth:`midojo.yaml_task_suite.YAMLTaskSuite.injection_spec`); a direct caller
 builds one from these parts and runs it through the control plane
 (:meth:`midojo.control_plane.service.ControlPlane.open_evaluation`) with no
 suite or run registered.
@@ -58,7 +58,7 @@ if TYPE_CHECKING:
     from midojo.verifiers.judge import JudgeRecord
 
 # The name a runtime is built under when the episode has no suite.
-DEFAULT_EPISODE_NAME = "episode"
+DEFAULT_EVALUATION_NAME = "evaluation"
 
 _RUNTIME_DEFINITION: TypeAdapter[AgentRuntimeDefinition] = TypeAdapter(AgentRuntimeDefinition)
 # Exactly these types, not their subclasses: a subclass can carry mutable state.
@@ -377,7 +377,7 @@ class InjectionSpec:
         ):
             raise TypeError(f"environment_type must be an Environment subclass, not {self.environment_type!r}")
         if self.environment_type is None:
-            name = self.suite_name or DEFAULT_EPISODE_NAME
+            name = self.suite_name or DEFAULT_EVALUATION_NAME
             object.__setattr__(self, "environment_type", infer_environment_type(name, thaw(environment or {})))
 
     def __deepcopy__(self, _memo: dict[int, Any]) -> InjectionSpec:
@@ -422,7 +422,7 @@ class InjectionSpec:
         package is a named gap before anything is constructed.
         """
         self.check_runtime_available(registry=registry)
-        return build_runtime(self.suite_name or DEFAULT_EPISODE_NAME, self.runtime_definition(), registry=registry)
+        return build_runtime(self.suite_name or DEFAULT_EVALUATION_NAME, self.runtime_definition(), registry=registry)
 
     def provision_environment(self) -> Environment:
         """A fresh environment from the initial state; the episode keeps none of it."""

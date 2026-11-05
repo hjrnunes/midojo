@@ -33,8 +33,8 @@ from midojo.control_plane.inprocess_control import InProcessControlClient
 from midojo.control_plane.main import create_app
 from midojo.control_plane.models import GradeResponse
 from midojo.control_plane.service import ControlPlane
-from midojo.episode import Episode
-from midojo.episode_context import open_episode
+from midojo.evaluation_context import open_evaluation
+from midojo.injection_spec import InjectionSpec
 from midojo.orchestrator import run_benchmark
 from midojo.runtimes import UnmanagedRuntime
 from midojo.types import Environment, FunctionCallRecord
@@ -425,8 +425,8 @@ def test_a_spec_parses_to_its_settings():
 # --- grades: the episode, the control plane (in process and over HTTP), results.json ---
 
 
-def judged_episode(url_env: str = "TEST_JUDGE_URL") -> Episode:
-    return Episode(
+def judged_episode(url_env: str = "TEST_JUDGE_URL") -> InjectionSpec:
+    return InjectionSpec(
         turns=["Pay my bills"],
         security={"reply_judge": {"claim": CLAIM, "url_env": url_env, "token_env": "TEST_JUDGE_TOKEN"}},
         utility={"output_contains": "wire"},
@@ -450,7 +450,7 @@ async def test_an_episode_graded_in_process_keeps_its_judgement_and_never_blocks
     try:
         plane = ControlPlane({}, config=AppConfig(closure_wait_seconds=0))
         episode = judged_episode()
-        async with open_episode(episode, runtime=UnmanagedRuntime(), control=plane) as ep:
+        async with open_evaluation(episode, runtime=UnmanagedRuntime(), control=plane) as ep:
 
             async def agent(message: str) -> str:
                 return REPLY
@@ -479,7 +479,7 @@ async def test_an_episode_graded_in_process_keeps_its_judgement_and_never_blocks
 
 
 def test_a_grade_without_a_judge_dumps_as_it_always_did():
-    episode = Episode(turns=["hi"], utility={"output_contains": "hi"})
+    episode = InjectionSpec(turns=["hi"], utility={"output_contains": "hi"})
     env = episode.provision_environment()
     graded = episode.grade("hi", env, env, [])
 
@@ -542,10 +542,10 @@ async def test_a_yaml_check_grades_over_http_off_the_event_loop(judged_suite, ju
     judge.delay = 0.5
     app = create_app({"judged": judged_suite}, config=AppConfig(closure_wait_seconds=0))
     run = app.state.control.create_run("judged")
-    episode = judged_suite.episode("pay_bills", "wire", judged_suite.get_probes_for_task("wire"))
+    episode = judged_suite.injection_spec("pay_bills", "wire", judged_suite.get_probes_for_task("wire"))
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app)) as http:
         control = ControlPlaneClient("http://control", http=http)
-        async with open_episode(episode, runtime=UnmanagedRuntime(), control=control, run_id=run.id) as ep:
+        async with open_evaluation(episode, runtime=UnmanagedRuntime(), control=control, run_id=run.id) as ep:
 
             async def agent(message: str) -> str:
                 return REPLY
@@ -602,7 +602,7 @@ async def test_results_json_keeps_the_judgements_and_never_the_token(judged_suit
 
 
 async def sealed_judged_evaluation(plane: ControlPlane) -> str:
-    async with open_episode(judged_episode(), runtime=UnmanagedRuntime(), control=plane) as ep:
+    async with open_evaluation(judged_episode(), runtime=UnmanagedRuntime(), control=plane) as ep:
 
         async def agent(message: str) -> str:
             return REPLY
@@ -636,10 +636,10 @@ async def test_concurrent_grades_over_http_ask_the_judge_once_and_get_the_same_g
     judge.delay = 0.5
     app = create_app({"judged": judged_suite}, config=AppConfig(closure_wait_seconds=0))
     run = app.state.control.create_run("judged")
-    episode = judged_suite.episode("pay_bills", "wire", judged_suite.get_probes_for_task("wire"))
+    episode = judged_suite.injection_spec("pay_bills", "wire", judged_suite.get_probes_for_task("wire"))
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app)) as http:
         control = ControlPlaneClient("http://control", http=http)
-        async with open_episode(episode, runtime=UnmanagedRuntime(), control=control, run_id=run.id) as ep:
+        async with open_evaluation(episode, runtime=UnmanagedRuntime(), control=control, run_id=run.id) as ep:
 
             async def agent(message: str) -> str:
                 return REPLY
@@ -925,7 +925,7 @@ def test_a_check_with_a_lone_surrogate_is_refused_when_parsed_and_its_episode_to
     with pytest.raises(ValueError, match=f"reply_judge: {setting} is not UTF-8 text: it has a lone surrogate"):
         parse_check({"reply_judge": spec})
     with pytest.raises(ValueError, match="is not UTF-8 text"):
-        Episode(turns=["Pay my bills"], security={"reply_judge": spec})
+        InjectionSpec(turns=["Pay my bills"], security={"reply_judge": spec})
 
 
 def unparsed(value: dict) -> ReplyJudge:
@@ -933,9 +933,9 @@ def unparsed(value: dict) -> ReplyJudge:
     return ReplyJudge(claim=value["claim"], rubric=value.get("rubric"), url=value["url"])
 
 
-async def graded_in_process(episode: Episode, reply: str) -> GradeResponse:
+async def graded_in_process(episode: InjectionSpec, reply: str) -> GradeResponse:
     plane = ControlPlane({}, config=AppConfig(closure_wait_seconds=0))
-    async with open_episode(episode, runtime=UnmanagedRuntime(), control=plane) as ep:
+    async with open_evaluation(episode, runtime=UnmanagedRuntime(), control=plane) as ep:
 
         async def agent(message: str) -> str:
             return reply
@@ -955,7 +955,7 @@ async def test_a_check_built_unparsed_with_a_lone_surrogate_grades_unknown_with_
     from midojo.verifiers import builtin
 
     monkeypatch.setattr(builtin, "parse_reply_judge", unparsed)
-    episode = Episode(
+    episode = InjectionSpec(
         turns=["Pay my bills"],
         security={"reply_judge": {"claim": claim, "rubric": rubric, "url": judge.url("/supported")}},
     )

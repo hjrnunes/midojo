@@ -3,9 +3,7 @@
 The library API: an :class:`InjectionSpec` is what to run, the module-level
 :func:`open_evaluation` runs it once and seals its evaluation (see
 :mod:`midojo.evaluation_context`), and :func:`grade` grades the sealed
-:class:`Snapshot`, a pure function. The ``Episode*`` names and
-``open_episode`` are deprecated aliases of the same objects, kept until the
-aliases are removed (D24). The names are imported when first used, so
+:class:`Snapshot`, a pure function. The names are imported when first used, so
 ``import midojo`` stays light.
 
 The child modules a bare ``import midojo`` used to load as a side effect
@@ -21,24 +19,19 @@ from midojo import verifiers as _verifiers  # noqa: F401  -- registers built-in 
 if TYPE_CHECKING:
     from midojo.control_plane.grading import Verdict, grade
     from midojo.control_plane.state import Snapshot
-    from midojo.episode import Episode
-    from midojo.episode_context import AgentBinding, EpisodeContext, EpisodeResult, EpisodeStep, open_episode
-    from midojo.episode_handle import EpisodeHandle
-    from midojo.evaluation_context import EvaluationContext, EvaluationResult, EvaluationStep, open_evaluation
+    from midojo.evaluation_context import (
+        AgentBinding,
+        EvaluationContext,
+        EvaluationResult,
+        EvaluationStep,
+        open_evaluation,
+    )
     from midojo.evaluation_handle import EvaluationHandle
     from midojo.injection_spec import InjectionSpec
     from midojo.orchestrator import EvaluationRun
 
-    EpisodeRun = EvaluationRun
-
 __all__ = [
     "AgentBinding",
-    "Episode",
-    "EpisodeContext",
-    "EpisodeHandle",
-    "EpisodeResult",
-    "EpisodeRun",
-    "EpisodeStep",
     "EvaluationContext",
     "EvaluationHandle",
     "EvaluationResult",
@@ -48,18 +41,11 @@ __all__ = [
     "Snapshot",
     "Verdict",
     "grade",
-    "open_episode",
     "open_evaluation",
 ]
 
 _EXPORTS = {
-    "AgentBinding": "midojo.episode_context",
-    "Episode": "midojo.episode",
-    "EpisodeContext": "midojo.episode_context",
-    "EpisodeHandle": "midojo.episode_handle",
-    "EpisodeResult": "midojo.episode_context",
-    "EpisodeRun": ("midojo.orchestrator", "EvaluationRun"),
-    "EpisodeStep": "midojo.episode_context",
+    "AgentBinding": "midojo.evaluation_context",
     "EvaluationContext": "midojo.evaluation_context",
     "EvaluationHandle": "midojo.evaluation_handle",
     "EvaluationResult": "midojo.evaluation_context",
@@ -69,7 +55,6 @@ _EXPORTS = {
     "Snapshot": "midojo.control_plane.state",
     "Verdict": "midojo.control_plane.grading",
     "grade": "midojo.control_plane.grading",
-    "open_episode": "midojo.episode_context",
     "open_evaluation": "midojo.evaluation_context",
 }
 
@@ -80,7 +65,6 @@ _EXPORTS = {
 _SUBMODULES = frozenset(
     {
         "control_plane",
-        "episode_handle",
         "evaluation_context",
         "evaluation_handle",
         "injection_spec",

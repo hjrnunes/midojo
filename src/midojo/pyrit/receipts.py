@@ -24,7 +24,7 @@ from pyrit.models.results.attack_result import AttackResult
 
 from midojo.control_plane.routers.runs import snapshot_response
 from midojo.control_plane.service import ControlPlane
-from midojo.pyrit.target import MidojoEpisodeTarget, MidojoVerdict
+from midojo.pyrit.target import MidojoInjectionSpecTarget, MidojoVerdict
 
 SUMMARY_FILE = "summary.json"
 RECEIPTS_FILE = "receipts.json"
@@ -61,7 +61,7 @@ def attack_summary(
     return summary
 
 
-def write_receipts(target: MidojoEpisodeTarget, output_dir: Path, *, summary: Mapping[str, Any]) -> Path:
+def write_receipts(target: MidojoInjectionSpecTarget, output_dir: Path, *, summary: Mapping[str, Any]) -> Path:
     """Write the target's receipts, their sealed snapshots and ``summary`` to ``output_dir``; return the summary's path.
 
     A snapshot that can't be read (an evaluation never sealed) is recorded as

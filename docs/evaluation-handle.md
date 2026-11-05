@@ -41,7 +41,7 @@ Entering the handle starts the runtime, opens the evaluation, starts the interce
 5. The runtime: without `runtime=`, that the spec's own provider is installed, else `MissingCapabilityError`.
 6. `run_id`: with `run_id=`, that the runtime you pass has a run open under it, else `ValueError`. See [When `run_id` applies](#when_run_id-applies).
 7. The repeat: `repeat_of` on a runtime that can't isolate the target, else `RepeatWithoutResetError`.
-8. The cap: an open handle too many, else `LiveEpisodeLimitError`.
+8. The cap: an open handle too many, else `LiveEvaluationLimitError`.
 9. The dial or the bind: a service's refusal of the binding (`BindingRefusedError`), or the interceptor's port and host (`HandleError`).
 
 ### When `run_id` applies
@@ -81,9 +81,9 @@ Start the service with `midojo-intercept-serve --credential ...` (or `Intercepto
 
 ## Ownership, caps and failures
 
-Each handle runs one loop thread, named `midojo-episode-handle`. The context lives in the thread that opened the handle, so a handle used from another process (a `fork`ed child, say) raises `HandleOwnerError` and changes nothing: the message names the owning process and the current one. Calls that a handle made before returning are the only writes, which is why the check comes before any work.
+Each handle runs one loop thread, named `midojo-evaluation-handle`. The context lives in the thread that opened the handle, so a handle used from another process (a `fork`ed child, say) raises `HandleOwnerError` and changes nothing: the message names the owning process and the current one. Calls that a handle made before returning are the only writes, which is why the check comes before any work.
 
-A process keeps at most `DEFAULT_MAX_LIVE_EPISODES` (8) handles open. `MIDOJO_MAX_LIVE_EPISODES` overrides the cap for the process, and `max_live` lowers it for one call; a value that isn't a positive integer raises `ValueError` rather than falling back to the default. The limit counts live evaluations, so a handle that fails to open never holds a slot. Opening past the cap raises `LiveEpisodeLimitError` before any port is bound. The count belongs to the process that opened the handles: a `fork`ed child starts from zero, because it owns none of its parent's evaluations and none of its parent's listeners serve there.
+A process keeps at most `DEFAULT_MAX_LIVE_EVALUATIONS` (8) handles open. `MIDOJO_MAX_LIVE_EVALUATIONS` overrides the cap for the process, and `max_live` lowers it for one call; a value that isn't a positive integer raises `ValueError` rather than falling back to the default. The limit counts live evaluations, so a handle that fails to open never holds a slot. Opening past the cap raises `LiveEvaluationLimitError` before any port is bound. The count belongs to the process that opened the handles: a `fork`ed child starts from zero, because it owns none of its parent's evaluations and none of its parent's listeners serve there.
 
 An exception in the block, a `KeyboardInterrupt` or a `SystemExit` still closes the handle, and the evaluation is sealed as interrupted with its incomplete evidence. A driver killed outright can't run its cleanup, so a handle whose run it can reap starts a reaper process as soon as that run's workspace exists: right after it starts the run itself, and, when you pass no `runtime` and the spec's context builds and starts one, right after the context's `start_run` returns. Both points are before the runtime creates its sandbox, so a driver killed during setup is covered too. The reaper waits for the driver to exit, then deletes the sandboxes in the run's workspace and the workspace itself.
 
@@ -96,8 +96,8 @@ The reaper belongs to the handle, which starts it. An asynchronous driver, one t
 `midojo.evaluation_handle` is the synchronous driver API, and this is what stays stable within a 0.x minor release:
 
 - The names in `HANDLE_METHODS`, and the properties and methods above.
-- The exception classes in the module, and their `reason` strings: `HandleError` (`handle-error`), `HandleOwnerError` (`handle-owner`), `HandleClosedError` (`handle-closed`), `SendTurnUnsupported` (`send-turn-unsupported`), `RepeatWithoutResetError` (`repeat-without-reset`), `LiveEpisodeLimitError` (`live-episode-limit`) and `LinkLostError` (`link-lost`).
-- `HANDLE_API_VERSION`, which is 1, and `DEFAULT_MAX_LIVE_EPISODES`.
+- The exception classes in the module, and their `reason` strings: `HandleError` (`handle-error`), `HandleOwnerError` (`handle-owner`), `HandleClosedError` (`handle-closed`), `SendTurnUnsupported` (`send-turn-unsupported`), `RepeatWithoutResetError` (`repeat-without-reset`), `LiveEvaluationLimitError` (`live-episode-limit`) and `LinkLostError` (`link-lost`).
+- `HANDLE_API_VERSION`, which is 1, and `DEFAULT_MAX_LIVE_EVALUATIONS`.
 - New keyword arguments to `open` and `send_turn` are appended with defaults, so existing calls keep working.
 
 A change that breaks any of these raises the major version. The asynchronous API is unchanged: `midojo.open_evaluation` and `EvaluationContext` behave as before, and a handle is exactly a context driven on a thread.

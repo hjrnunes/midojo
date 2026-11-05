@@ -26,7 +26,7 @@ from typing import Any
 from midojo.control_plane.config import AppConfig
 from midojo.control_plane.models import CreateFunctionCallRecord, CreateFunctionCallStart, GradeResponse
 from midojo.control_plane.service import BySession, ControlPlane
-from midojo.episode import Episode
+from midojo.injection_spec import InjectionSpec
 from midojo.types import InterceptionMode
 
 
@@ -66,7 +66,7 @@ async def regrade(recorded: RecordedEvaluation, *, interception: InterceptionMod
     ``agent``; ``host`` replays the same records as a host interceptor's.
     """
     messages = [turn["message"] for turn in recorded.turns]
-    episode = Episode(turns=messages, security=recorded.security)
+    episode = InjectionSpec(turns=messages, security=recorded.security)
     control = ControlPlane({}, config=AppConfig(closure_wait_seconds=0))
     opened = control.open_evaluation(episode, interception=interception)
     session = BySession(opened.session_token)

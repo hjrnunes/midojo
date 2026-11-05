@@ -27,7 +27,7 @@ from typing import Any
 
 import jsonschema
 import pytest
-from midojo_sdk import episode_schema, injection, injection_spec_schema
+from midojo_sdk import injection, injection_spec_schema
 from midojo_sdk.injection import InjectionPlan
 from midojo_sdk.injection_spec_schema import (
     INJECTION_SPEC_DOCUMENT_V1,
@@ -139,12 +139,6 @@ def test_the_old_schema_file_stays_packaged_for_a_reader_built_before_the_rename
     legacy["schema_version"] = LEGACY_INJECTION_SPEC_DOCUMENT_V1
     jsonschema.Draft202012Validator(schema).validate(legacy)
     assert list(spec_validator().iter_errors(legacy))
-
-
-def test_the_old_module_name_is_the_new_module() -> None:
-    assert episode_schema.EPISODE_DOCUMENT_V1 is injection_spec_schema.INJECTION_SPEC_DOCUMENT_V1
-    assert episode_schema.load_schema is injection_spec_schema.load_schema
-    assert episode_schema.SCHEMA_FILE == injection_spec_schema.SCHEMA_FILE == SCHEMA_FILE
 
 
 def test_every_golden_names_the_new_document_version() -> None:
@@ -454,7 +448,6 @@ def test_the_plan_codec_version_is_the_document_version() -> None:
     assert PLAN_CODEC_VERSION == "midojo-plan-v1"
     assert injection.PLAN_CODEC_VERSION == PLAN_CODEC_VERSION
     assert injection_spec_schema.PLAN_CODEC_VERSION == PLAN_CODEC_VERSION
-    assert episode_schema.PLAN_CODEC_VERSION == PLAN_CODEC_VERSION
     assert SUPPORTED_DOCUMENT_VERSIONS == (INJECTION_SPEC_DOCUMENT_V1,)
     assert LEGACY_DOCUMENT_VERSIONS == (LEGACY_INJECTION_SPEC_DOCUMENT_V1, "midojo-episode-v2")
 
@@ -488,7 +481,7 @@ def test_each_bundled_suite_compiles_every_pair_to_a_valid_document(suite_name: 
 
     for user_task, injection_task in pairs:
         probes = suite.get_probes_for_task(injection_task) if injection_task is not None else None
-        spec = suite.episode(user_task, injection_task, probes)
+        spec = suite.injection_spec(user_task, injection_task, probes)
         document = spec.to_document()
 
         validator.validate(document)

@@ -43,7 +43,7 @@ from midojo_sdk.link import HEARTBEAT_INTERVAL_SECONDS
 
 from midojo.control_plane.client import ControlClient
 from midojo.control_plane.state import Snapshot
-from midojo.injection_spec import DEFAULT_EPISODE_NAME, InjectionSpec, tool_policy
+from midojo.injection_spec import DEFAULT_EVALUATION_NAME, InjectionSpec, tool_policy
 from midojo.observations import FUNCTION_CALLS
 from midojo.runtimes import AgentRuntime, ResettableRuntime
 from midojo.tool_endpoint import ToolEndpoint
@@ -318,8 +318,8 @@ class EvaluationContext:
         if self._owns_runtime:
             with self._progress("start_run"):
                 self._run_started = True
-                run_name = self.run_id or f"episode-{uuid.uuid4().hex[:12]}"
-                suite_name = episode.suite_name or DEFAULT_EPISODE_NAME
+                run_name = self.run_id or f"evaluation-{uuid.uuid4().hex[:12]}"
+                suite_name = episode.suite_name or DEFAULT_EVALUATION_NAME
                 await _in_thread(runtime.start_run, run_name, suite_name=suite_name)
         if self._reset_requested:
             # Only a declared capability: an external target is never reset behind its owner's back.
@@ -851,7 +851,7 @@ async def _in_thread(function: Callable[..., T], /, *args: Any, **kwargs: Any) -
 
 
 def open_evaluation(
-    episode: InjectionSpec,
+    injection_spec: InjectionSpec,
     *,
     runtime: AgentRuntime | None = None,
     interception: HostInterception | None = None,
@@ -863,7 +863,7 @@ def open_evaluation(
     """A context that runs the injection spec once, and seals its evaluation when it's left.
 
     ``runtime`` is where the agent runs. By default it's a fresh one from the
-    injection spec (``episode.new_runtime()``), whose run the context starts
+    injection spec (``injection_spec.new_runtime()``), whose run the context starts
     and ends; one the caller gives belongs to a run the caller has started,
     and the context only sets it up and tears it down.
 
@@ -896,13 +896,13 @@ def open_evaluation(
     manager held around that step (a spinner, say).
 
     Tool policy: the module-level ``open_evaluation`` has no interceptor of its
-    own, so it never applies ``episode.tools``; only
+    own, so it never applies ``injection_spec.tools``; only
     :func:`midojo.evaluation_handle.open` enforces a policy. An injection spec
     whose policy blocks a tool is refused here unless the ``interception`` you
     pass already blocks it too, rather than opening with the block silently
     unenforced.
     """
-    _, blocked = tool_policy(episode.tools)
+    _, blocked = tool_policy(injection_spec.tools)
     if blocked and not (interception is not None and set(blocked) <= set(interception.blocked)):
         raise ValueError(
             f"the injection spec's tools block {', '.join(blocked)}, but open_evaluation has no interceptor "
@@ -910,7 +910,7 @@ def open_evaluation(
             "that blocks the same tools"
         )
     return EvaluationContext(
-        episode,
+        injection_spec,
         runtime=runtime,
         interception=interception,
         control=control,

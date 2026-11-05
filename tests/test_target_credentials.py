@@ -44,7 +44,7 @@ from midojo.control_plane.lifecycle import RejectedError, Rejection
 from midojo.control_plane.main import create_app
 from midojo.control_plane.service import ById, ControlPlane
 from midojo.control_plane.store import InMemoryStore
-from midojo.episode_context import open_episode
+from midojo.evaluation_context import open_evaluation
 from midojo.interception_host import HostInterception, HostInterceptor
 from midojo.runtimes import UnmanagedRuntime
 from midojo.runtimes.openshell import OpenShellRuntime
@@ -279,8 +279,8 @@ async def test_a_control_plane_without_a_control_token_opens_no_host_mode_evalua
         runtime = MagicMock(wraps=UnmanagedRuntime())
         client = ControlPlaneClient(CONTROL_URL, http=http)
         with pytest.raises(httpx.HTTPStatusError) as raised:
-            async with open_episode(
-                suite.episode("weather_new_york"),
+            async with open_evaluation(
+                suite.injection_spec("weather_new_york"),
                 runtime=runtime,
                 interception=HostInterception(upstream=scripted_upstream(upstream_calls)),
                 control=client,
@@ -341,7 +341,7 @@ def _held(control: ControlPlane, run_id: str) -> list:
 
 async def _open_host_mode(control: ControlPlane, suite, run_id: str, how: str) -> object:
     """Ask the app's control plane, in process, for a host-mode evaluation the way ``how`` names."""
-    episode = suite.episode("weather_new_york")
+    episode = suite.injection_spec("weather_new_york")
     client = InProcessControlClient(control)
     if how == "create_evaluation":
         return control.create_evaluation(run_id, "weather_new_york", interception="host")
@@ -356,20 +356,22 @@ async def _open_host_mode(control: ControlPlane, suite, run_id: str, how: str) -
             run_id, "weather_new_york", None, {}, interception="host", idempotency_key="k1"
         )
     if how == "in-process client outside a run":
-        return await client.open_episode(episode, interception="host")
+        return await client.open_evaluation(episode, interception="host")
     async with _host_episode(control, suite, run_id, how):
         pytest.fail("a host-mode episode opened on a control plane served without a control token")
 
 
 def _host_episode(control: ControlPlane, suite, run_id: str, how: str):
     """A host-mode episode context on the control plane itself, or on its in-process client in a run."""
-    given: ControlPlane | InProcessControlClient = control if how == "open_episode" else InProcessControlClient(control)
-    return open_episode(
-        suite.episode("weather_new_york"),
+    given: ControlPlane | InProcessControlClient = (
+        control if how == "open_evaluation" else InProcessControlClient(control)
+    )
+    return open_evaluation(
+        suite.injection_spec("weather_new_york"),
         runtime=UnmanagedRuntime(),
         interception=HostInterception(upstream=scripted_upstream()),
         control=given,
-        run_id=None if how == "open_episode" else run_id,
+        run_id=None if how == "open_evaluation" else run_id,
     )
 
 
@@ -380,8 +382,8 @@ CREATION_PATHS = [
     "open_evaluation outside a run",
     "in-process client",
     "in-process client outside a run",
-    "open_episode",
-    "open_episode with the in-process client",
+    "open_evaluation",
+    "open_evaluation with the in-process client",
 ]
 
 
@@ -453,7 +455,7 @@ async def test_a_control_plane_served_with_a_control_token_opens_host_mode_evalu
     app = create_app({"weather": suite}, config=AppConfig(control_token=CONTROL_TOKEN))
     control = app.state.control
     run = control.create_run("weather")
-    if how.startswith("open_episode"):
+    if how.startswith("open_evaluation"):
         # The episode context runs and seals it; there is no agent to send it a turn.
         async with _host_episode(control, suite, run.id, how) as ep:
             assert ep.binding.tool_endpoint is not None
@@ -466,7 +468,7 @@ async def test_a_control_plane_served_with_a_control_token_opens_host_mode_evalu
 def test_an_app_without_a_control_token_refuses_a_store_that_holds_a_host_mode_evaluation(suite, token):
     # Kept by a control plane no app served, then given to an app: an evaluation the app's routes would expose.
     standalone = ControlPlane({"weather": suite})
-    opened = standalone.open_evaluation(suite.episode("weather_new_york"), interception="host")
+    opened = standalone.open_evaluation(suite.injection_spec("weather_new_york"), interception="host")
     held = standalone.store.get_evaluation(None, opened.id)
     assert held is not None
     store = InMemoryStore()

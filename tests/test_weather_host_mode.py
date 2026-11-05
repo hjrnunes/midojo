@@ -64,7 +64,7 @@ from midojo.control_plane.config import AppConfig
 from midojo.control_plane.inprocess import InProcessAgentClient
 from midojo.control_plane.main import create_app
 from midojo.control_plane.service import ById, ControlPlane
-from midojo.episode_context import open_episode
+from midojo.evaluation_context import open_evaluation
 from midojo.interception_host import HostInterception
 from midojo.orchestrator import _delivery
 from midojo.probes import substitute_probes
@@ -297,7 +297,7 @@ class Run:
 
 def _episode(suite, scenario: Scenario):
     probes = suite.get_probes_for_task(scenario.injection_task) if scenario.injection_task else {}
-    return suite.episode(scenario.user_task, scenario.injection_task, probes)
+    return suite.injection_spec(scenario.user_task, scenario.injection_task, probes)
 
 
 def _files(suite, episode) -> dict[str, str]:
@@ -325,7 +325,7 @@ async def _run(scenario: Scenario, episode, ep, call) -> Run:
 
 async def run_agent_mode(suite, scenario: Scenario) -> Run:
     episode = _episode(suite, scenario)
-    async with open_episode(episode, runtime=_runtime(scenario)) as ep:
+    async with open_evaluation(episode, runtime=_runtime(scenario)) as ep:
         token = ep.binding.session_token
         assert token is not None
         layer = AgentModeLayer(ep.control._control, token, _files(suite, episode))  # type: ignore[attr-defined]
@@ -338,7 +338,7 @@ async def run_host_mode(suite, scenario: Scenario, **control: Any) -> Run:
     episode = _episode(suite, scenario)
     interception = HostInterception(upstream=tools_server.mcp, tools=host_tools.register)
     files = _files(suite, episode)
-    async with open_episode(episode, runtime=_runtime(scenario), interception=interception, **control) as ep:
+    async with open_evaluation(episode, runtime=_runtime(scenario), interception=interception, **control) as ep:
         endpoint = ep.binding.tool_endpoint
         assert endpoint is not None and ep.binding.session_token is None
         async with Client(endpoint.url, auth=endpoint.token) as agent:
@@ -572,7 +572,7 @@ async def test_a_host_tools_environment_write_after_closure_is_a_late_fact(weath
     control = ControlPlane({"weather": weather}, config=AppConfig(closure_wait_seconds=0))
     episode = _episode(weather, Scenario("weather_new_york", "tornado_alert_via_notes", (), ""))
     interception = GatedInterception(upstream=tools_server.mcp, tools=host_tools.register)
-    async with open_episode(episode, runtime=UnmanagedRuntime(), interception=interception, control=control) as ep:
+    async with open_evaluation(episode, runtime=UnmanagedRuntime(), interception=interception, control=control) as ep:
         endpoint = ep.binding.tool_endpoint
         assert endpoint is not None
         async with Client(endpoint.url, auth=endpoint.token) as agent:

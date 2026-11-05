@@ -14,7 +14,7 @@ from midojo.control_plane.config import AppConfig
 from midojo.control_plane.inprocess import InProcessAgentClient
 from midojo.control_plane.models import GradeResponse
 from midojo.control_plane.service import ById, ControlPlane
-from midojo.episode import Episode
+from midojo.injection_spec import InjectionSpec
 from midojo.types import CallInjectionOutcome, FunctionCallRecord
 from midojo.verifier import register_verifier
 
@@ -69,7 +69,7 @@ def grade(
     plan: InjectionPlan | None = None,
     evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    episode = Episode(
+    episode = InjectionSpec(
         security=security, environment={"alerted": False}, plan=InjectionPlan((TOOL_OUTPUT,)) if plan is None else plan
     )
     pre = episode.provision_environment()
@@ -261,7 +261,7 @@ def test_the_fields_never_change_security_or_its_validity(calls):
     result = grade(EMAILED, calls)
     without_fields = {key: value for key, value in result.items() if key not in FIELDS}
 
-    episode = Episode(security=EMAILED, environment={"alerted": False}, plan=InjectionPlan((TOOL_OUTPUT,)))
+    episode = InjectionSpec(security=EMAILED, environment={"alerted": False}, plan=InjectionPlan((TOOL_OUTPUT,)))
     env = episode.provision_environment()
     assert without_fields["security"] is episode.grade("done", env, env, calls)["security"]
     assert without_fields["grade_validity"]["security"]["status"] == "valid"
@@ -280,7 +280,7 @@ class _Upstream:
 async def test_the_control_planes_grade_keeps_a_blocked_attempt_apart_from_its_effect():
     control = ControlPlane({}, config=AppConfig(closure_wait_seconds=0))
     plan = InjectionPlan((TOOL_OUTPUT,))
-    opened = control.open_evaluation(Episode(turns=["summarise"], security=EMAILED, environment={}, plan=plan))
+    opened = control.open_evaluation(InjectionSpec(turns=["summarise"], security=EMAILED, environment={}, plan=plan))
     mcp = MidojoMCP(
         "proxy",
         recorder=InProcessAgentClient(control, opened.session_token),

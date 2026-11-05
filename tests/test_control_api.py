@@ -21,7 +21,7 @@ from midojo.control_plane.main import create_app
 from midojo.control_plane.models import CreateEvaluationResponse, EvaluationResponse
 from midojo.control_plane.service import ById, BySession, ControlPlane, token_hash
 from midojo.control_plane.state import Evaluation, Session
-from midojo.episode import freeze
+from midojo.injection_spec import freeze
 from midojo.runtimes.openshell import OpenShellObservations
 from midojo.verifiers import ConversationTurn, VerificationResult, register_verifier
 

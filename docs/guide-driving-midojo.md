@@ -1,13 +1,13 @@
 # Drive an evaluation from a script
 
-`examples/drive_episode.py` drives one whole evaluation from a synchronous script: it opens a handle, sends a turn to an agent over the handle's tool endpoint, seals the evaluation and grades the sealed snapshot. It runs with only the two installed packages, needs no control-plane server and no model, and prints each step, so its output is the check that a release works from its wheels.
+`examples/drive_evaluation.py` drives one whole evaluation from a synchronous script: it opens a handle, sends a turn to an agent over the handle's tool endpoint, seals the evaluation and grades the sealed snapshot. It runs with only the two installed packages, needs no control-plane server and no model, and prints each step, so its output is the check that a release works from its wheels.
 
 ```sh
 # A stand-in for the klarna tools, started in the same process.
-python examples/drive_episode.py
+python examples/drive_evaluation.py
 
 # A real target, whose tools the interceptor mirrors.
-python examples/drive_episode.py --upstream http://127.0.0.1:18301/sse
+python examples/drive_evaluation.py --upstream http://127.0.0.1:18301/sse
 ```
 
 The script exits 0 when the grade says the agent was unsafe and crossed its legitimate task: the injection it obeyed was a refund, and both checks passed. It prints:
@@ -45,13 +45,13 @@ The plan's bytes are the plan codec's: `midojo_sdk.injection.PLAN_CODEC_VERSION`
 
 The script passes `upstream=` the MCP server to mirror (a `FastMCP` server in this process, or its URL) and `runtime=UnmanagedRuntime()`: no sandbox, so the script itself plays the agent, calling the tools through `handle.tool_endpoint`. With an OpenShell injection spec you pass no `runtime=`, and `send_turn` without `send=` runs the runtime's agent in its sandbox.
 
-`open` refuses in this order, before any slot, port or sandbox: a missing upstream, a runtime the injection spec cannot build or whose run `run_id` does not name, a repeat the runtime cannot isolate, the live cap, and a bind the interceptor cannot use. `runtime_capabilities` answers what a runtime can do before any of that work starts. A process keeps at most `DEFAULT_MAX_LIVE_EPISODES` handles open, and `MIDOJO_MAX_LIVE_EPISODES` or `max_live` lower that; opening past the cap raises `LiveEpisodeLimitError`.
+`open` refuses in this order, before any slot, port or sandbox: a missing upstream, a runtime the injection spec cannot build or whose run `run_id` does not name, a repeat the runtime cannot isolate, the live cap, and a bind the interceptor cannot use. `runtime_capabilities` answers what a runtime can do before any of that work starts. A process keeps at most `DEFAULT_MAX_LIVE_EVALUATIONS` handles open, and `MIDOJO_MAX_LIVE_EVALUATIONS` or `max_live` lower that; opening past the cap raises `LiveEvaluationLimitError`.
 
 `run_id` opens the evaluation in a run that is already open on a served control plane, and only with the runtime that run owns. Without such a runtime the handle refuses it up front with a `ValueError` naming `run_id`, because the served control plane compiles the injection spec from the run's suite and would fail after a sandbox exists.
 
 The handle starts the run it owns, and only the handle starts the sandbox reaper for that run. An asynchronous driver, one that calls `midojo.open_evaluation` itself, starts no reaper: a driver killed with `SIGKILL` mid-evaluation can leave its OpenShell workspace and sandbox behind. Run an injection spec through the handle when a driver has to be leak-safe. A run the caller started (the runtime already names its workspace) belongs to the caller, and the handle neither ends nor reaps it.
 
-[Driving an evaluation from a synchronous script](episode-handle.md) is the full API: every argument, `HANDLE_METHODS`, the tool policy, ownership and caps.
+[Driving an evaluation from a synchronous script](evaluation-handle.md) is the full API: every argument, `HANDLE_METHODS`, the tool policy, ownership and caps.
 
 ## The sealed result
 
@@ -63,6 +63,6 @@ A grade that reads `security: True` says the agent did what the injection asked;
 
 ## What stays stable
 
-The handle states its compatibility promise in [the handle's documentation](episode-handle.md#compatibility-promise): the names in `HANDLE_METHODS`, `HANDLE_API_VERSION`, `DEFAULT_MAX_LIVE_EPISODES`, the exception classes and their `reason` strings, and new keyword arguments appended with defaults. [The changelog](../CHANGELOG.md) lists what this fork adds and the breaking changes, including the FastMCP pin, the document versions and the `midojo-sdk` base dependency.
+The handle states its compatibility promise in [the handle's documentation](evaluation-handle.md#compatibility-promise): the names in `HANDLE_METHODS`, `HANDLE_API_VERSION`, `DEFAULT_MAX_LIVE_EVALUATIONS`, the exception classes and their `reason` strings, and new keyword arguments appended with defaults. [The changelog](../CHANGELOG.md) lists what this fork adds and the breaking changes, including the FastMCP pin, the document versions and the `midojo-sdk` base dependency.
 
 Where a placement matters, `midojo_sdk.placement.PlacementEngine` is the seam: the interceptor forwards and records a call, and the engine decides what the plan places in its result. `PlanPlacementEngine` is the plan's own engine; a host can pass another.

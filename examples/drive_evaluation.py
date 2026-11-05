@@ -3,7 +3,7 @@
 Run it with no arguments to start a stand-in for the klarna target in this
 process, or point it at a real target:
 
-    python examples/drive_episode.py --upstream http://127.0.0.1:18301/sse
+    python examples/drive_evaluation.py --upstream http://127.0.0.1:18301/sse
 
 The example builds an injection spec whose plan appends an injected instruction to the
 ``lookup_order`` result, drives a scripted agent (no model) through the handle's

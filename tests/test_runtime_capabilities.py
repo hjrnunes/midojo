@@ -16,9 +16,9 @@ import pytest
 
 from midojo.capabilities import MissingCapabilityError, runtime_missing_package_gap
 from midojo.control_plane.service import ControlPlane
-from midojo.episode import Episode, RuntimeCheckError
-from midojo.episode_context import open_episode
-from midojo.episode_document import EpisodeDocumentError
+from midojo.evaluation_context import open_evaluation
+from midojo.injection_spec import InjectionSpec, RuntimeCheckError
+from midojo.injection_spec_document import InjectionSpecDocumentError
 from midojo.runtimes import (
     DEFAULT_RUNTIMES,
     DisposableRuntime,
@@ -72,7 +72,7 @@ def test_a_parsed_definition_and_its_mapping_answer_alike(definition):
 @pytest.mark.parametrize("suite_name", ["weather", "minibank"])
 def test_a_suites_episode_reports_the_requirements_its_definition_declares(suite_name):
     suite = get_suite(suite_name)
-    episode = suite.episode(next(iter(suite.user_tasks)))
+    episode = suite.injection_spec(next(iter(suite.user_tasks)))
     assert episode.runtime_requirements() == runtime_capabilities(suite.definition.agent_runtime)
     assert episode.runtime_requirements() == runtime_capabilities(episode.runtime)
 
@@ -157,9 +157,9 @@ def test_an_unmanaged_episode_refuses_a_check_that_needs_openshell_observations(
     spec = {"workdir_file_exists": "/home/agent/secret.txt"}
     with pytest.raises(RuntimeCheckError) as error:
         if field == "security":
-            Episode(runtime=UNMANAGED, security=spec)
+            InjectionSpec(runtime=UNMANAGED, security=spec)
         else:
-            Episode(runtime=UNMANAGED, utility=spec)
+            InjectionSpec(runtime=UNMANAGED, utility=spec)
     assert error.value.gap == PREDICATE_GAP
     assert error.value.check == field
     assert error.value.runtime == "unmanaged"
@@ -170,8 +170,8 @@ def test_an_unmanaged_episode_refuses_a_check_that_needs_openshell_observations(
 
 def test_the_document_reader_carries_the_gap_of_a_refused_check():
     document = json.loads((FIXTURES / "refused_openshell_predicate_on_unmanaged.json").read_text())
-    with pytest.raises(EpisodeDocumentError) as error:
-        Episode.from_document(document)
+    with pytest.raises(InjectionSpecDocumentError) as error:
+        InjectionSpec.from_document(document)
     assert error.value.gap == PREDICATE_GAP
     assert "OpenShell" in str(error.value)
 
@@ -179,13 +179,13 @@ def test_the_document_reader_carries_the_gap_of_a_refused_check():
 def test_a_v1_document_with_an_openshell_check_on_unmanaged_carries_the_gap():
     document = json.loads((FIXTURES / "v1_single.json").read_text())
     document["utility"] = {"process_ran": "curl"}
-    with pytest.raises(EpisodeDocumentError) as error:
-        Episode.from_document(document)
+    with pytest.raises(InjectionSpecDocumentError) as error:
+        InjectionSpec.from_document(document)
     assert error.value.gap == PREDICATE_GAP
 
 
 def test_the_same_check_builds_on_the_openshell_runtime():
-    episode = Episode(
+    episode = InjectionSpec(
         runtime=OPENSHELL,
         security={"workdir_file_exists": "/home/agent/secret.txt"},
         utility={"process_ran": "curl"},
@@ -219,9 +219,9 @@ injection_tasks:
     assert "OpenShell" in str(error.value)
 
 
-async def _run_once(episode: Episode):
+async def _run_once(episode: InjectionSpec):
     plane = ControlPlane({})
-    async with open_episode(episode, control=plane) as context:
+    async with open_evaluation(episode, control=plane) as context:
         token = context.binding.session_token
         assert token is not None  # The default in-agent mode gives the agent its evaluation's session.
         recorder = context.control.recorder(token)
@@ -249,7 +249,7 @@ async def _run_once(episode: Episode):
 def test_a_complete_unmanaged_episode_has_no_openshell_part_at_all():
     from midojo.control_plane.grading import grade
 
-    episode = Episode(
+    episode = InjectionSpec(
         runtime=UNMANAGED,
         turns=["hello"],
         utility={"output_contains": "done"},

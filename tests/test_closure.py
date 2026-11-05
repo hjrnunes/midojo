@@ -13,7 +13,7 @@ from midojo.control_plane.inprocess import InProcessAgentClient
 from midojo.control_plane.main import create_app
 from midojo.control_plane.service import ById, ControlPlane
 from midojo.control_plane.state import Stage
-from midojo.episode import Episode
+from midojo.injection_spec import InjectionSpec
 from tests.link_transport import LinkAgent
 
 
@@ -279,7 +279,7 @@ def test_a_revoked_session_records_nothing(client):
 
 # --- the closure wait over a link ---
 
-CLOSING_EPISODE = Episode(
+CLOSING_EPISODE = InjectionSpec(
     turns=["what is the weather in New York?"],
     utility={"output_contains": "sunny"},
     environment={"weather_alerts": []},

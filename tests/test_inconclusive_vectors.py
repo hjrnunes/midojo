@@ -50,7 +50,7 @@ from midojo.control_plane.inprocess_control import InProcessControlClient
 from midojo.control_plane.models import SnapshotResponse
 from midojo.control_plane.service import ControlPlane
 from midojo.control_plane.state import snapshot_digest
-from midojo.episode import Episode
+from midojo.injection_spec import InjectionSpec
 from tests.link_transport import LinkAgent
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "inconclusive_vectors"
@@ -129,7 +129,7 @@ def test_every_snapshot_verifies_against_the_id_it_names(case):
 
     snapshot = read(case, "snapshot.json")
     verified(snapshot)
-    episode = Episode.from_document(read(case, "document.json"))
+    episode = InjectionSpec.from_document(read(case, "document.json"))
     assert episode.environment_type is not None, "the fixture names no environment type"
     again = snapshot_from_response(SnapshotResponse.model_validate(snapshot), episode.environment_type)
     assert again.snapshot_id == snapshot["snapshot_id"] == snapshot_digest(again)
@@ -320,7 +320,7 @@ def test_the_recipe_reproduces_every_case_it_committed(tmp_path):
 CONTROL_PLANE_CASES = ("capture-incomplete", "unknown-delivery")
 
 
-async def _over_the_link(built: Episode, case: dict[str, Any]) -> Any:
+async def _over_the_link(built: InjectionSpec, case: dict[str, Any]) -> Any:
     """``run_in_control_plane``'s writes, with the layer's calls sent over a link instead of called in process.
 
     The turns and the seal stay on the control plane side, as they do in an agent-mode
@@ -329,7 +329,7 @@ async def _over_the_link(built: Episode, case: dict[str, Any]) -> Any:
 
     control = ControlPlane({}, config=AppConfig(closure_wait_seconds=0))
     client = InProcessControlClient(control)
-    opened = await client.open_episode(built, interception="host")
+    opened = await client.open_evaluation(built, interception="host")
     agent = LinkAgent(control, opened.session_token)
     turns = opened.turns
     if turns is None or built.environment_type is None:

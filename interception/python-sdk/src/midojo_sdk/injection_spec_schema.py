@@ -28,7 +28,6 @@ from importlib import resources
 from midojo_sdk.injection import PLAN_CODEC_VERSION
 
 __all__ = [
-    "EPISODE_DOCUMENT_V1",
     "INJECTION_SPEC_DOCUMENT_V1",
     "LEGACY_INJECTION_SPEC_DOCUMENT_V1",
     "LEGACY_SCHEMA_FILE",
@@ -43,9 +42,6 @@ INJECTION_SPEC_DOCUMENT_V1 = "midojo-injection-spec-v1"
 
 LEGACY_INJECTION_SPEC_DOCUMENT_V1 = "midojo-episode-v1"
 """The version this document had before the rename: read as the same closed shape, never written."""
-
-EPISODE_DOCUMENT_V1 = INJECTION_SPEC_DOCUMENT_V1
-"""Deprecated alias for :data:`INJECTION_SPEC_DOCUMENT_V1`, named after the document's old name."""
 
 SCHEMA_FILE = "schemas/midojo-injection-spec-v1.schema.json"
 """The schema's path inside this package."""

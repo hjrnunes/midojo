@@ -2,12 +2,12 @@
 
 The light path must import neither the OpenShell runtime nor gRPC, protobuf
 or the OpenShell SDK: the verifiers, the observation models, suite reading,
-the episode, its context and result (:mod:`midojo.episode_context`), the
-synchronous handle over that context (:mod:`midojo.episode_handle`), the
+the episode, its context and result (:mod:`midojo.evaluation_context`), the
+synchronous handle over that context (:mod:`midojo.evaluation_handle`), the
 sealed snapshot (:mod:`midojo.control_plane.state`), grading
 (:mod:`midojo.control_plane.grading`), the evaluation address
 (:class:`~midojo.control_plane.service.ById`) and the in-process control
-plane ``open_episode`` uses by default (:mod:`midojo.control_plane.service`,
+plane ``open_evaluation`` uses by default (:mod:`midojo.control_plane.service`,
 ``lifecycle``, ``store``, ``inprocess_control``, ``inprocess``). Each check
 runs in a fresh interpreter, so nothing another test imported hides an
 import.
@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 
 from midojo.capabilities import MissingCapabilityError, import_provider
-from midojo.episode import Episode
+from midojo.injection_spec import InjectionSpec
 from midojo.runtimes import DEFAULT_RUNTIMES, RuntimeRegistry, UnmanagedRuntime, build_runtime
 from midojo.suite_definition import OpenShellRuntimeDefinition
 from midojo.verifiers import DEFAULT_VERIFIERS, VerificationResult, VerifierRegistry, parse_check
@@ -53,18 +53,18 @@ LIGHT_MODULES = (
     "midojo.delivery",
     "midojo.runtimes",
     # The episode, its context and result (the handle), the sealed snapshot and grading.
-    "midojo.episode",
-    "midojo.episode_document",
-    "midojo.episode_context",
+    "midojo.injection_spec",
+    "midojo.injection_spec_document",
+    "midojo.evaluation_context",
     "midojo.injection_spec",
     "midojo.injection_spec_document",
     "midojo.evaluation_context",
     # The synchronous handle over that context.
-    "midojo.episode_handle",
+    "midojo.evaluation_handle",
     "midojo.evaluation_handle",
     "midojo.control_plane.state",
     "midojo.control_plane.grading",
-    # The in-process control plane open_episode uses by default, which holds ById, and what it imports.
+    # The in-process control plane open_evaluation uses by default, which holds ById, and what it imports.
     "midojo.control_plane.service",
     "midojo.control_plane.lifecycle",
     "midojo.control_plane.store",
@@ -77,8 +77,6 @@ LIGHT_MODULES = (
     "midojo_sdk.snapshot",
     # The SDK's injection spec schema accessor and the plan codec it names: stdlib only.
     "midojo_sdk.injection_spec_schema",
-    # The old module name is a re-export of that accessor: stdlib only too.
-    "midojo_sdk.episode_schema",
     # The SDK's placement engine: decides a plan's placements, and the plan codec it names, stdlib only.
     "midojo_sdk.placement",
     # The SDK's rubric judge: stdlib only, and it imports nothing from Asago.
@@ -137,7 +135,7 @@ import importlib
 for module in LIGHT_MODULES:
     importlib.import_module(module)
 
-from midojo import EpisodeResult, Snapshot, Verdict, grade, open_episode
+from midojo import EvaluationResult, Snapshot, Verdict, grade, open_evaluation
 from midojo.capabilities import MissingCapabilityError
 from midojo.control_plane.service import ById, ControlPlane
 from midojo.observations.openshell import OpenShellObservations
@@ -147,14 +145,14 @@ from midojo.suites import get_suite
 weather = get_suite("weather")
 assert weather.definition.agent_runtime.type == "openshell"
 minibank = get_suite("minibank")
-episode = minibank.episode("account_balance", "ssn_disclosure", minibank.get_probes_for_task("ssn_disclosure"))
+episode = minibank.injection_spec("account_balance", "ssn_disclosure", minibank.get_probes_for_task("ssn_disclosure"))
 assert OpenShellObservations.not_collected().evidence_status.ocsf == "not_collected"
 
 
 async def scripted() -> None:
     # The episode builds its own unmanaged runtime and runs on an in-process control plane: no server, no network.
     plane = ControlPlane({})
-    async with open_episode(episode, control=plane) as ep:
+    async with open_evaluation(episode, control=plane) as ep:
         recorder = ep.control.recorder(ep.binding.session_token)
 
         async def agent(message: str) -> str:
@@ -173,7 +171,7 @@ async def scripted() -> None:
         await ep.turn(ep.turns[0], agent)
     # The handle: the result names the evaluation, and the snapshot it sealed.
     result = ep.result
-    assert isinstance(result, EpisodeResult) and not result.interrupted
+    assert isinstance(result, EvaluationResult) and not result.interrupted
     snapshot = ep.sealed
     assert isinstance(snapshot, Snapshot) and isinstance(result.snapshot, Snapshot)
     assert result.snapshot_id == snapshot.snapshot_id and snapshot.snapshot_id.startswith("sha256:")
@@ -196,7 +194,7 @@ loaded = sorted(name for name in HEAVY if name in sys.modules)
 assert not loaded, f"loaded {loaded}"
 
 # Choosing the OpenShell runtime then names the missing capability and what to install.
-for choose in (weather.new_runtime, weather.episode(next(iter(weather.user_tasks))).new_runtime):
+for choose in (weather.new_runtime, weather.injection_spec(next(iter(weather.user_tasks))).new_runtime):
     try:
         choose()
     except MissingCapabilityError as error:
@@ -228,11 +226,11 @@ import socket
 import sys
 import threading
 
-from midojo import episode_handle
+from midojo import evaluation_handle
 from midojo.capabilities import MissingCapabilityError
 from midojo.control_plane.service import ControlPlane
-from midojo.episode import Episode
-from midojo.episode_context import open_episode
+from midojo.injection_spec import InjectionSpec
+from midojo.evaluation_context import open_evaluation
 from midojo.interception_host import HostInterception
 from midojo.runtimes import runtime_capabilities
 
@@ -256,18 +254,18 @@ probe.bind(("127.0.0.1", 0))
 port = probe.getsockname()[1]
 probe.close()
 
-episode = Episode(runtime={"type": "openshell", "image": "pi"}, turns=["hi"])
+episode = InjectionSpec(runtime={"type": "openshell", "image": "pi"}, turns=["hi"])
 plane = ControlPlane({})
 threads = threading.active_count()
 attempts = {
     "check_runtime_available": episode.check_runtime_available,
     "new_runtime": episode.new_runtime,
-    "open_episode": lambda: open_episode(
+    "open_evaluation": lambda: open_evaluation(
         episode,
         control=plane,
         interception=HostInterception(upstream="http://127.0.0.1:9/mcp", port=port),
     ),
-    "episode_handle.open": lambda: episode_handle.open(
+    "evaluation_handle.open": lambda: evaluation_handle.open(
         episode, interception=HostInterception(upstream="http://127.0.0.1:9/mcp", port=port)
     ),
 }
@@ -292,13 +290,13 @@ EIGHT_UNMANAGED_EPISODES = """
 import asyncio
 
 from midojo.control_plane.service import ControlPlane
-from midojo.episode import Episode
-from midojo.episode_context import open_episode
+from midojo.injection_spec import InjectionSpec
+from midojo.evaluation_context import open_evaluation
 
 
 async def eight():
     for _ in range(8):
-        context = open_episode(Episode(runtime={"type": "unmanaged"}, turns=["hi"]), control=ControlPlane({}))
+        context = open_evaluation(InjectionSpec(runtime={"type": "unmanaged"}, turns=["hi"]), control=ControlPlane({}))
 
         async def agent(message: str) -> str:
             return "ok"
@@ -313,14 +311,14 @@ print("ok")
 
 # The same eight, one turn each, through the synchronous handle: each close frees the live-episode slot it took.
 EIGHT_UNMANAGED_HANDLES = """
-from midojo import episode_handle
-from midojo.episode import Episode
+from midojo import evaluation_handle
+from midojo.injection_spec import InjectionSpec
 from tests.fixtures.scripted_target.upstream import scripted_upstream
 
 
 for _ in range(8):
-    with episode_handle.open(
-        Episode(runtime={"type": "unmanaged"}, turns=["hi"]), upstream=scripted_upstream()
+    with evaluation_handle.open(
+        InjectionSpec(runtime={"type": "unmanaged"}, turns=["hi"]), upstream=scripted_upstream()
     ) as handle:
         handle.start_turn("hi")
         handle.record_reply(0, "ok")
@@ -363,7 +361,7 @@ def test_reading_a_bundled_suite_and_compiling_its_episodes_does_not_import_the_
         for user_task in suite.user_tasks:
             for injection_task in [None, *suite.injection_tasks]:
                 probes = suite.get_probes_for_task(injection_task) if injection_task else None
-                suite.episode(user_task, injection_task, probes)
+                suite.injection_spec(user_task, injection_task, probes)
         print(sorted(name for name in {HEAVY!r} if name in sys.modules))
         """
     )
@@ -437,7 +435,7 @@ def test_a_runtime_registry_can_be_injected_without_changing_the_default(tmp_pat
     registry.register("unmanaged", lambda name, definition: _Marker(), replace=True)
     suite = _suite(tmp_path)
     assert isinstance(suite.new_runtime(registry=registry), _Marker)
-    assert isinstance(suite.episode("task").new_runtime(registry=registry), _Marker)
+    assert isinstance(suite.injection_spec("task").new_runtime(registry=registry), _Marker)
     assert type(suite.new_runtime()) is UnmanagedRuntime
     with pytest.raises(ValueError, match="already registered"):
         registry.register("unmanaged", lambda name, definition: _Marker())
@@ -463,7 +461,7 @@ def test_a_verifier_registry_can_be_injected_into_a_suite_and_its_episodes(tmp_p
     registry.register(_Custom())
     assert DEFAULT_VERIFIERS.get("boundary_custom") is None
     suite = _suite(tmp_path, utility="boundary_custom: done", verifiers=registry)
-    episode = suite.episode("task")
+    episode = suite.injection_spec("task")
     assert episode.verifiers is registry
     env = suite.provision_environment({})
     graded = episode.grade("done", env, env, [])
@@ -480,7 +478,7 @@ def test_a_verifier_registry_can_be_injected_into_a_suite_and_its_episodes(tmp_p
 
 def test_an_episode_refuses_a_verifier_registry_of_another_type():
     with pytest.raises(TypeError, match="VerifierRegistry"):
-        Episode(verifiers={})  # type: ignore[arg-type]
+        InjectionSpec(verifiers={})  # type: ignore[arg-type]
 
 
 def test_an_empty_verifier_registry_has_no_default():
@@ -773,9 +771,9 @@ _BASE_REACHABLE = (
 )
 _BASE_MIDOJO_ALL = (
     "AgentBinding",
-    "Episode",
-    "EpisodeContext",
-    "EpisodeResult",
+    "InjectionSpec",
+    "EvaluationContext",
+    "EvaluationResult",
     "Snapshot",
     "Verdict",
     "grade",

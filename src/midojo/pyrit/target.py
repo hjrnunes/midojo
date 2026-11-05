@@ -8,7 +8,7 @@ import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from types import ModuleType
-from typing import Any, Literal
+from typing import Literal
 
 from midojo_sdk.injection import InjectionPlan
 from pyrit.models.messages.conversations import construct_response_from_request
@@ -19,19 +19,12 @@ import midojo
 from midojo.attacks.attacker import AttackAttempt, OutOfSurfaceError, check_plan_within, permitted_injections
 from midojo.control_plane.models import GradeResponse
 from midojo.control_plane.service import ControlPlane
-from midojo.episode_aliases import resolve as _resolve_episode_alias
 from midojo.evaluation_context import EvaluationContext
 from midojo.injection_spec import InjectionSpec
 from midojo.interception_host import HostInterception
 from midojo.runtimes import AgentRuntime, attempt_isolation
 from midojo.suite_tools import host_tools_reference
 from midojo.yaml_task_suite import YAMLTaskSuite
-
-
-def __getattr__(name: str) -> Any:
-    """Resolve a name this module exported before the episode -> injection spec rename (D24)."""
-    return _resolve_episode_alias(__name__, name)
-
 
 METADATA_PREFIX = "midojo."
 UNDETERMINED_REPLY = "MiDojo could not evaluate this candidate."
@@ -132,10 +125,10 @@ class _Attempt:
     verdict: MidojoVerdict
 
 
-class MidojoEpisodeTarget(PromptTarget):
+class MidojoInjectionSpecTarget(PromptTarget):
     """Plant text on exactly one declared instruction, then drive and seal an episode.
 
-    ``episode_for_payload`` is trusted host code that compiles a candidate;
+    ``injection_spec_for_payload`` is trusted host code that compiles a candidate;
     its plan must match ``surface`` in everything but the payload. For suites,
     use :meth:`from_suite`, which also checks the probe key. ``drive`` sends
     the episode's benign turns using ``ep.turn`` and the agent's binding.
@@ -150,7 +143,7 @@ class MidojoEpisodeTarget(PromptTarget):
     def __init__(
         self,
         *,
-        episode_for_payload: Callable[[str], InjectionSpec],
+        injection_spec_for_payload: Callable[[str], InjectionSpec],
         surface: InjectionPlan,
         drive: Callable[[EvaluationContext], Awaitable[None]],
         runtime: AgentRuntime,
@@ -163,7 +156,7 @@ class MidojoEpisodeTarget(PromptTarget):
         if isolation is None:
             raise ValueError("adaptive PyRIT use requires a runtime declaring reset or a disposable target")
         super().__init__()
-        self._episode_for_payload = episode_for_payload
+        self._injection_spec_for_payload = injection_spec_for_payload
         self._surface = surface
         self._drive = drive
         self._runtime = runtime
@@ -191,7 +184,7 @@ class MidojoEpisodeTarget(PromptTarget):
         runtime: AgentRuntime,
         interception: HostInterception | None = None,
         control: ControlPlane | None = None,
-    ) -> MidojoEpisodeTarget:
+    ) -> MidojoInjectionSpecTarget:
         """Declare a single suite probe (the full ``task:probe`` key).
 
         ``suite`` names the suite once, as its module: a bundled suite's name,
@@ -208,14 +201,14 @@ class MidojoEpisodeTarget(PromptTarget):
         host_tools = host_tools_reference(suite_module)
         if interception is None and host_tools is not None:
             raise ValueError("a suite declaring HOST_TOOLS requires host interception")
-        surface = suite.episode(user_task_id, injection_task_id, {probe_key: ""}).plan
+        surface = suite.injection_spec(user_task_id, injection_task_id, {probe_key: ""}).plan
 
         def compile_episode(payload: str) -> InjectionSpec:
             injections = permitted_injections(AttackAttempt({probe_key: payload}), {probe_key: ""})
-            return suite.episode(user_task_id, injection_task_id, injections)
+            return suite.injection_spec(user_task_id, injection_task_id, injections)
 
         return cls(
-            episode_for_payload=compile_episode,
+            injection_spec_for_payload=compile_episode,
             surface=surface,
             drive=drive,
             runtime=runtime,
@@ -242,7 +235,7 @@ class MidojoEpisodeTarget(PromptTarget):
             else:
                 candidate = piece.converted_value
                 try:
-                    episode = self._episode_for_payload(candidate)
+                    episode = self._injection_spec_for_payload(candidate)
                     check_plan_within(episode.plan, self._surface)
                     if len(episode.plan.instructions) != 1 or episode.plan.instructions[0].payload != candidate:
                         raise OutOfSurfaceError("the candidate must fill exactly the declared instruction")

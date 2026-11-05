@@ -20,7 +20,7 @@ from midojo.control_plane.config import AppConfig
 from midojo.control_plane.grading import grade
 from midojo.control_plane.inprocess_control import InProcessControlClient
 from midojo.control_plane.main import create_app
-from midojo.episode import Episode
+from midojo.injection_spec import InjectionSpec
 from midojo.orchestrator import run_benchmark
 from midojo.runtimes.openshell import OpenShellRuntime
 from midojo.yaml_task_suite import YAMLTaskSuite
@@ -104,7 +104,7 @@ def test_an_unknown_grade_is_invalid_and_keeps_its_reason(reasons_suite):
     ids=["no security check", "no utility check, passed", "no utility check, not passed", "no check"],
 )
 def test_the_episode_grade_has_no_reason_only_without_a_check(checks, output, expected):
-    episode = Episode(environment={}, **checks)
+    episode = InjectionSpec(environment={}, **checks)
     env = episode.provision_environment()
     graded = episode.grade(output, env, env, [])
     assert _reasons(graded) == expected
@@ -152,7 +152,7 @@ async def test_the_control_planes_grade_names_the_reason_in_process(
     assert _reasons(graded) == expected
     assert _reasons(stored) == expected
     # The pure verdict of the sealed snapshot gives the same reasons.
-    verdict = grade(reasons_suite.episode(user_task, injection_task), snapshot)
+    verdict = grade(reasons_suite.injection_spec(user_task, injection_task), snapshot)
     assert _reasons(verdict.grade) == expected
     # And the HTTP route returns what the in-process client does.
     client = TestClient(create_app({"reasons": reasons_suite}, config=AppConfig(closure_wait_seconds=0)))

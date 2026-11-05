@@ -16,7 +16,7 @@ class NoPyrit(importlib.abc.MetaPathFinder):
 
 sys.meta_path.insert(0, NoPyrit())
 import midojo
-from midojo import Episode, grade, open_episode
+from midojo import InjectionSpec, grade, open_evaluation
 assert 'pyrit' not in sys.modules
 try:
     import midojo.pyrit

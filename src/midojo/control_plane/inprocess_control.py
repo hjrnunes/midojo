@@ -21,11 +21,10 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
-from midojo.episode_aliases import resolve as _resolve_episode_alias
 from midojo.injection_spec import InjectionSpec
 from midojo.observations import observation_type
 from midojo.types import Environment, InterceptionMode
@@ -50,11 +49,6 @@ from .state import Snapshot
 
 if TYPE_CHECKING:
     from midojo_sdk.recorder import Recorder, WorldState
-
-
-def __getattr__(name: str) -> Any:
-    """Resolve a name this module exported before the episode -> injection spec rename (D24)."""
-    return _resolve_episode_alias(__name__, name)
 
 
 class InProcessControlClient:
@@ -117,12 +111,6 @@ class InProcessControlClient:
         Its ``run_id`` is None, which is how the other methods address it.
         """
         return self._control.open_evaluation(episode, interception=interception)
-
-    def __getattr__(self, name: str) -> Any:
-        # The old method name stays for one cycle (D24): a caller that still says it reaches open_evaluation.
-        if name == "open_" + "episode":
-            return self.open_evaluation
-        raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
 
     async def start_turn(self, run_id: str | None, eval_id: str, message: str) -> TurnResponse:
         req = StartTurnRequest(message=message)

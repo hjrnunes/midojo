@@ -50,7 +50,7 @@ class AttackAttempt:
     """What an attacker proposes for one attempt.
 
     ``injections`` maps probe keys (``"<injection_task>:<probe>"``) to payload
-    strings, as ``suite.episode`` takes them. Only the probes the pair's
+    strings, as ``suite.injection_spec`` takes them. Only the probes the pair's
     injection task declares may be named (see :func:`permitted_injections`); a
     probe left out is simply not placed.
     """

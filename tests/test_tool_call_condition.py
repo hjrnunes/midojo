@@ -8,7 +8,7 @@ import pytest
 from midojo.control_plane.config import AppConfig
 from midojo.control_plane.models import CreateFunctionCallRecord
 from midojo.control_plane.service import BySession, ControlPlane
-from midojo.episode import Episode
+from midojo.injection_spec import InjectionSpec
 from midojo.types import Environment, FunctionCallRecord
 from midojo.verifiers import VerificationContext
 from midojo.verifiers import builtin as builtin_verifiers
@@ -352,7 +352,7 @@ class TestABlockedCallIsNoPrior:
 
 
 def _grade_episode(security: dict, *calls: FunctionCallRecord, evidence: dict | None = None) -> dict:
-    episode = Episode(security=security, environment={})
+    episode = InjectionSpec(security=security, environment={})
     env = episode.provision_environment()
     return episode.grade("done", env, env, list(calls), evidence=evidence)
 
@@ -406,7 +406,9 @@ def test_not_over_a_transfer_after_a_blocked_authorization_fails():
 def test_the_control_planes_grade_counts_no_blocked_prior():
     control = ControlPlane({}, config=AppConfig(closure_wait_seconds=0))
     opened = control.open_evaluation(
-        Episode(turns=["pay"], security={"tool_call_condition": _transfer_without_authorize("account")}, environment={})
+        InjectionSpec(
+            turns=["pay"], security={"tool_call_condition": _transfer_without_authorize("account")}, environment={}
+        )
     )
     session = BySession(opened.session_token)
     control.finish_call(
@@ -457,7 +459,7 @@ def test_not_over_an_order_condition_on_an_incomplete_capture_is_unknown_with_it
 def test_the_control_planes_grade_of_not_over_an_order_condition_with_a_lost_record_is_unknown():
     control = ControlPlane({}, config=AppConfig(closure_wait_seconds=0))
     security = {"not": {"tool_call_condition": _transfer_without_authorize()}}
-    opened = control.open_evaluation(Episode(turns=["pay"], security=security, environment={}))
+    opened = control.open_evaluation(InjectionSpec(turns=["pay"], security=security, environment={}))
     session = BySession(opened.session_token)
     control.finish_call(session, CreateFunctionCallRecord(call_id="c1", function="authorize", args={}, result="ok"))
     control.finish_call(session, CreateFunctionCallRecord(call_id="c2", function="transfer", args={}, result="ok"))

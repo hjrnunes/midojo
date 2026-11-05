@@ -63,7 +63,7 @@ from midojo.control_plane.config import AppConfig
 from midojo.control_plane.main import create_app
 from midojo.control_plane.models import GradeResponse
 from midojo.control_plane.state import Snapshot
-from midojo.episode_context import INTERRUPTED_EVIDENCE
+from midojo.evaluation_context import INTERRUPTED_EVIDENCE
 from midojo.yaml_task_suite import YAMLTaskSuite
 from tests.backends import NAMES, Agent, Backend
 
@@ -164,7 +164,7 @@ async def _apply(cut: str, control: ControlClient, run_id: str, eval_id: str, cl
     elif cut == "expired":
         clock[0] += 6
     else:
-        # An interrupted seal as the control plane records it: what EpisodeContext does when it can't finish an
+        # An interrupted seal as the control plane records it: what EvaluationContext does when it can't finish an
         # episode. It marks the evidence it couldn't collect incomplete, and revokes nothing.
         await control.complete_evaluation(run_id, eval_id, OUTPUT, INTERRUPTED_EVIDENCE)
 
@@ -182,7 +182,7 @@ async def _sealed_control(backend: Backend, control: ControlClient, run_id: str,
 
 def _regraded(suite: YAMLTaskSuite, snapshot: Snapshot, security: Mapping[str, object]) -> GradeResponse:
     """The snapshot graded again with another security check: the same pure grade, from the same snapshot."""
-    episode = dataclasses.replace(suite.episode(USER_TASK, INJECTION_TASK), security=security)
+    episode = dataclasses.replace(suite.injection_spec(USER_TASK, INJECTION_TASK), security=security)
     return midojo.grade(episode, snapshot).grade
 
 
@@ -232,7 +232,7 @@ async def test_a_finish_refused_after_the_cut_leaves_the_capture_incomplete(cut,
     with pytest.raises(ControlPlaneRejectedError):
         await agent.finish_call(**CALL, result=RESULT, disposition="forwarded")
     if cut == "interrupted_seal":
-        # What EpisodeContext does after an interrupted seal: it revokes the session. A still later finish is then
+        # What EvaluationContext does after an interrupted seal: it revokes the session. A still later finish is then
         # refused as no authority at all, and kept nowhere.
         await control.revoke_session(run.id, opened.id)
         with pytest.raises(ControlPlaneRejectedError) as orphaned:

@@ -31,7 +31,7 @@ class UnreadableResponseError(httpx.HTTPError):
     """A successful (2xx) response whose body isn't the model it should be: it couldn't be decoded or validated.
 
     The control plane accepted the request, so this is never a refusal: what
-    it did is unknown to the caller (``episode_context._refused`` is False),
+    it did is unknown to the caller (``evaluation_context._refused`` is False),
     as after a lost response. The decoding error is its ``__cause__``.
     """
 

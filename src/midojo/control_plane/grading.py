@@ -24,19 +24,12 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from midojo.episode_aliases import resolve as _resolve_episode_alias
 from midojo.injection_spec import InjectionSpec
 from midojo.verifiers import ConversationTurn
 from midojo.verifiers.judge import JudgeRecord
 
 from .models import GradeResponse
 from .state import Snapshot
-
-
-def __getattr__(name: str) -> Any:
-    """Resolve a name this module exported before the episode -> injection spec rename (D24)."""
-    return _resolve_episode_alias(__name__, name)
-
 
 VERDICT_DOCUMENT_V1 = "midojo-verdict-v1"
 """The verdict document version :meth:`Verdict.to_document` writes; a versionless document reads as v0."""

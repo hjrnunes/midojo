@@ -32,13 +32,13 @@ from midojo import evaluation_handle
 from midojo.capabilities import MissingCapabilityError
 from midojo.control_plane.service import ControlPlane
 from midojo.evaluation_handle import (
-    DEFAULT_MAX_LIVE_EPISODES,
+    DEFAULT_MAX_LIVE_EVALUATIONS,
     HANDLE_API_VERSION,
     HANDLE_METHODS,
     EvaluationHandle,
     HandleClosedError,
     HandleOwnerError,
-    LiveEpisodeLimitError,
+    LiveEvaluationLimitError,
     RepeatWithoutResetError,
     SendTurnUnsupported,
 )
@@ -243,7 +243,7 @@ class FailingSeal(ControlPlane):
 
 def test_open_builds_a_handle_over_the_episode_and_the_compatibility_names_exist():
     assert HANDLE_API_VERSION == 1
-    assert DEFAULT_MAX_LIVE_EPISODES == 8
+    assert DEFAULT_MAX_LIVE_EVALUATIONS == 8
     assert set(HANDLE_METHODS) == {"tool_block", "start_turn", "record_reply", "send_turn", "seal"}
     for name in (*HANDLE_METHODS, "close", "grade", "__enter__", "__exit__"):
         assert callable(getattr(EvaluationHandle, name))
@@ -390,7 +390,7 @@ def test_the_handle_owns_one_loop_thread_and_leaves_none_behind():
     with evaluation_handle.open(weather_episode(), upstream=scripted_upstream()) as handle:
         assert handle.tool_endpoint is not None
         own = [thread for thread in threading.enumerate() if thread not in threads]
-        loops = [thread for thread in own if thread.name == "midojo-episode-handle"]
+        loops = [thread for thread in own if thread.name == "midojo-evaluation-handle"]
         assert len(loops) == 1 and loops[0].daemon is True
         assert not refuses(handle.tool_endpoint.url)
     assert set(threading.enumerate()) == threads
@@ -496,19 +496,19 @@ def test_dropping_a_handle_closes_it_and_frees_a_slot():
 
 def test_a_max_live_slot_is_freed_by_close_and_capped_by_the_environment(monkeypatch):
     first = evaluation_handle.open(weather_episode(), upstream=scripted_upstream(), max_live=1)
-    with pytest.raises(LiveEpisodeLimitError) as caught:
+    with pytest.raises(LiveEvaluationLimitError) as caught:
         evaluation_handle.open(weather_episode(), upstream=scripted_upstream(), max_live=1)
     error = caught.value
-    assert (error.limit, error.live, error.reason) == (1, 1, "live-episode-limit")
+    assert (error.limit, error.live, error.reason) == (1, 1, "live-evaluation-limit")
     first.close()
     for _ in range(8):
         with evaluation_handle.open(weather_episode(), upstream=scripted_upstream(), max_live=1):
             pass
-    monkeypatch.setenv("MIDOJO_MAX_LIVE_EPISODES", "1")
+    monkeypatch.setenv("MIDOJO_MAX_LIVE_EVALUATIONS", "1")
     with evaluation_handle.open(weather_episode(), upstream=scripted_upstream(), max_live=4) as capped:
         assert capped.closed is False
-    monkeypatch.setenv("MIDOJO_MAX_LIVE_EPISODES", "many")
-    with pytest.raises(ValueError, match="MIDOJO_MAX_LIVE_EPISODES"):
+    monkeypatch.setenv("MIDOJO_MAX_LIVE_EVALUATIONS", "many")
+    with pytest.raises(ValueError, match="MIDOJO_MAX_LIVE_EVALUATIONS"):
         evaluation_handle.open(weather_episode(), upstream=scripted_upstream())
 
 

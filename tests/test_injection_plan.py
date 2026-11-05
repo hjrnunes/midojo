@@ -38,7 +38,7 @@ from midojo_sdk.injection import (
 from midojo_sdk.mcp import MIDOJO_MCP_CAPABILITY, MidojoMCP, ToolContext
 from midojo_sdk.recorder import Disposition, InjectionRecord
 
-from midojo.episode import Episode
+from midojo.injection_spec import InjectionSpec
 from midojo.suites import get_suite
 from midojo.types import CallInjectionOutcome
 from tests.scripted_mcp import ScriptedMCP
@@ -354,7 +354,7 @@ def test_plan_json_round_trip_carries_record_selectors_through_an_episode():
     encoded = plan.to_json()
     decoded = InjectionPlan.from_json(encoded)
     data = plan.to_data()
-    episode = Episode(plan=decoded)
+    episode = InjectionSpec(plan=decoded)
 
     assert InjectionPlan.from_data(data) == decoded == plan == episode.plan
     assert plan.to_data() == data and plan.to_data() is not data
@@ -512,7 +512,7 @@ def test_generator_output_is_constrained_by_the_episode_plan_permissions():
         fields=frozenset({("items", 0, "summary")}),
         modes=frozenset({InjectionMode.REPLACE}),
     )
-    episode = Episode(plan=InjectionPlan(generator_permissions=permissions))
+    episode = InjectionSpec(plan=InjectionPlan(generator_permissions=permissions))
     valid = {"payload": "x", "tool": "search", "field": ["items", 0, "summary"], "mode": "replace"}
     made = instruction_from_generator_for_plan(valid, episode.plan, probe_key="task:probe")
     assert (made.target.tool, made.target.structured_content_path, made.probe_key) == (
@@ -621,7 +621,7 @@ def test_simulated_tools_reject_instructions_that_would_match_them(target_tool):
 async def test_a_compiled_suite_plan_can_select_the_part_midojo_mcp_delivers():
     suite = get_suite("weather")
     probes = suite.get_probes_for_task("tornado_alert_via_prompt")
-    episode = suite.episode("weather_new_york", "tornado_alert_via_prompt", probes)
+    episode = suite.injection_spec("weather_new_york", "tornado_alert_via_prompt", probes)
     plan = episode.plan.for_channels(Channel.TOOL_OUTPUT)
     mcp = MidojoMCP("proxy", recorder=CapturingRecorder(), upstream_transport=ScriptedMCP().transport, plan=plan)
 
@@ -1136,7 +1136,7 @@ def test_plan_json_round_trip_carries_call_arguments_through_an_episode():
         "note": None,
         "order_id": "ORD-102",
     }
-    assert InjectionPlan.from_json(encoded) == InjectionPlan.from_data(data) == plan == Episode(plan=plan).plan
+    assert InjectionPlan.from_json(encoded) == InjectionPlan.from_data(data) == plan == InjectionSpec(plan=plan).plan
     assert InjectionPlan.from_json(encoded).to_json() == encoded
 
 
@@ -1717,7 +1717,7 @@ def test_plan_json_round_trip_carries_result_record_through_an_episode():
         {"field": "id", "equals": 7},
     ]
     assert targets[0]["call_arguments"] == {"patient_id": "P-1"}
-    assert InjectionPlan.from_json(encoded) == InjectionPlan.from_data(data) == plan == Episode(plan=plan).plan
+    assert InjectionPlan.from_json(encoded) == InjectionPlan.from_data(data) == plan == InjectionSpec(plan=plan).plan
     assert InjectionPlan.from_json(encoded).to_json() == encoded
 
 

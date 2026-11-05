@@ -24,16 +24,16 @@ gate is not a substitute for checking it in the extra environment.
 
 ## Target and evidence
 
-`MidojoEpisodeTarget` is a text-only, single-turn PyRIT `PromptTarget`.
+`MidojoInjectionSpecTarget` is a text-only, single-turn PyRIT `PromptTarget`.
 Each `send_prompt_async` runs one evaluation through `midojo.open_evaluation`.
 The candidate fills one declared plan instruction; `check_plan_within`
 refuses changed selectors, modes, transformations, size limits, extra
 instructions or probes before an evaluation opens. The host-supplied
-`episode_for_payload` compiler and `drive` callback are trusted code.
+`injection_spec_for_payload` compiler and `drive` callback are trusted code.
 `drive` uses the injection spec's benign turns and `ep.binding`, records replies
 with `ep.turn`, and leaves the context to seal and clean up.
 
-For a suite, `MidojoEpisodeTarget.from_suite` takes `suite`,
+For a suite, `MidojoInjectionSpecTarget.from_suite` takes `suite`,
 `user_task_id`, `injection_task_id`, and full `probe_key` (`task:probe`).
 `suite` names the suite once, by its module: a bundled suite's name
 (`"weather"`), a dotted module path (`"my_package.my_suite"`) or the
@@ -58,10 +58,10 @@ never imports anything the declaration names. Only a suite module that
 doesn't exist (a `ModuleNotFoundError` naming it or a package it would be
 in) reads as None; any other import error, one from the suite module's own
 imports included, propagates. Direct users supply an
-`episode_for_payload(candidate) -> InjectionSpec` compiler and its permitted
+`injection_spec_for_payload(candidate) -> InjectionSpec` compiler and its permitted
 single-instruction `InjectionPlan` as `surface`.
 
-The target keeps its name, `MidojoEpisodeTarget`, and so does its `episode_for_payload` argument; the pre-rename class, module and function names remain deprecated aliases of the new ones.
+The target and its `injection_spec_for_payload` argument are named for the injection spec; the pre-rename `MidojoEpisodeTarget` and `episode_for_payload` names are gone (M9).
 
 The response text is the agent's actual final reply. Its `prompt_metadata`
 contains `midojo.evaluation_id`, `midojo.snapshot_id`, `midojo.grade` (JSON),
@@ -281,7 +281,7 @@ campaign that succeeded is a failure to write them raised itself:
 
 A refused send has no evaluation, so no snapshot. `write_receipts`,
 `prepare_output_dir` and `attack_summary` are part of `midojo.pyrit`, for
-any campaign over a `MidojoEpisodeTarget`; `target.receipts()` lists the
+any campaign over a `MidojoInjectionSpecTarget`; `target.receipts()` lists the
 receipts they read.
 
 ## Other attack strategies

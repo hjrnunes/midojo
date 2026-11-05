@@ -26,7 +26,7 @@ from midojo_sdk.recorder import (
 from midojo.control_plane import models
 from midojo.control_plane.inprocess import InProcessAgentClient
 from midojo.control_plane.service import ById, ControlPlane
-from midojo.episode import Episode
+from midojo.injection_spec import InjectionSpec
 from tests.scripted_mcp import ScriptedMCP, wire_session
 from tests.test_langchain_sdk import ScriptedModel
 
@@ -406,7 +406,7 @@ def losing_http(app, path: str = "/agent/function-calls") -> httpx.AsyncClient:
 def open_control_plane_evaluation(app) -> tuple[ControlPlane, str, str]:
     control: ControlPlane = app.state.control
     opened = control.open_evaluation(
-        Episode(turns=["go"], security=_NEVER_EMAILED, utility={"output_contains": "done"}, environment={})
+        InjectionSpec(turns=["go"], security=_NEVER_EMAILED, utility={"output_contains": "done"}, environment={})
     )
     return control, opened.id, opened.session_token
 

@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from midojo.episode import thaw
+from midojo.injection_spec import thaw
 from midojo.probes import substitute_probes, substitute_probes_deep
 from midojo.suites import get_suite, list_suites
 from midojo.yaml_task_suite import YAMLTaskSuite
@@ -48,7 +48,7 @@ def _files(suite: YAMLTaskSuite) -> dict[str, str]:
 def _rendering(suite: YAMLTaskSuite, user: str, injection: str | None) -> dict[str, Any]:
     """What one pair's episode delivers: its environment, turns and seeded files, as plain data."""
     probes = suite.get_probes_for_task(injection) if injection is not None else {}
-    episode = suite.episode(user, injection, probes)
+    episode = suite.injection_spec(user, injection, probes)
     active = dict(episode.injections)
     return {
         "environment": thaw(episode.environment),
@@ -82,7 +82,7 @@ def test_the_plan_renders_like_substituting_the_probes_directly(name):
     suite = get_suite(name)
     for user, injection in _pairs(suite):
         probes = suite.get_probes_for_task(injection) if injection is not None else {}
-        episode = suite.episode(user, injection, probes)
+        episode = suite.injection_spec(user, injection, probes)
         assert thaw(episode.environment) == substitute_probes_deep(suite.definition.environment, probes)
         assert list(episode.turns or ()) == [substitute_probes(m, probes) for m in suite.user_tasks[user].turns]
         assert dict(episode.injections) == probes

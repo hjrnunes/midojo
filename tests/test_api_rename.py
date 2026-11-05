@@ -1,25 +1,61 @@
-"""The D23 names are primary, and the D24 aliases still resolve to them.
+"""The D23 names are the only names: the D24 aliases are gone (M9).
 
-``InjectionSpec`` and ``Evaluation*`` are the names new code uses; the
-``Episode*`` names and ``open_episode`` stay importable, and every one of them
-is the same object as the new name it aliases, so a caller on either spelling
-behaves the same until the aliases go (M9).
+``InjectionSpec`` and ``Evaluation*`` are the names new code uses. The
+``Episode*`` names, ``open_episode``, the ``midojo.episode*`` modules and the
+SDK's ``midojo_sdk.episode_schema`` were deprecated aliases of them; importing
+or naming any of them now fails. The readers of recorded data keep the old
+document versions, the old schema file and the old notes: those are data, not
+code names.
 """
 
 from __future__ import annotations
 
+import importlib
+import importlib.util
+
 import pytest
 
 import midojo
-import midojo.episode
-import midojo.episode_context
-import midojo.episode_document
-import midojo.episode_handle
+import midojo.control_plane.grading
+import midojo.control_plane.inprocess_control
+import midojo.control_plane.service
+import midojo.control_plane.state
 import midojo.evaluation_context
 import midojo.evaluation_handle
 import midojo.injection_spec
 import midojo.injection_spec_document
 import midojo.orchestrator
+import midojo.yaml_task_suite
+
+REMOVED_MODULES = (
+    "midojo.episode",
+    "midojo.episode_aliases",
+    "midojo.episode_context",
+    "midojo.episode_document",
+    "midojo.episode_handle",
+    "midojo_sdk.episode_schema",
+)
+
+REMOVED_NAMES = (
+    "Episode",
+    "EpisodeContext",
+    "EpisodeHandle",
+    "EpisodeResult",
+    "EpisodeRun",
+    "EpisodeStep",
+    "open_episode",
+)
+
+# The modules that exported an old name, in place of the import that used to resolve it.
+ALIASED_MODULES = (
+    midojo,
+    midojo.control_plane.grading,
+    midojo.control_plane.inprocess_control,
+    midojo.control_plane.service,
+    midojo.control_plane.state,
+    midojo.orchestrator,
+    midojo.yaml_task_suite,
+)
 
 
 def test_the_new_names_are_exported_by_the_package() -> None:
@@ -51,106 +87,63 @@ def test_the_new_names_are_exported_by_the_package() -> None:
     assert midojo.EvaluationStep is EvaluationStep
 
 
-def test_each_old_name_is_its_new_name() -> None:
-    from midojo import (
-        Episode,
-        EpisodeContext,
-        EpisodeHandle,
-        EpisodeResult,
-        EpisodeRun,
-        EpisodeStep,
-        open_episode,
-    )
-    from midojo.evaluation_context import EvaluationContext, EvaluationResult, EvaluationStep, open_evaluation
-    from midojo.evaluation_handle import EvaluationHandle
-    from midojo.injection_spec import InjectionSpec
-    from midojo.injection_spec_document import InjectionSpecDocumentError
-
-    assert Episode is InjectionSpec
-    assert EpisodeContext is EvaluationContext
-    assert EpisodeHandle is EvaluationHandle
-    assert EpisodeResult is EvaluationResult
-    assert EpisodeRun is midojo.orchestrator.EvaluationRun
-    assert EpisodeStep is EvaluationStep
-    assert open_episode is open_evaluation
-    assert midojo.Episode is InjectionSpec
-    assert midojo.episode.Episode is InjectionSpec
-    assert midojo.episode_context.EpisodeContext is EvaluationContext
-    assert midojo.episode_context.EpisodeResult is EvaluationResult
-    assert midojo.episode_context.EpisodeStep is EvaluationStep
-    assert midojo.episode_context.open_episode is open_evaluation
-    assert midojo.episode_handle.EpisodeHandle is EvaluationHandle
-    assert midojo.episode_document.EpisodeDocumentError is InjectionSpecDocumentError
-    assert midojo.EvaluationRun is midojo.orchestrator.EvaluationRun
+@pytest.mark.parametrize("name", REMOVED_MODULES)
+def test_an_old_module_is_gone(name: str) -> None:
+    assert importlib.util.find_spec(name) is None
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module(name)
 
 
-def test_each_old_name_imports_from_the_module_that_exported_it() -> None:
-    """Every old import path names the new object, not only the package root (AGENTS.md invariant 5)."""
-    from midojo.control_plane.grading import Episode as GradingEpisode
-    from midojo.control_plane.inprocess_control import Episode as InProcessEpisode
-    from midojo.control_plane.service import Episode as ServiceEpisode
-    from midojo.control_plane.state import Episode as StateEpisode
-    from midojo.episode_context import Episode as ContextEpisode
-    from midojo.episode_document import Episode as DocumentEpisode
-    from midojo.episode_handle import Episode as HandleEpisode
-    from midojo.evaluation_context import EvaluationContext, EvaluationStep, open_evaluation
-    from midojo.injection_spec import InjectionSpec
-    from midojo.orchestrator import Episode as OrchestratorEpisode
-    from midojo.orchestrator import EpisodeContext, EpisodeRun, EpisodeStep, open_episode
-    from midojo.yaml_task_suite import Episode as YamlSuiteEpisode
-
-    assert OrchestratorEpisode is InjectionSpec
-    assert EpisodeContext is EvaluationContext
-    assert EpisodeRun is midojo.orchestrator.EvaluationRun
-    assert EpisodeStep is EvaluationStep
-    assert open_episode is open_evaluation
-    assert GradingEpisode is InjectionSpec
-    assert InProcessEpisode is InjectionSpec
-    assert ServiceEpisode is InjectionSpec
-    assert StateEpisode is InjectionSpec
-    assert ContextEpisode is InjectionSpec
-    assert DocumentEpisode is InjectionSpec
-    assert HandleEpisode is InjectionSpec
-    assert YamlSuiteEpisode is InjectionSpec
+@pytest.mark.parametrize("module", ALIASED_MODULES, ids=lambda module: module.__name__)
+def test_no_module_answers_to_an_old_name(module) -> None:
+    for name in REMOVED_NAMES:
+        assert not hasattr(module, name), f"{module.__name__} still answers to {name}"
+        assert name not in dir(module), f"{module.__name__} still lists {name}"
 
 
-def test_the_pyrit_target_keeps_its_old_names() -> None:
-    pytest.importorskip("pyrit")
-    from midojo.pyrit.target import Episode, EpisodeContext
-
-    assert Episode is midojo.InjectionSpec
-    assert EpisodeContext is midojo.EvaluationContext
+def test_the_package_does_not_list_an_old_name() -> None:
+    for name in REMOVED_NAMES:
+        assert name not in midojo.__all__
 
 
-def test_a_star_import_of_the_orchestrator_still_names_the_old_names() -> None:
-    """The module's ``__all__`` was the documented star-import surface before the rename."""
+def test_a_star_import_of_the_orchestrator_names_no_old_name() -> None:
     namespace: dict[str, object] = {}
     exec("from midojo.orchestrator import *", namespace)
-    assert namespace["Episode"] is midojo.InjectionSpec
-    assert namespace["EpisodeContext"] is midojo.EvaluationContext
-    assert namespace["EpisodeRun"] is midojo.orchestrator.EvaluationRun
-    assert namespace["EpisodeStep"] is midojo.EvaluationStep
-    assert namespace["open_episode"] is midojo.open_evaluation
+    for name in REMOVED_NAMES:
+        assert name not in namespace
+    assert namespace["InjectionSpec"] is midojo.InjectionSpec
+    assert namespace["EvaluationRun"] is midojo.orchestrator.EvaluationRun
 
 
-def test_open_episode_opens_the_evaluation_open_evaluation_opens() -> None:
-    spec = midojo.InjectionSpec(turns=["hello"])
-    old = midojo.open_episode(spec)
-    new = midojo.open_evaluation(spec)
+def test_the_pyrit_target_has_no_old_names() -> None:
+    pytest.importorskip("pyrit")
+    import midojo.pyrit.target
 
-    assert type(old) is type(new) is midojo.EvaluationContext
-    assert old.episode is spec and new.episode is spec
-    assert old.run_id is new.run_id is None
+    for name in REMOVED_NAMES:
+        assert not hasattr(midojo.pyrit.target, name)
 
 
-def test_the_old_schema_module_is_the_new_one() -> None:
-    import midojo_sdk.episode_schema
-    import midojo_sdk.injection_spec_schema
+def test_the_in_process_client_has_no_open_episode() -> None:
+    from midojo.control_plane.inprocess_control import InProcessControlClient
+    from midojo.control_plane.service import ControlPlane
 
-    assert (
-        midojo_sdk.injection_spec_schema.EPISODE_DOCUMENT_V1
-        == midojo_sdk.injection_spec_schema.INJECTION_SPEC_DOCUMENT_V1
-    )
-    assert midojo_sdk.episode_schema.load_schema is midojo_sdk.injection_spec_schema.load_schema
-    assert midojo_sdk.episode_schema.SCHEMA_FILE == "schemas/midojo-injection-spec-v1.schema.json"
-    assert midojo_sdk.episode_schema.LEGACY_SCHEMA_FILE == "schemas/midojo-episode-v1.schema.json"
+    client = InProcessControlClient(ControlPlane({}))
+    assert not hasattr(client, "open_episode")
+    assert hasattr(client, "open_evaluation")
+
+
+def test_the_old_document_constant_is_gone() -> None:
+    import midojo_sdk.injection_spec_schema as schema
+
+    assert not hasattr(schema, "EPISODE_DOCUMENT_V1")
+    assert "EPISODE_DOCUMENT_V1" not in schema.__all__
+
+
+def test_the_readers_keep_the_old_recorded_names() -> None:
+    """The old names are data: recorded documents, the schema file and the notes keep reading."""
+    import midojo_sdk.injection_spec_schema as schema
+
+    assert midojo.injection_spec_document.LEGACY_DOCUMENT_VERSIONS == ("midojo-episode-v1", "midojo-episode-v2")
+    assert schema.LEGACY_INJECTION_SPEC_DOCUMENT_V1 == "midojo-episode-v1"
+    assert schema.LEGACY_SCHEMA_FILE == "schemas/midojo-episode-v1.schema.json"
+    assert midojo.injection_spec.MAX_NESTING_DEPTH > 0

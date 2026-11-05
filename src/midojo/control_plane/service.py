@@ -45,7 +45,6 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from midojo.episode_aliases import resolve as _resolve_episode_alias
 from midojo.injection_spec import InjectionSpec, UnknownTaskError
 from midojo.observations import require_evidence_keys
 from midojo.types import Environment, FunctionCallRecord, InterceptionMode, SuiteName
@@ -64,12 +63,6 @@ from .models import (
 )
 from .state import CaptureFailure, Creation, Evaluation, Run, Snapshot, Stage, Turn, unsupported_value
 from .store import InMemoryStore, Store, detached
-
-
-def __getattr__(name: str) -> Any:
-    """Resolve a name this module exported before the episode -> injection spec rename (D24)."""
-    return _resolve_episode_alias(__name__, name)
-
 
 # How often the closure wait checks for unfinished calls, in seconds.
 CLOSURE_POLL_SECONDS = 0.05
@@ -353,7 +346,7 @@ class ControlPlane:
     ) -> CreateEvaluationResponse:
         """Compile and open the evaluation; ``injections`` is already the caller's, read once (see above)."""
         try:
-            episode = self.suite(run_id).episode(user_task_id, injection_task_id, injections)
+            episode = self.suite(run_id).injection_spec(user_task_id, injection_task_id, injections)
         except UnknownTaskError as exc:
             raise _reject(Rejection.UNKNOWN_TASK, exc.detail) from None
         opened = self.open_evaluation(episode, run_id=run_id, interception=interception)

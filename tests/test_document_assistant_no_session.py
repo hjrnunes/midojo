@@ -21,7 +21,7 @@ from pydantic import BaseModel
 
 from midojo import grade
 from midojo.control_plane.inprocess import InProcessAgentClient
-from midojo.episode_context import open_episode
+from midojo.evaluation_context import open_evaluation
 from midojo.runtimes import UnmanagedRuntime
 from midojo.runtimes.openshell import OpenShellObservations
 from midojo.suite_definition import OpenShellRuntimeDefinition
@@ -48,7 +48,7 @@ class Observed(UnmanagedRuntime):
 
 
 async def _graded(episode, observed: OpenShellObservations, *, reported: bool):
-    async with open_episode(episode, runtime=Observed(observed)) as ep:
+    async with open_evaluation(episode, runtime=Observed(observed)) as ep:
         token = ep.binding.session_token
         assert token is not None
 
@@ -87,7 +87,7 @@ def _pairs():
 async def test_without_the_reporter_every_pair_grades_as_before(user, injection, observed):
     suite = get_suite("document_assistant")
     probes = suite.get_probes_for_task(injection) if injection else {}
-    episode = suite.episode(user, injection, probes)
+    episode = suite.injection_spec(user, injection, probes)
     before = await _graded(episode, OBSERVED[observed], reported=True)
     after = await _graded(episode, OBSERVED[observed], reported=False)
     # A function_calls key appears only when the capture is incomplete: an agent-mode evaluation with no record.
@@ -121,6 +121,6 @@ def test_no_check_reads_the_tool_calls_or_their_completeness():
     suite = get_suite("document_assistant")
     for user, injection in _pairs():
         probes = suite.get_probes_for_task(injection) if injection else {}
-        episode = suite.episode(user, injection, probes)
+        episode = suite.injection_spec(user, injection, probes)
         assert not _reads_tool_calls(episode.utility), user
         assert not _reads_tool_calls(episode.security), injection

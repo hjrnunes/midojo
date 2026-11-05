@@ -44,8 +44,6 @@ from midojo.control_plane.config import CONTROL_TOKEN_ENV
 from midojo.control_plane.models import GradeResponse
 from midojo.control_plane.state import Snapshot
 from midojo.delivery import EXPOSURE_BOUNDARIES, DeliveryFact, Exposure, ExposureStatus, delivery_facts, exposure
-from midojo.episode_aliases import names as _episode_alias_names
-from midojo.episode_aliases import resolve as _resolve_episode_alias
 from midojo.evaluation_context import EvaluationContext, EvaluationStep, open_evaluation
 from midojo.injection_spec import InjectionSpec
 from midojo.runtimes import AgentRuntime, attempt_isolation, is_disposable
@@ -83,11 +81,11 @@ def __getattr__(name: str) -> Any:
         from midojo import runtimes
 
         return getattr(runtimes.openshell, name)
-    return _resolve_episode_alias(__name__, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def __dir__() -> list[str]:
-    return sorted({*globals(), *_FROM_OPENSHELL, *_episode_alias_names(__name__)})
+    return sorted({*globals(), *_FROM_OPENSHELL})
 
 
 # What ``from midojo.orchestrator import *`` exports: every public name it exported when this module imported the
@@ -176,8 +174,6 @@ __all__ = [
     "sys",
     "tool_url",
 ]
-# The renamed names this module exported keep their place in the star-import surface until the aliases go (M9).
-__all__ += list(_episode_alias_names(__name__))  # pyright: ignore[reportUnsupportedDunderAll]
 
 
 def _resolve_system_message(suite_name: str) -> str:
@@ -554,7 +550,7 @@ async def run_task(
     """
     user_task_id, injection_task_id = episode.user_task_id, episode.injection_task_id
     if user_task_id is None:
-        raise ValueError("run_task runs a suite's episode: compile one with suite.episode()")
+        raise ValueError("run_task runs a suite's episode: compile one with suite.injection_spec()")
     pair = f"{user_task_id} x {injection_task_id}" if injection_task_id else user_task_id
     steps: dict[EvaluationStep, str] = {
         "interceptor": "starting the interceptor",
@@ -776,7 +772,7 @@ async def _run_pair_attempts(
     naming another probe, or compiling to a plan that places anything the
     pair's own plan doesn't, is refused before any episode runs, and recorded as
     refused. Otherwise the attempt is one episode, compiled with
-    ``suite.episode`` from its injections, run through the episode context,
+    ``suite.injection_spec`` from its injections, run through the episode context,
     sealed and graded (:func:`run_task`); its outcome is read from that verdict
     and the snapshot's delivery facts. An ``Exception`` from the attacker or the
     episode is a failed attempt, not a non-break.
@@ -807,7 +803,7 @@ async def _run_pair_attempts(
     # a pair always did.
     reset = (attempts > 1 or adaptive) and isolation == "reset"
     permitted = suite.get_probes_for_task(it_id) if it_id else {}
-    surface = suite.episode(ut_id, it_id, permitted).plan
+    surface = suite.injection_spec(ut_id, it_id, permitted).plan
     pair_name = f"{ut_id} x {it_id}" if it_id else ut_id
     runs: list[AttemptRun] = []
     history: list[AttemptOutcome] = []
@@ -817,7 +813,7 @@ async def _run_pair_attempts(
             control,
             agent_client,
             run_id,
-            suite.episode(ut_id, it_id, injections),
+            suite.injection_spec(ut_id, it_id, injections),
             runtime=runtime,
             interception=interception,
             reset=reset,
@@ -837,7 +833,7 @@ async def _run_pair_attempts(
             continue
         try:
             injections = permitted_injections(proposal, permitted)
-            check_plan_within(suite.episode(ut_id, it_id, injections).plan, surface)
+            check_plan_within(suite.injection_spec(ut_id, it_id, injections).plan, surface)
         except OutOfSurfaceError as error:
             outcome = AttemptOutcome.unrun(k, _proposed(proposal), "refused", str(error))
             _print_refused(tag, outcome)

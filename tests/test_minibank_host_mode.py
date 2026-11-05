@@ -66,7 +66,7 @@ from midojo.control_plane.client import ControlPlaneClient
 from midojo.control_plane.config import AppConfig
 from midojo.control_plane.inprocess import InProcessAgentClient
 from midojo.control_plane.main import create_app
-from midojo.episode_context import open_episode
+from midojo.evaluation_context import open_evaluation
 from midojo.interception_host import HostInterception
 from midojo.orchestrator import _delivery
 from midojo.runtimes import UnmanagedRuntime
@@ -243,7 +243,7 @@ class Run:
 
 def _episode(suite, scenario: Scenario):
     probes = suite.get_probes_for_task(scenario.injection_task) if scenario.injection_task else {}
-    return suite.episode(scenario.user_task, scenario.injection_task, probes)
+    return suite.injection_spec(scenario.user_task, scenario.injection_task, probes)
 
 
 async def _run(scenario: Scenario, episode, ep, agent: Client) -> Run:
@@ -271,7 +271,7 @@ async def run_agent_mode(suite, scenario: Scenario, ids: SequentialIds) -> Run:
     """The scenario through the old layer, recording and changing the environment with the evaluation's session."""
     ids.reset()
     episode = _episode(suite, scenario)
-    async with open_episode(episode, runtime=UnmanagedRuntime()) as ep:
+    async with open_evaluation(episode, runtime=UnmanagedRuntime()) as ep:
         token = ep.binding.session_token
         assert token is not None and ep.binding.tool_endpoint is None
         session = InProcessAgentClient(ep.control._control, token)  # type: ignore[attr-defined]
@@ -286,7 +286,7 @@ async def run_host_mode(suite, scenario: Scenario, ids: SequentialIds, **control
     ids.reset()
     episode = _episode(suite, scenario)
     interception = HostInterception(upstream=real_mcp.mcp, tools=host_tools.register)
-    async with open_episode(episode, runtime=UnmanagedRuntime(), interception=interception, **control) as ep:
+    async with open_evaluation(episode, runtime=UnmanagedRuntime(), interception=interception, **control) as ep:
         endpoint = ep.binding.tool_endpoint
         assert endpoint is not None and ep.binding.session_token is None
         async with Client(endpoint.url, auth=endpoint.token) as agent:

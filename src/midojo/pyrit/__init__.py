@@ -1,6 +1,6 @@
 """The PyRIT route: PyRIT owns the campaign, MiDojo is its target and its scorer.
 
-:class:`MidojoEpisodeTarget` is a PyRIT ``PromptTarget`` whose every send runs
+:class:`MidojoInjectionSpecTarget` is a PyRIT ``PromptTarget`` whose every send runs
 one MiDojo episode (:func:`midojo.open_evaluation`) with the candidate text as the
 payload of one declared surface, and answers with the agent's reply and the
 episode's sealed identity and verdict in the response's ``prompt_metadata``.
@@ -22,11 +22,11 @@ except ImportError as error:  # pragma: no cover - only without the extra
 
 from midojo.pyrit.receipts import attack_summary, prepare_output_dir, write_receipts
 from midojo.pyrit.scorers import MidojoVerdictFloatScorer, MidojoVerdictScorer, verdict_of
-from midojo.pyrit.target import METADATA_PREFIX, MidojoEpisodeTarget, MidojoVerdict
+from midojo.pyrit.target import METADATA_PREFIX, MidojoInjectionSpecTarget, MidojoVerdict
 
 __all__ = [
     "METADATA_PREFIX",
-    "MidojoEpisodeTarget",
+    "MidojoInjectionSpecTarget",
     "MidojoVerdict",
     "MidojoVerdictFloatScorer",
     "MidojoVerdictScorer",

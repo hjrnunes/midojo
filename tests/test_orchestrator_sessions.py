@@ -142,7 +142,7 @@ async def test_runner_revokes_sessions_on_success_and_agent_failure(client, suit
     agent = ReportingAgent(backend.agent, fail)
     control = backend.control()
     try:
-        task = run_task(control, agent, run["id"], suite.episode("weather_new_york"), runtime=UnmanagedRuntime())
+        task = run_task(control, agent, run["id"], suite.injection_spec("weather_new_york"), runtime=UnmanagedRuntime())
         if fail:
             with pytest.raises(RuntimeError, match="Agent failed"):
                 await task
@@ -185,7 +185,11 @@ async def test_partial_sandbox_setup_is_cleaned_and_session_revoked(client, suit
     try:
         with pytest.raises(RuntimeError, match="Seed failed"):
             await run_task(
-                control, ReportingAgent(backend.agent), run["id"], suite.episode("weather_new_york"), runtime=runtime
+                control,
+                ReportingAgent(backend.agent),
+                run["id"],
+                suite.injection_spec("weather_new_york"),
+                runtime=runtime,
             )
     finally:
         await control.aclose()
@@ -218,7 +222,7 @@ async def test_runner_records_sandbox_observations(client, suite, backend):
             control,
             ReportingAgent(backend.agent),
             run["id"],
-            suite.episode("weather_new_york"),
+            suite.injection_spec("weather_new_york"),
             runtime=Runtime("test", image="base"),
         )
     finally:
@@ -252,7 +256,7 @@ async def test_runner_closes_before_collecting_the_final_observations(client, su
             control,
             ReportingAgent(backend.agent),
             run["id"],
-            suite.episode("weather_new_york"),
+            suite.injection_spec("weather_new_york"),
             runtime=Runtime("test", image="base"),
         )
     finally:
@@ -995,7 +999,7 @@ class InterceptedAgent(AgentClient):
 async def test_results_report_delivery_facts_exposure_and_a_blocked_attempt(
     client, backend, unmanaged_suite, tmp_path, monkeypatch, capsys
 ):
-    compile_episode = unmanaged_suite.episode
+    compile_episode = unmanaged_suite.injection_spec
 
     def episode(user_task_id, injection_task_id=None, injections=None):
         compiled = compile_episode(user_task_id, injection_task_id, injections)
@@ -1004,7 +1008,7 @@ async def test_results_report_delivery_facts_exposure_and_a_blocked_attempt(
         return dataclasses.replace(compiled, plan=with_note)
 
     # The control plane in this process compiles the same suite: it grades with the same plan.
-    monkeypatch.setattr(unmanaged_suite, "episode", episode)
+    monkeypatch.setattr(unmanaged_suite, "injection_spec", episode)
     await run_benchmark(
         control_url="http://control",
         agent_client=InterceptedAgent(backend.agent),

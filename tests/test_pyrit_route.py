@@ -62,10 +62,10 @@ from midojo.attacks.attacker import OutOfSurfaceError
 from midojo.control_plane.client import snapshot_from_response
 from midojo.control_plane.models import SnapshotResponse
 from midojo.control_plane.service import ControlPlane
-from midojo.episode import Episode
+from midojo.injection_spec import InjectionSpec
 from midojo.interception_host import HostInterception
 from midojo.pyrit import (
-    MidojoEpisodeTarget,
+    MidojoInjectionSpecTarget,
     MidojoVerdictFloatScorer,
     MidojoVerdictScorer,
     attack_summary,
@@ -137,7 +137,7 @@ def make_target(
     remaining = iter(replies)
 
     def compile_episode(candidate):
-        episode = Episode(
+        episode = InjectionSpec(
             turns=("benign task",),
             plan=InjectionPlan((replace(SURFACE.instructions[0], payload=candidate),)),
             security={"output_contains": "broken"} if security is None else security,
@@ -158,8 +158,8 @@ def make_target(
 
         await ep.turn(ep.turns[0], send)
 
-    target = MidojoEpisodeTarget(
-        episode_for_payload=compile_episode,
+    target = MidojoInjectionSpecTarget(
+        injection_spec_for_payload=compile_episode,
         surface=SURFACE,
         drive=drive,
         runtime=runtime,
@@ -243,11 +243,14 @@ def test_exactly_one_declared_surface_and_a_real_suite_probe_are_required(suite)
         pass
 
     with pytest.raises(OutOfSurfaceError, match="exactly one"):
-        MidojoEpisodeTarget(
-            episode_for_payload=lambda _: Episode(), surface=InjectionPlan(), drive=drive, runtime=Disposable()
+        MidojoInjectionSpecTarget(
+            injection_spec_for_payload=lambda _: InjectionSpec(),
+            surface=InjectionPlan(),
+            drive=drive,
+            runtime=Disposable(),
         )
     with pytest.raises(OutOfSurfaceError, match="outside"):
-        MidojoEpisodeTarget.from_suite(
+        MidojoInjectionSpecTarget.from_suite(
             suite=suite,
             suite_module=weather,
             user_task_id="weather_new_york",
@@ -530,7 +533,7 @@ def test_suite_host_tools_require_host_interception(suite, spec):
     # The existing pair (a suite and its module), or one spec naming both: a bundled name, a dotted path, the module.
     given = {"pair": suite, "name": "weather", "dotted": "suites.weather", "module": weather}[spec]
     with pytest.raises(ValueError, match="HOST_TOOLS requires host interception"):
-        MidojoEpisodeTarget.from_suite(
+        MidojoInjectionSpecTarget.from_suite(
             suite=given,
             suite_module=weather if spec == "pair" else None,
             user_task_id="weather_new_york",
@@ -589,7 +592,7 @@ def external_target(external_suite, *, interception=None, spec=None):
     async def drive(ep):
         pytest.fail("constructing a target must not run it")
 
-    return MidojoEpisodeTarget.from_suite(
+    return MidojoInjectionSpecTarget.from_suite(
         suite=suite if spec is None else spec,
         suite_module=module if spec is None else None,
         user_task_id="benign",
@@ -618,7 +621,7 @@ def test_a_suite_spec_compiles_the_modules_own_task_suite(external_suite):
     _, module = external_suite
     for spec in ("external_pyrit_suite.weather", module):
         target = external_target(external_suite, spec=spec)
-        episode = target._episode_for_payload("planted")
+        episode = target._injection_spec_for_payload("planted")
         assert episode.suite_name == "weather" and episode.plan.instructions[0].payload == "planted"
     # A fresh load of the same suite.yaml is the module's suite too, as get_suite's is for a bundled suite.
     suite, _ = external_suite
@@ -648,7 +651,7 @@ def test_a_suite_object_alone_or_a_spec_with_another_module_is_refused(external_
     suite, module = external_suite
 
     def build(**given):
-        return MidojoEpisodeTarget.from_suite(
+        return MidojoInjectionSpecTarget.from_suite(
             **given,
             user_task_id="benign",
             injection_task_id="attack",
@@ -1016,7 +1019,7 @@ async def test_receipts_keep_every_send_and_replay_with_its_grade_and_sealed_sna
     assert summary["last_response_id"] == records[-1]["response_id"]
     assert [record["broke"] for record in records] == [False, True]
     assert records[0]["replay"] is None
-    environment_type = target._episode_for_payload("planted").environment_type
+    environment_type = target._injection_spec_for_payload("planted").environment_type
     assert environment_type is not None
     written = [
         (records[0], receipts[0][1]),
@@ -1078,7 +1081,7 @@ async def test_receipts_of_refused_and_failed_sends_and_a_stopped_campaign(tmp_p
 
 def test_an_unsealed_evaluation_is_recorded_as_a_snapshot_error(tmp_path):
     target, _, _ = make_target()
-    opened = target.control.open_evaluation(Episode(turns=("benign task",)))
+    opened = target.control.open_evaluation(InjectionSpec(turns=("benign task",)))
     target._attempts["unsealed"] = _Attempt(None, MidojoVerdict("failed", evaluation_id=opened.id, reason="lost"))
     write_receipts(target, prepare_output_dir(tmp_path / "run"), summary={})
     (record,) = read_json(tmp_path / "run" / RECEIPTS_FILE)

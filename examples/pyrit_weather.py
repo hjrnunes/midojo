@@ -22,7 +22,13 @@ from pyrit.setup.initialization import SQLITE, initialize_pyrit_async
 from midojo.agent_client import AgentClient, OpenShellAgentClient
 from midojo.evaluation_context import EvaluationContext
 from midojo.interception_host import HostInterception
-from midojo.pyrit import MidojoEpisodeTarget, MidojoVerdictScorer, attack_summary, prepare_output_dir, write_receipts
+from midojo.pyrit import (
+    MidojoInjectionSpecTarget,
+    MidojoVerdictScorer,
+    attack_summary,
+    prepare_output_dir,
+    write_receipts,
+)
 from midojo.runtimes import AgentRuntime, OpenShellRuntime
 from midojo.yaml_task_suite import YAMLTaskSuite
 
@@ -55,10 +61,10 @@ def build_attack(
     interception: HostInterception,
     attacker: PromptTarget,
     max_turns: int = 3,
-) -> tuple[RedTeamingAttack, MidojoEpisodeTarget]:
+) -> tuple[RedTeamingAttack, MidojoInjectionSpecTarget]:
     """Wire a campaign; dependencies can all be scripted for an offline run.
 
-    ``suite`` and ``suite_module`` are passed to ``MidojoEpisodeTarget.from_suite``:
+    ``suite`` and ``suite_module`` are passed to ``MidojoInjectionSpecTarget.from_suite``:
     the suite's module (or its name or dotted path) alone, or a suite and its module.
     The sealed MiDojo verdict, confirmed on replay, decides objective success.
     """
@@ -73,7 +79,7 @@ def build_attack(
         for message in ep.turns:
             await ep.turn(message, conversation.send)
 
-    target = MidojoEpisodeTarget.from_suite(
+    target = MidojoInjectionSpecTarget.from_suite(
         suite=suite,
         suite_module=suite_module,
         user_task_id="weather_new_york",
@@ -191,7 +197,7 @@ async def prepare_run(args: argparse.Namespace) -> tuple[Path, Path, OpenAIChatT
 
 
 async def run_campaign(
-    attack: RedTeamingAttack, target: MidojoEpisodeTarget, *, output: Path, objective: str, **summary: Any
+    attack: RedTeamingAttack, target: MidojoInjectionSpecTarget, *, output: Path, objective: str, **summary: Any
 ) -> AttackResult:
     """Execute the campaign, then write its receipts to ``output`` however it ended.
 
@@ -213,7 +219,7 @@ async def run_campaign(
     return result
 
 
-def _keep_receipts(target: MidojoEpisodeTarget, output: Path, summary: dict[str, Any]) -> None:
+def _keep_receipts(target: MidojoInjectionSpecTarget, output: Path, summary: dict[str, Any]) -> None:
     print(f"Receipts: {write_receipts(target, output, summary=summary)}")
 
 

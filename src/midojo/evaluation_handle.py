@@ -27,7 +27,7 @@ Compatibility promise
 ``midojo.evaluation_handle`` is the synchronous driver API. The names in
 :data:`HANDLE_METHODS`, the exception classes in this module and their
 ``reason`` strings, :data:`HANDLE_API_VERSION` and
-:data:`DEFAULT_MAX_LIVE_EPISODES` are stable within a 0.x minor release. New
+:data:`DEFAULT_MAX_LIVE_EVALUATIONS` are stable within a 0.x minor release. New
 keyword arguments to :func:`open` and :meth:`EvaluationHandle.send_turn` are
 appended, with defaults, so existing calls keep working. A change that breaks
 any of these raises the major version.
@@ -49,6 +49,7 @@ import subprocess
 import sys
 import threading
 import uuid
+import warnings
 import weakref
 from collections.abc import Callable, Iterator, Sequence
 from types import TracebackType
@@ -72,11 +73,14 @@ logger = logging.getLogger(__name__)
 HANDLE_API_VERSION = 1
 """The synchronous handle's API version: see the module's compatibility promise."""
 
-DEFAULT_MAX_LIVE_EPISODES = 8
-"""How many handles one process keeps open at once, unless ``MIDOJO_MAX_LIVE_EPISODES`` says otherwise."""
+DEFAULT_MAX_LIVE_EVALUATIONS = 8
+"""How many handles one process keeps open at once, unless ``MIDOJO_MAX_LIVE_EVALUATIONS`` says otherwise."""
 
-MAX_LIVE_ENV = "MIDOJO_MAX_LIVE_EPISODES"
-"""The environment variable that overrides :data:`DEFAULT_MAX_LIVE_EPISODES`."""
+MAX_LIVE_ENV = "MIDOJO_MAX_LIVE_EVALUATIONS"
+"""The environment variable that overrides :data:`DEFAULT_MAX_LIVE_EVALUATIONS`."""
+
+LEGACY_MAX_LIVE_ENV = "MIDOJO_MAX_LIVE_EPISODES"
+"""The environment variable's old name: read with a deprecation warning, not written."""
 
 HANDLE_METHODS = ("tool_block", "start_turn", "record_reply", "send_turn", "seal")
 """The handle's driving methods: once the handle is closed, each raises :class:`HandleClosedError`.
@@ -88,7 +92,7 @@ interrupted.
 """
 
 # The loop thread's name: one per handle, and nothing else in a driver script uses it.
-_LOOP_THREAD_NAME = "midojo-episode-handle"
+_LOOP_THREAD_NAME = "midojo-evaluation-handle"
 
 # How long a close waits for the loop thread to stop, and for a reaper to end.
 _STOP_SECONDS = 30.0
@@ -125,19 +129,19 @@ class RepeatWithoutResetError(HandleError):
     reason = "repeat-without-reset"
 
 
-class LiveEpisodeLimitError(HandleError):
+class LiveEvaluationLimitError(HandleError):
     """Too many handles are open in this process; one must close before another opens.
 
     ``limit`` is the limit in force, ``live`` how many handles held a slot.
     """
 
-    reason = "live-episode-limit"
+    reason = "live-evaluation-limit"
 
     def __init__(self, limit: int, live: int) -> None:
         self.limit = limit
         self.live = live
         super().__init__(
-            f"{live} live episodes is the process's limit of {limit}; close a handle before opening another, or "
+            f"{live} live evaluations is the process's limit of {limit}; close a handle before opening another, or "
             f"raise {MAX_LIVE_ENV}"
         )
 
@@ -157,7 +161,7 @@ class _ClosedByCaller(Exception):  # noqa: N818 - it marks a close, and never re
     """What a handle tells its context when the caller closes it before the seal: the episode was cut short."""
 
 
-# --- the live-episode cap, one count per process ---
+# --- the live-evaluation cap, one count per process ---
 
 _live_lock = threading.Lock()
 _live = 0
@@ -167,14 +171,24 @@ _live_tokens: set[str] = set()
 def _limit(max_live: int | None) -> int:
     """The cap in force: the environment's or the default's, lowered by ``max_live`` and never raised by it."""
     raw = os.environ.get(MAX_LIVE_ENV)
-    limit = DEFAULT_MAX_LIVE_EPISODES
+    name = MAX_LIVE_ENV
+    if raw is None:
+        raw = os.environ.get(LEGACY_MAX_LIVE_ENV)
+        name = LEGACY_MAX_LIVE_ENV
+        if raw is not None:
+            warnings.warn(
+                f"{LEGACY_MAX_LIVE_ENV} is the old name of {MAX_LIVE_ENV}; it still sets the cap",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+    limit = DEFAULT_MAX_LIVE_EVALUATIONS
     if raw is not None:
         try:
             limit = int(raw)
         except ValueError:
             limit = 0
         if limit < 1:
-            raise ValueError(f"{MAX_LIVE_ENV} must be a positive integer, not {raw!r}")
+            raise ValueError(f"{name} must be a positive integer, not {raw!r}")
     if max_live is not None:
         if isinstance(max_live, bool) or not isinstance(max_live, int):
             raise TypeError(f"max_live must be an int, not {type(max_live).__name__}")
@@ -185,11 +199,11 @@ def _limit(max_live: int | None) -> int:
 
 
 def _acquire_slot(limit: int) -> str:
-    """Take a live-episode slot, or raise :class:`LiveEpisodeLimitError` without binding anything."""
+    """Take a live-evaluation slot, or raise :class:`LiveEvaluationLimitError` without binding anything."""
     global _live
     with _live_lock:
         if _live >= limit:
-            raise LiveEpisodeLimitError(limit, _live)
+            raise LiveEvaluationLimitError(limit, _live)
         _live += 1
         token = uuid.uuid4().hex
         _live_tokens.add(token)
@@ -949,8 +963,8 @@ def open(
             loop.call(
                 _in_thread(
                     runtime.start_run,
-                    run_id or f"episode-{uuid.uuid4().hex[:12]}",
-                    suite_name=episode.suite_name or "episode",
+                    run_id or f"evaluation-{uuid.uuid4().hex[:12]}",
+                    suite_name=episode.suite_name or "evaluation",
                 )
             )
             started_run = True
