@@ -1,11 +1,11 @@
 """The SDK's snapshot codec: the digest MiDojo names a sealed snapshot by, and the read view of one.
 
 The vectors in ``tests/fixtures/snapshot_digest/vectors.json`` were recorded from
-MiDojo's implementation before the digest moved here (``m90/main`` at 770118e), each with
+MiDojo's implementation before the digest moved here (commit 770118e), each with
 the JSON form ``GET .../snapshot`` served and the id that implementation computed for it.
 The SDK must reproduce every one of them, and refuse the corruptions listed with it.
 
-One recorded value changed afterwards: the run summary inside the ``cm58-scn051``
+One recorded value changed afterwards: the run summary inside the ``recorded-openshell-run``
 vector names its schema ``agent-run-summary-v1``, and that vector's ``snapshot_id`` is the
 digest of the edited snapshot.
 """
@@ -43,7 +43,7 @@ VECTORS_PATH = ROOT / "tests/fixtures/snapshot_digest/vectors.json"
 VECTORS = json.loads(VECTORS_PATH.read_text())
 ACCEPTED = [vector for vector in VECTORS if "refusal" not in vector]
 REFUSED = [vector for vector in VECTORS if "refusal" in vector]
-CM58_ID = "sha256:d0e377a085a5526d0a5fb00e0dcfbd3de43b46951cbcf126a30af8b5f483f8ad"
+RECORDED_RUN_ID = "sha256:d0e377a085a5526d0a5fb00e0dcfbd3de43b46951cbcf126a30af8b5f483f8ad"
 
 
 def vector(name: str) -> dict:
@@ -74,15 +74,15 @@ def test_a_snapshot_view_reads_and_verifies_the_same_json_form(entry):
     assert SnapshotView.from_json(entry["snapshot"]) == view
 
 
-def test_the_cm58_snapshot_keeps_the_id_the_consumers_pin():
-    assert snapshot_digest(vector("cm58-scn051")["snapshot"]) == CM58_ID
+def test_the_recorded_run_keeps_the_id_the_consumers_pin():
+    assert snapshot_digest(vector("recorded-openshell-run")["snapshot"]) == RECORDED_RUN_ID
 
 
 def test_the_vectors_cover_every_required_case():
     covered = {entry["name"] for entry in VECTORS}
 
     assert {
-        "cm58-scn051",
+        "recorded-openshell-run",
         "openshell-empty-http-requests",
         "consumer-openshell-http-requests-empty",
         "later-outcomes-set",
@@ -155,7 +155,7 @@ def test_the_version_and_the_encoded_fields_are_this_snapshots():
     assert dict(OBSERVATION_OMITS_WHEN_EMPTY) == {"openshell": ("http_requests",)}
 
 
-# --- the cm.58 snapshot: verified once, refused for every change a consumer could make ---
+# --- the recorded OpenShell run: verified once, refused for every change a consumer could make ---
 
 
 def _mutations(snapshot: dict) -> dict[str, dict]:
@@ -175,11 +175,11 @@ def _mutations(snapshot: dict) -> dict[str, dict]:
     }
 
 
-def test_the_cm58_snapshot_verifies_and_every_change_to_it_is_refused():
-    snapshot = vector("cm58-scn051")["snapshot"]
+def test_the_recorded_run_verifies_and_every_change_to_it_is_refused():
+    snapshot = vector("recorded-openshell-run")["snapshot"]
 
     assert verified(snapshot) is snapshot
-    assert SnapshotView.from_json(snapshot).snapshot_id == CM58_ID
+    assert SnapshotView.from_json(snapshot).snapshot_id == RECORDED_RUN_ID
     for changed in _mutations(snapshot).values():
         with pytest.raises(DigestFault):
             verified(changed)
@@ -218,9 +218,9 @@ def test_the_text_hashed_is_compact_and_ascii_escaped():
 
 
 def test_the_snapshot_mappings_key_order_does_not_change_the_id():
-    entry = vector("cm58-scn051")
+    entry = vector("recorded-openshell-run")
 
-    assert snapshot_digest(dict(reversed(list(entry["snapshot"].items())))) == CM58_ID
+    assert snapshot_digest(dict(reversed(list(entry["snapshot"].items())))) == RECORDED_RUN_ID
 
 
 def test_an_injection_outcomes_later_fields_count_only_when_set():
@@ -320,7 +320,7 @@ RUN_THE_SNAPSHOT_CODEC = """
 from midojo_sdk.snapshot import SnapshotView, canonical, dumps, snapshot_digest, verified
 
 vectors = json.loads(Path("tests/fixtures/snapshot_digest/vectors.json").read_text())
-snapshot = next(entry for entry in vectors if entry["name"] == "cm58-scn051")["snapshot"]
+snapshot = next(entry for entry in vectors if entry["name"] == "recorded-openshell-run")["snapshot"]
 assert snapshot_digest(snapshot) == "sha256:d0e377a085a5526d0a5fb00e0dcfbd3de43b46951cbcf126a30af8b5f483f8ad"
 assert verified(snapshot) is snapshot
 view = SnapshotView.from_json(snapshot)

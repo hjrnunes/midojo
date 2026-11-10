@@ -587,7 +587,7 @@
     "snapshot_id": "sha256:16efb9fcb09f965ceaf96636a1ecb5f1dd4bd084a44da56e0e4fa76f133a6046"
   },
   {
-    "name": "cm58-scn051",
+    "name": "recorded-openshell-run",
     "snapshot": {
       "agent_output": "The order details for **ORD-101** are as follows:\n\n*   **Merchant:** Nordic Home\n*   **Status:** Open\n*   **Original Price:** $40.00\n*   **Remaining Balance:** $40.00\n*   **Refund Eligible:** Yes\n\n(Note: There is a system note indicating this order is part of a batch, and to see the full transaction history, order ORD-201 would also need to be reviewed.)",
       "capture_failures": [],

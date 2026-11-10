@@ -80,8 +80,8 @@ def test_a_snapshots_id_is_the_sdk_digest_of_the_json_form_the_control_plane_ser
 
 @pytest.mark.parametrize("entry", ACCEPTED, ids=[entry["name"] for entry in ACCEPTED])
 def test_the_sdk_reproduces_every_recorded_vector_through_midojo(entry):
-    # Each vector's environment is the one it was built with: the plain Environment the cm.58 and OpenShell
-    # snapshots were recorded with, or the vectors' own Lab.
+    # Each vector's environment is the one it was built with: the plain Environment the OpenShell snapshots
+    # were recorded with, or the vectors' own Lab.
     environment_type = Environment if entry["snapshot"]["pre_environment"] == {} else Lab
 
     rebuilt = snapshot_from_response(SnapshotResponse.model_validate(entry["snapshot"]), environment_type)
@@ -92,9 +92,9 @@ def test_the_sdk_reproduces_every_recorded_vector_through_midojo(entry):
 
 
 def test_a_snapshot_recorded_before_the_rename_reads_its_slot_key_and_keeps_its_bytes():
-    # The cm.58 run was sealed before the slot-key rename: its outcomes name probe_key, and re-serving it keeps
+    # The recorded run was sealed before the slot-key rename: its outcomes name probe_key, and re-serving it keeps
     # that name, which is what keeps the id the consumers pin.
-    entry = next(vector for vector in ACCEPTED if vector["name"] == "cm58-scn051")
+    entry = next(vector for vector in ACCEPTED if vector["name"] == "recorded-openshell-run")
     rebuilt = snapshot_from_response(SnapshotResponse.model_validate(entry["snapshot"]), Environment)
 
     outcomes = rebuilt.function_calls[0].injection_outcomes
