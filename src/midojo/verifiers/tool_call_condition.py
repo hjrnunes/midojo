@@ -4,7 +4,6 @@ Conformance is the contract's own vectors, copied unedited into
 ``tests/fixtures/tool_call_condition/`` under the contract's layout; they must
 never be edited by hand. ``CONTRACT.lock`` in that copy is the reference: it
 names the version and every file's digest.
-Validation is unchanged from ``tool-call-condition-v1``.
 
 Every comparison is true, false, or unknown (``None``). The vectors pin the
 reference implementation's behavior where it is surprising, and this module
