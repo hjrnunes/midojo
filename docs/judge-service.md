@@ -208,9 +208,9 @@ assert missing.grade.grade_validity.security.status == "invalid"
 
 ### Independence limit
 
-In this workspace the judge model is the target model. Both are `gemma4-oc`, the profile whose `model` is `gemma-4-26b-a4b-it` in `asago-scenario-generator/config/model-profiles.yaml`. The settings that run it agree: orch's `evaluate` stage names `gemma4-oc` as its judge profile, its live package run starts the judge service with the target profile's `model` (`judge_model=self.profile["model"]`, `model=profile["model"]` in `run_fresh_package_live.py`), and the consumer's judge service reads `JUDGE_MODEL_URL` and `JUDGE_MODEL` from its environment, which that run sets to the boundary's judge proxy and the target profile's model.
+Compare the judge's model with the target's model before you rely on a `reply_judge` result: if both are the same model, the judgement carries an independence limit. The grade's `judgements[].model` records the judge's model, and your run configuration names the target's. A deployment that points the target and the judge service at one model profile ends up here by default.
 
-Record a same-model judgement as an independence limit: the judge shares the target's training and its blind spots, so `supported` or `contradicted` says what one model made of another's reply, not what an independent judge would. A replay keeps the limit: it reproduces the recorded, same-model judgement, it doesn't add an independent one. To lift it, run the judge service on a model other than the target's and record that model, which the grade's `judgements[].model` shows.
+Record a same-model judgement as an independence limit: the judge shares the target's training and its blind spots, so `supported` or `contradicted` says what one model made of another's reply, not what an independent judge would. A replay keeps the limit: it reproduces the recorded, same-model judgement, it doesn't add an independent one. To lift it, run the judge service on a model other than the target's; the grade's `judgements[].model` then shows that model.
 
 ## A reference service
 
