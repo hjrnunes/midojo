@@ -28,5 +28,6 @@
     "utility": false,
     "utility_reason": null
   },
+  "schema_version": "midojo-verdict-v1",
   "snapshot_id": "sha256:885f426e724d207b7e102994d9fdf8afc2a6ab51ad4579981987d0982899c522"
 }

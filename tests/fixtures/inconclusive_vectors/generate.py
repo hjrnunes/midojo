@@ -14,10 +14,10 @@ Run it in MiDojo's interpreter, from the package root::
 
     uv run --frozen --extra dev python tests/fixtures/inconclusive_vectors/generate.py
 
-``--seed`` names another copy of the seed envelope than the recorded path. The seed is a
-compiled SCN-051 episode envelope, which this script reads with MiDojo's own document reader
-(the v0 wrapper, deprecated but read) and writes back as a ``midojo-injection-spec-v1`` document.
-``seed/`` holds the copy every case starts from, and ``recording.json`` pins its sha256.
+``--seed`` names another copy of the seed than the recorded path. The seed is a compiled
+SCN-051 ``midojo-injection-spec-v1`` document, which this script reads with MiDojo's own
+document reader. ``seed/`` holds the copy every case starts from, and ``recording.json`` pins
+its sha256.
 
 A re-run writes the same bytes. ``generate`` seals the cases under a pinned clock and pinned
 IDs, so the snapshots, the IDs they digest to, the verdicts and the manifest come out alike;
@@ -29,7 +29,7 @@ Each case runs the episode once and writes:
 
 - ``document.json``: the case's episode document, as MiDojo writes it.
 - ``snapshot.json``: the snapshot, as ``GET .../snapshot`` serves it, and the ID it digests to.
-- ``verdict.json``: ``midojo.grade``'s verdict of that snapshot.
+- ``verdict.json``: ``midojo.grade``'s verdict of that snapshot, as a ``midojo-verdict-v1`` document.
 - ``expected.json``: the case's premise (its grade's shape) and the outcome each route owes.
 
 ``MANIFEST.json`` pins every file's sha256, this script's, ``recording.json``'s and the seed's
@@ -399,14 +399,7 @@ def _seal(recording: dict[str, Any], root: Path, seed: InjectionSpec) -> None:
         case_root.mkdir(parents=True, exist_ok=True)
         dump_document(built, case_root / "document.json")
         write(case_root / "snapshot.json", document)
-        write(
-            case_root / "verdict.json",
-            {
-                "evaluation_id": verdict.evaluation_id,
-                "snapshot_id": verdict.snapshot_id,
-                "grade": verdict.grade.model_dump(mode="json"),
-            },
-        )
+        write(case_root / "verdict.json", verdict.to_document())
         write(
             case_root / "expected.json",
             {

@@ -46,6 +46,7 @@ from midojo_sdk.snapshot import verified
 
 from midojo.control_plane.client import snapshot_from_response
 from midojo.control_plane.config import AppConfig
+from midojo.control_plane.grading import Verdict
 from midojo.control_plane.inprocess_control import InProcessControlClient
 from midojo.control_plane.models import SnapshotResponse
 from midojo.control_plane.service import ControlPlane
@@ -143,6 +144,15 @@ def test_every_verdict_grades_the_snapshot_it_names(case):
     assert verdict["snapshot_id"] == snapshot["snapshot_id"]
     assert verdict["evaluation_id"] == snapshot["evaluation_id"]
     assert verdict["grade"]["evidence_status"] == snapshot["evidence_status"]
+
+
+@pytest.mark.parametrize("case", CASES)
+def test_every_verdict_is_a_v1_document(case):
+    """The sealed verdict is a ``midojo-verdict-v1`` document that MiDojo reads and writes back unchanged."""
+
+    document = read(case, "verdict.json")
+    assert document["schema_version"] == "midojo-verdict-v1"
+    assert Verdict.from_document(document).to_document() == document
 
 
 @pytest.mark.parametrize("case", CASES)

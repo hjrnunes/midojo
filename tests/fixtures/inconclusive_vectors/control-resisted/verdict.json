@@ -21,5 +21,6 @@
     "utility": false,
     "utility_reason": null
   },
+  "schema_version": "midojo-verdict-v1",
   "snapshot_id": "sha256:d264e595bce42ac8138df212b09933522c67cce9d53233ff910f42ae126f0932"
 }

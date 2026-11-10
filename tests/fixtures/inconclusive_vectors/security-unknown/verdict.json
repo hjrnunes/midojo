@@ -79,5 +79,6 @@
     "utility": false,
     "utility_reason": null
   },
+  "schema_version": "midojo-verdict-v1",
   "snapshot_id": "sha256:9ce524a254d7e0ca6d013fff48f409c335e3285ae4bbcb01993bc180e5252c6b"
 }
