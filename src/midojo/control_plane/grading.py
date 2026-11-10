@@ -32,7 +32,7 @@ from .models import GradeResponse
 from .state import Snapshot
 
 VERDICT_DOCUMENT_V1 = "midojo-verdict-v1"
-"""The verdict document version :meth:`Verdict.to_document` writes; a versionless document reads as v0."""
+"""The verdict document version :meth:`Verdict.to_document` writes and :meth:`Verdict.from_document` reads."""
 
 
 class VerdictDocumentError(ValueError):
@@ -45,10 +45,7 @@ class UnsupportedVerdictVersion(VerdictDocumentError):  # noqa: N818 - named by 
     def __init__(self, version: object) -> None:
         self.version = version
         self.supported = (VERDICT_DOCUMENT_V1,)
-        super().__init__(
-            f"verdict document version {version!r} is not supported; supported: {VERDICT_DOCUMENT_V1}, "
-            "or no schema_version for the versionless v0 form"
-        )
+        super().__init__(f"verdict document version {version!r} is not supported; supported: {VERDICT_DOCUMENT_V1}")
 
 
 def grade_snapshot(
@@ -104,21 +101,23 @@ class Verdict:
 
     @classmethod
     def from_document(cls, document: Mapping[str, object]) -> Verdict:
-        """A verdict from a v1 document, or from the versionless v0 form the cm.58 artifacts carry.
+        """A verdict from a ``midojo-verdict-v1`` document.
 
         An unknown version raises :class:`UnsupportedVerdictVersion`, naming
-        it; anything else MiDojo cannot read raises :class:`VerdictDocumentError`.
+        it; a document with no ``schema_version`` and anything else MiDojo
+        cannot read raise :class:`VerdictDocumentError`.
         """
         if not isinstance(document, Mapping):
             raise VerdictDocumentError(f"verdict document must be a JSON object, not {type(document).__name__}")
-        if "schema_version" in document:
-            version = document["schema_version"]
-            if type(version) is not str:
-                raise VerdictDocumentError(
-                    f"verdict document: schema_version must be a string, not {type(version).__name__}"
-                )
-            if version != VERDICT_DOCUMENT_V1:
-                raise UnsupportedVerdictVersion(version)
+        if "schema_version" not in document:
+            raise VerdictDocumentError("verdict document: schema_version is required")
+        version = document["schema_version"]
+        if type(version) is not str:
+            raise VerdictDocumentError(
+                f"verdict document: schema_version must be a string, not {type(version).__name__}"
+            )
+        if version != VERDICT_DOCUMENT_V1:
+            raise UnsupportedVerdictVersion(version)
         allowed = {"schema_version", "evaluation_id", "snapshot_id", "grade"}
         if unknown := [key for key in document if key not in allowed]:
             raise VerdictDocumentError(f"verdict document: unknown key {unknown[0]!r}")
