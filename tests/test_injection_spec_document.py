@@ -444,7 +444,7 @@ def test_each_bundled_suite_compiles_every_pair_to_a_valid_document(suite_name: 
 
 @pytest.mark.parametrize(
     "version",
-    ["midojo-episode-v9", "midojo-injection-spec-v1.1", "midojo-injection-spec-v2", "", "2"],
+    ["midojo-episode-v9", "midojo-injection-spec-v1.1", "midojo-injection-spec-v9", "", "2"],
 )
 def test_an_unknown_version_is_refused_naming_it_and_the_supported_version(version: str) -> None:
     document = read_vector("v1_single.json")
