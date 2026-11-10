@@ -1,9 +1,9 @@
 """The rubric judge lives in ``midojo_sdk`` and imports only the standard library.
 
 The judge is a port of Garak's ``detectors/rubric_judge.py`` and the code the
-orchestrator and the consumer's judge service call. It takes the rubric and the
-evidence as plain data and imports nothing from Asago, so a fork checkout runs it
-without an Asago environment.
+consumer's judge service calls. It takes the rubric and the evidence as plain
+data and imports nothing from Asago, so a fork checkout runs it without an Asago
+environment.
 """
 
 from __future__ import annotations

@@ -67,7 +67,7 @@ A handle reads `evaluation_id`, `binding`, `tool_endpoint`, `capabilities` and `
 
 `open` enforces the spec's `tools` policy. The interceptor mirrors only the tools in `tools.allowed`, and the handle reports those in `tool_block()["allowed_tools"]`. A tool whose `write_disposition` is `block` is recorded as blocked and never reaches the upstream; the rest are forwarded. An injection spec with no `tools` mirrors every upstream tool and blocks nothing, and an empty `allowed` exposes none.
 
-This replaces orch's `BlockingInterception`: the policy lives in the injection spec document, not in the caller, so the same spec blocks the same calls wherever it runs, and the blocked call is evidence, not an error.
+The policy lives in the injection spec document, not in the caller, so the same spec blocks the same calls wherever it runs, and the blocked call is evidence, not an error.
 
 The handle's interceptor is the only place that enforces a policy. `midojo.open_evaluation` starts no interceptor of its own, so it never applies `spec.tools`, and it refuses an injection spec whose policy blocks a tool unless the `interception` you pass blocks the same tools: a policy that silently did nothing would look like evidence of safety. Drive a spec that has a policy with this handle, or with an interception layer that enforces the policy itself.
 
