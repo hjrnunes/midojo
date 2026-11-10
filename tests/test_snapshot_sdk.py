@@ -4,6 +4,10 @@ The vectors in ``tests/fixtures/snapshot_digest/vectors.json`` were recorded fro
 MiDojo's implementation before the digest moved here (``m90/main`` at 770118e), each with
 the JSON form ``GET .../snapshot`` served and the id that implementation computed for it.
 The SDK must reproduce every one of them, and refuse the corruptions listed with it.
+
+One recorded value changed afterwards: the run summary inside the ``cm58-scn051``
+vector names its schema ``agent-run-summary-v1``, and that vector's ``snapshot_id`` is the
+digest of the edited snapshot.
 """
 
 from __future__ import annotations
@@ -39,7 +43,7 @@ VECTORS_PATH = ROOT / "tests/fixtures/snapshot_digest/vectors.json"
 VECTORS = json.loads(VECTORS_PATH.read_text())
 ACCEPTED = [vector for vector in VECTORS if "refusal" not in vector]
 REFUSED = [vector for vector in VECTORS if "refusal" in vector]
-CM58_ID = "sha256:490adb33e785a3862031342b3fee004f08634471bfbbb1fdded08839ce5272d6"
+CM58_ID = "sha256:d0e377a085a5526d0a5fb00e0dcfbd3de43b46951cbcf126a30af8b5f483f8ad"
 
 
 def vector(name: str) -> dict:
@@ -317,7 +321,7 @@ from midojo_sdk.snapshot import SnapshotView, canonical, dumps, snapshot_digest,
 
 vectors = json.loads(Path("tests/fixtures/snapshot_digest/vectors.json").read_text())
 snapshot = next(entry for entry in vectors if entry["name"] == "cm58-scn051")["snapshot"]
-assert snapshot_digest(snapshot) == "sha256:490adb33e785a3862031342b3fee004f08634471bfbbb1fdded08839ce5272d6"
+assert snapshot_digest(snapshot) == "sha256:d0e377a085a5526d0a5fb00e0dcfbd3de43b46951cbcf126a30af8b5f483f8ad"
 assert verified(snapshot) is snapshot
 view = SnapshotView.from_json(snapshot)
 assert view.snapshot_id == snapshot["snapshot_id"]
