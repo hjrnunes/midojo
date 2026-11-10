@@ -24,7 +24,7 @@ snapshot:
 
 - a ``not:`` check over a call's absence ("transfer never called") is unknown
   (``security`` None, its validity invalid), never True, and the evidence says
-  ``function_calls`` is incomplete -- VAL-LATE-002 and VAL-LATE-003;
+  ``function_calls`` is incomplete;
 - a ``not:`` check over a ``tool_call_condition`` absence, and that condition
   without the ``not:``, are never True either;
 - a revoked or expired session keeps the refused write nowhere: no late fact,
@@ -33,7 +33,7 @@ snapshot:
   leaves its ``snapshot_id``, content and evidence status unchanged, with
   :meth:`~midojo.control_plane.state.Snapshot.verified` still passing;
 - the two controls of the same check on the same backend, so the matrix can't
-  pass vacuously (VAL-LATE-004): over a call that never happened it grades True
+  pass vacuously: over a call that never happened it grades True
   with a valid grade, and over a call that happened and finished, False with a
   valid grade.
 

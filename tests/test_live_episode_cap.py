@@ -76,7 +76,7 @@ class FailingSetup(UnmanagedRuntime):
         raise RuntimeError("setup failed")
 
 
-# --- VAL-CAP-001: N parallel handles open and close cleanly on fresh ports ---
+# --- N parallel handles open and close cleanly on fresh ports ---
 
 
 def test_eight_threads_open_eight_handles_on_distinct_ports_twenty_rounds():
@@ -114,7 +114,7 @@ def test_eight_threads_open_eight_handles_on_distinct_ports_twenty_rounds():
     assert listeners() == listeners_before
 
 
-# --- VAL-CAP-002: handle N+1 is refused with LiveEvaluationLimitError, per process ---
+# --- handle N+1 is refused with LiveEvaluationLimitError, per process ---
 
 
 def test_the_ninth_handle_is_refused_with_the_limit_and_binds_nothing(monkeypatch):
@@ -274,7 +274,7 @@ sys.exit(os.waitstatus_to_exitcode(status))
     assert child.stdout.splitlines() == ["parent open 8", "child refused limit=8 live=8"]
 
 
-# --- VAL-CAP-003: MIDOJO_MAX_LIVE_EVALUATIONS overrides the default ---
+# --- MIDOJO_MAX_LIVE_EVALUATIONS overrides the default ---
 
 
 def test_an_environment_cap_of_two_refuses_the_third(monkeypatch):
@@ -376,7 +376,7 @@ finally:
     assert child.stdout.strip() == "limit=2 live=2"
 
 
-# --- VAL-CAP-004: slots free exactly once and failed opens consume none ---
+# --- slots free exactly once and failed opens consume none ---
 
 
 def test_closing_one_handle_twice_frees_one_slot_only(monkeypatch):

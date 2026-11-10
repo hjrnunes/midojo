@@ -1,8 +1,8 @@
-"""The driver's WebSocket adapter over real localhost sockets (bead asago-v9md.3, part 2).
+"""The driver's WebSocket adapter over real localhost sockets.
 
 The shipping adapter lives in the SDK's ``mcp`` extra: a driver dials out to
 the interceptor service, binds one evaluation, and serves the service's frames
-through the v9md.1 ``LinkDispatcher``. These tests use the real service app on
+through the ``LinkDispatcher``. These tests use the real service app on
 a loopback port and a scripted upstream, and read what the dispatcher recorded
 into the driver's control plane.
 

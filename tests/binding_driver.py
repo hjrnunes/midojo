@@ -3,8 +3,8 @@
 The driver owns the evaluation. It opens the evaluation on its own control
 plane, upgrades one socket to the interceptor service with the bind
 credential, sends ``bind``, and from then on serves the service's frames with
-:class:`~midojo.control_plane.link_dispatch.LinkDispatcher`, the v9md.1 link
-core's driver side. The service never sees the evaluation's session token.
+:class:`~midojo.control_plane.link_dispatch.LinkDispatcher`, the link core's
+driver side. The service never sees the evaluation's session token.
 
 Tests only: no model, and no network beyond loopback.
 """

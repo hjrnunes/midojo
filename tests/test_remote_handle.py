@@ -1,7 +1,7 @@
 """The handle over a remote interception: the interceptor in a service, the records in the driver.
 
 ``interception=RemoteInterception(url, credential)`` runs the episode's
-interceptor in the interceptor service (bead asago-v9md.3) and leaves the
+interceptor in the interceptor service and leaves the
 handle dialing out to it: the handle's loop thread opens one binding per
 evaluation, serves the service's recording and environment frames on its own
 control plane, and listens on nothing. The session token never leaves the

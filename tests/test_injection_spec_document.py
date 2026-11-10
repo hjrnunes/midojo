@@ -94,7 +94,7 @@ def mutated(document: dict[str, Any], path: tuple[object, ...], key: str, value:
     return copy
 
 
-# --- VAL-DOC-001: the schema, its package data and the vectors ---
+# --- the schema, its package data and the vectors ---
 
 
 def test_the_schema_is_package_data_the_sdk_loads() -> None:
@@ -188,7 +188,7 @@ def test_each_refusal_names_what_it_refuses(name: str, named: str) -> None:
         InjectionSpec.from_document(read_vector(name))
 
 
-# --- VAL-DOC-002: the document is closed ---
+# --- the document is closed ---
 
 
 @pytest.mark.parametrize(
@@ -254,7 +254,7 @@ def test_a_runtime_type_that_is_not_a_defined_runtime_is_refused_naming_it() -> 
     assert list(spec_validator().iter_errors(document))
 
 
-# --- VAL-DOC-003: execution settings ---
+# --- execution settings ---
 
 
 def _settings_document() -> dict[str, Any]:
@@ -395,7 +395,7 @@ def test_a_document_naming_another_environment_model_is_refused() -> None:
         InjectionSpec.from_document(document)
 
 
-# --- VAL-DOC-004: the plan codec version and the plan sub-schema ---
+# --- the plan codec version and the plan sub-schema ---
 
 
 def test_the_plan_codec_version_is_the_document_version() -> None:
@@ -412,7 +412,7 @@ def test_the_plan_sub_schema_validates_the_bundled_plan() -> None:
     assert InjectionPlan.from_data(plan).to_data() == plan
 
 
-# --- VAL-DOC-005: every bundled suite pair compiles ---
+# --- every bundled suite pair compiles ---
 
 
 @pytest.mark.parametrize("suite_name", sorted(SUITE_PAIRS))
@@ -439,7 +439,7 @@ def test_each_bundled_suite_compiles_every_pair_to_a_valid_document(suite_name: 
         assert again.to_document() == document
 
 
-# --- VAL-DOC-007: version refusals ---
+# --- version refusals ---
 
 
 @pytest.mark.parametrize(

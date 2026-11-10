@@ -1,8 +1,8 @@
-"""The interceptor service over real localhost sockets (bead asago-v9md.3, part 1).
+"""The interceptor service over real localhost sockets.
 
 One listener serves the bind upgrade and every binding's MCP face. These tests
 open real sockets to it: a driver in this process binds with the credential,
-serves the service's frames with the v9md.1 link core's ``LinkDispatcher``, and
+serves the service's frames with the link core's ``LinkDispatcher``, and
 calls the upstream through the binding's own tool URL with a FastMCP client.
 
 What the groups show:
