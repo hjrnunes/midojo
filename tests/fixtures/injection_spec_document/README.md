@@ -34,7 +34,5 @@ running the generator into a scratch directory and comparing.
 | `refused_*.json` | `v1_single.json` with one change each: the reader must refuse every one by name. |
 
 The valid documents all carry `"schema_version": "midojo-injection-spec-v1"`.
-The reader also accepts the document's old ID, `midojo-episode-v1`, and the
-consumer's v0 wrapper, `midojo-episode-v2`, each with a deprecation warning;
-those legacy documents live in `tests/fixtures/legacy_documents/`, because the
-writer never produces them.
+The reader accepts that version only: it refuses any other version by name, and
+refuses a document with no `schema_version`.

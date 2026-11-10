@@ -238,11 +238,10 @@ def test_the_old_document_constant_is_gone() -> None:
     assert "EPISODE_DOCUMENT_V1" not in schema.__all__
 
 
-def test_the_readers_keep_the_old_recorded_names() -> None:
-    """The old names are data: recorded documents, the schema file and the notes keep reading."""
+def test_no_reader_keeps_an_old_document_version() -> None:
     import midojo_sdk.injection_spec_schema as schema
 
-    assert midojo.injection_spec_document.LEGACY_DOCUMENT_VERSIONS == ("midojo-episode-v1", "midojo-episode-v2")
-    assert schema.LEGACY_INJECTION_SPEC_DOCUMENT_V1 == "midojo-episode-v1"
-    assert schema.LEGACY_SCHEMA_FILE == "schemas/midojo-episode-v1.schema.json"
-    assert midojo.injection_spec.MAX_NESTING_DEPTH > 0
+    assert not hasattr(midojo.injection_spec_document, "LEGACY_DOCUMENT_VERSIONS")
+    for name in ("LEGACY_INJECTION_SPEC_DOCUMENT_V1", "LEGACY_SCHEMA_FILE", "load_legacy_schema"):
+        assert not hasattr(schema, name)
+        assert name not in schema.__all__

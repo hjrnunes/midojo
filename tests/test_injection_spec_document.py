@@ -1,4 +1,4 @@
-"""Injection-spec documents: the closed v1 schema, its generated vectors, the reader and writer, and the v0 wrapper.
+"""Injection-spec documents: the closed v1 schema, its generated vectors, and the reader and writer.
 
 The vectors are golden: ``generate.py`` writes every one of them from the
 objects it declares, and the committed bytes are the generator's output, so a
@@ -8,16 +8,12 @@ refused both by the reader and, where the schema can express the rule, by the
 schema itself. Every bundled suite pair must compile to a valid document too,
 so the suite path can never drift from the contract.
 
-The reader accepts three document versions: the version the writer emits
-(``midojo-injection-spec-v1``), the old name of the same closed shape
-(``midojo-episode-v1``, read with a deprecation warning), and the consumer's
-v0 wrapper (``midojo-episode-v2``, read with a deprecation warning). Only the
-first is ever written.
+The reader accepts one document version, ``midojo-injection-spec-v1``, which
+is also the only one the writer emits.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import subprocess
 import sys
@@ -31,17 +27,13 @@ from midojo_sdk import injection, injection_spec_schema
 from midojo_sdk.injection import InjectionPlan
 from midojo_sdk.injection_spec_schema import (
     INJECTION_SPEC_DOCUMENT_V1,
-    LEGACY_INJECTION_SPEC_DOCUMENT_V1,
-    LEGACY_SCHEMA_FILE,
     PLAN_CODEC_VERSION,
     SCHEMA_FILE,
-    load_legacy_schema,
     load_schema,
 )
 
-from midojo.injection_spec import InjectionSpec, InterceptionSettings, ToolPolicy, thaw
+from midojo.injection_spec import InjectionSpec, InterceptionSettings, ToolPolicy
 from midojo.injection_spec_document import (
-    LEGACY_DOCUMENT_VERSIONS,
     SUPPORTED_DOCUMENT_VERSIONS,
     InjectionSpecDocumentError,
     UnsupportedDocumentVersion,
@@ -50,7 +42,6 @@ from midojo.suites import get_suite
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "injection_spec_document"
-LEGACY_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "legacy_documents"
 GENERATOR = FIXTURES / "generate.py"
 V1_VECTORS = sorted(path.name for path in FIXTURES.glob("v1_*.json"))
 REFUSED_VECTORS = sorted(path.name for path in FIXTURES.glob("refused_*.json"))
@@ -70,9 +61,9 @@ DEFAULT_INTERCEPTION = {
 }
 
 
-def read_vector(name: str, fixtures: Path = FIXTURES) -> dict[str, Any]:
+def read_vector(name: str) -> dict[str, Any]:
     """The fixture ``name`` decoded, as the document it holds."""
-    document: dict[str, Any] = json.loads((fixtures / name).read_text(encoding="utf-8"))
+    document: dict[str, Any] = json.loads((FIXTURES / name).read_text(encoding="utf-8"))
     return document
 
 
@@ -124,21 +115,10 @@ def test_the_schema_is_package_data_the_sdk_loads() -> None:
     assert load_schema()["title"] != "changed by a caller"
 
 
-def test_the_old_schema_file_stays_packaged_for_a_reader_built_before_the_rename() -> None:
-    schema = load_legacy_schema()
+def test_the_sdk_packages_one_schema() -> None:
+    packaged = sorted(path.name for path in resources.files("midojo_sdk").joinpath("schemas").iterdir())
 
-    properties = schema["properties"]
-    assert isinstance(properties, dict)
-    assert LEGACY_SCHEMA_FILE == "schemas/midojo-episode-v1.schema.json"
-    assert schema["$id"] == "https://midojo.ai/schemas/midojo-episode-v1.schema.json"
-    assert properties["schema_version"]["const"] == LEGACY_INJECTION_SPEC_DOCUMENT_V1
-    assert json.loads(resources.files("midojo_sdk").joinpath(LEGACY_SCHEMA_FILE).read_text(encoding="utf-8")) == schema
-
-    # The old schema still validates an old document, which is why it stays packaged.
-    legacy = read_vector("v1_single.json")
-    legacy["schema_version"] = LEGACY_INJECTION_SPEC_DOCUMENT_V1
-    jsonschema.Draft202012Validator(schema).validate(legacy)
-    assert list(spec_validator().iter_errors(legacy))
+    assert packaged == ["midojo-injection-spec-v1.schema.json"]
 
 
 def test_every_golden_names_the_new_document_version() -> None:
@@ -403,34 +383,8 @@ def test_a_minimal_document_holds_only_its_version() -> None:
     assert InjectionSpec.from_document(spec.to_document()) == spec
 
 
-def test_to_document_always_writes_the_new_version() -> None:
-    direct = InjectionSpec(turns=["hello"])
-    with pytest.warns(DeprecationWarning):
-        v0_loaded = InjectionSpec.from_document(read_vector("v0_cm58_episode.json", LEGACY_FIXTURES))
-
-    assert direct.to_document()["schema_version"] == INJECTION_SPEC_DOCUMENT_V1
-    assert v0_loaded.to_document()["schema_version"] == INJECTION_SPEC_DOCUMENT_V1
-
-
-def test_an_old_id_document_reads_as_the_new_one_with_a_deprecation_warning() -> None:
-    document = read_vector("v1_single.json")
-    old = {**document, "schema_version": LEGACY_INJECTION_SPEC_DOCUMENT_V1}
-
-    with pytest.warns(DeprecationWarning, match="midojo-injection-spec-v1") as warned:
-        spec = InjectionSpec.from_document(old)
-
-    assert repr(LEGACY_INJECTION_SPEC_DOCUMENT_V1) in str(warned.list[0].message)
-    assert spec == InjectionSpec.from_document(document)
-    assert spec.to_document() == document
-
-
-def test_an_old_id_document_with_an_unknown_key_is_refused() -> None:
-    document = read_vector("v1_single.json")
-    document["schema_version"] = LEGACY_INJECTION_SPEC_DOCUMENT_V1
-    document["extensions"] = {}
-
-    with pytest.warns(DeprecationWarning), pytest.raises(InjectionSpecDocumentError, match="extensions"):
-        InjectionSpec.from_document(document)
+def test_to_document_always_writes_the_current_version() -> None:
+    assert InjectionSpec(turns=["hello"]).to_document()["schema_version"] == INJECTION_SPEC_DOCUMENT_V1
 
 
 def test_a_document_naming_another_environment_model_is_refused() -> None:
@@ -449,7 +403,6 @@ def test_the_plan_codec_version_is_the_document_version() -> None:
     assert injection.PLAN_CODEC_VERSION == PLAN_CODEC_VERSION
     assert injection_spec_schema.PLAN_CODEC_VERSION == PLAN_CODEC_VERSION
     assert SUPPORTED_DOCUMENT_VERSIONS == (INJECTION_SPEC_DOCUMENT_V1,)
-    assert LEGACY_DOCUMENT_VERSIONS == (LEGACY_INJECTION_SPEC_DOCUMENT_V1, "midojo-episode-v2")
 
 
 def test_the_plan_sub_schema_validates_the_bundled_plan() -> None:
@@ -457,12 +410,6 @@ def test_the_plan_sub_schema_validates_the_bundled_plan() -> None:
 
     plan_validator().validate(plan)
     assert InjectionPlan.from_data(plan).to_data() == plan
-
-
-def test_the_plan_sub_schema_validates_the_cm58_plan() -> None:
-    plan = read_vector("v0_cm58_episode.json", LEGACY_FIXTURES)["episode"]["plan"]
-
-    plan_validator().validate(plan)
 
 
 # --- VAL-DOC-005: every bundled suite pair compiles ---
@@ -492,112 +439,14 @@ def test_each_bundled_suite_compiles_every_pair_to_a_valid_document(suite_name: 
         assert again.to_document() == document
 
 
-# --- VAL-DOC-006: the v0 consumer wrapper ---
-
-
-def test_the_v0_vector_is_the_cm58_artifact_byte_for_byte() -> None:
-    # Copied from the cm.58 delivery run's compiled episode.json.
-    data = (LEGACY_FIXTURES / "v0_cm58_episode.json").read_bytes()
-
-    assert hashlib.sha256(data).hexdigest() == "2ed42034d7332094ca1548947da6cc0139181596f9c3c187e9961c5448969e49"
-
-
-def test_the_cm58_wrapper_reads_as_v0_with_a_deprecation_warning() -> None:
-    wrapper = read_vector("v0_cm58_episode.json", LEGACY_FIXTURES)
-    inner = wrapper["episode"]
-
-    with pytest.warns(DeprecationWarning, match="midojo-episode-v2"):
-        spec = InjectionSpec.from_document(wrapper)
-
-    assert list(spec.turns or ()) == inner["turns"]
-    assert spec.plan.to_data() == inner["plan"]
-    assert thaw(spec.security) == inner["security"]
-    assert spec.utility is None
-    assert thaw(spec.runtime) == inner["runtime"]
-    assert thaw(spec.environment) == inner["environment"]
-    assert spec.suite_name is None
-    assert spec.user_task_id is None
-    assert spec.injection_task_id is None
-    assert spec.tools is not None
-    assert list(spec.tools.allowed) == wrapper["tools"]["allowed"]
-    assert spec.tools.write_disposition_default == wrapper["tools"]["write_disposition"]["default"]
-    assert dict(spec.tools.write_disposition) == wrapper["tools"]["write_disposition"]["tools"]
-    # The late-bound marker names no upstream: the driver supplies the endpoint at open().
-    assert spec.interception.mode == "host"
-    assert spec.interception.upstream is None
-
-    document = spec.to_document()
-    spec_validator().validate(document)
-    assert document["schema_version"] == INJECTION_SPEC_DOCUMENT_V1
-    for asago_only in ("tool", "tool_revision_range", "package_id", "scenario_id", "package_digest", "claim_level"):
-        assert asago_only not in document
-    assert "episode" not in document
-    assert "midojo-episode-v2" not in json.dumps(document)
-
-
-def test_load_document_reads_a_v0_file_with_the_warning(tmp_path: Path) -> None:
-    path = tmp_path / "episode.json"
-    path.write_text((LEGACY_FIXTURES / "v0_cm58_episode.json").read_text(encoding="utf-8"), encoding="utf-8")
-
-    with pytest.warns(DeprecationWarning, match="midojo-episode-v2"):
-        spec = InjectionSpec.load_document(path)
-
-    assert spec.interception.upstream is None
-    assert spec.suite_name is None
-
-
-def test_a_v0_wrapper_with_a_nonempty_verifier_list_is_refused() -> None:
-    wrapper = read_vector("v0_cm58_episode.json", LEGACY_FIXTURES)
-    wrapper["verifiers"] = [{"check": "asago_rubric_judge_episode", "module": "asago_verifiers.asago_episode_judge"}]
-
-    with pytest.warns(DeprecationWarning), pytest.raises(InjectionSpecDocumentError, match="verifiers"):
-        InjectionSpec.from_document(wrapper)
-
-
-def test_a_v0_wrapper_with_another_top_level_key_is_refused() -> None:
-    wrapper = read_vector("v0_cm58_episode.json", LEGACY_FIXTURES)
-    wrapper["metadata"] = {"anything": True}
-
-    with pytest.warns(DeprecationWarning), pytest.raises(InjectionSpecDocumentError, match="metadata"):
-        InjectionSpec.from_document(wrapper)
-
-
-def test_a_v0_wrapper_with_an_unknown_inner_member_is_refused() -> None:
-    wrapper = read_vector("v0_cm58_episode.json", LEGACY_FIXTURES)
-    wrapper["episode"]["environment_type"] = "EpisodeEnvironment"
-
-    with pytest.warns(DeprecationWarning), pytest.raises(InjectionSpecDocumentError, match="environment_type"):
-        InjectionSpec.from_document(wrapper)
-
-
-def test_a_v0_wrapper_with_a_literal_upstream_keeps_it() -> None:
-    wrapper = read_vector("v0_cm58_episode.json", LEGACY_FIXTURES)
-    wrapper["interception"]["upstream"] = "http://localhost:8081/mcp"
-
-    with pytest.warns(DeprecationWarning):
-        spec = InjectionSpec.from_document(wrapper)
-
-    assert spec.interception.upstream == "http://localhost:8081/mcp"
-
-
-def test_a_v0_wrapper_without_a_version_reads_as_v0() -> None:
-    wrapper = read_vector("v0_cm58_episode.json", LEGACY_FIXTURES)
-    del wrapper["schema_version"]
-
-    with pytest.warns(DeprecationWarning, match="midojo-episode-v2"):
-        spec = InjectionSpec.from_document(wrapper)
-
-    assert spec.suite_name is None
-
-
 # --- VAL-DOC-007: version refusals ---
 
 
 @pytest.mark.parametrize(
     "version",
-    ["midojo-episode-v9", "midojo-episode-v1.1", "midojo-injection-spec-v1.1", "midojo-episode-v2.0", "", "2"],
+    ["midojo-episode-v9", "midojo-injection-spec-v1.1", "midojo-injection-spec-v2", "", "2"],
 )
-def test_an_unknown_version_is_refused_naming_it_and_the_supported_versions(version: str) -> None:
+def test_an_unknown_version_is_refused_naming_it_and_the_supported_version(version: str) -> None:
     document = read_vector("v1_single.json")
     document["schema_version"] = version
 
@@ -608,8 +457,6 @@ def test_an_unknown_version_is_refused_naming_it_and_the_supported_versions(vers
     assert raised.value.supported == (INJECTION_SPEC_DOCUMENT_V1,)
     assert repr(version) in str(raised.value)
     assert INJECTION_SPEC_DOCUMENT_V1 in str(raised.value)
-    for legacy in LEGACY_DOCUMENT_VERSIONS:
-        assert legacy in str(raised.value)
 
 
 def test_a_non_string_version_is_refused() -> None:
@@ -622,13 +469,25 @@ def test_a_non_string_version_is_refused() -> None:
     assert not isinstance(raised.value, UnsupportedDocumentVersion)
 
 
-def test_a_document_without_a_version_and_without_the_wrapper_shape_is_refused() -> None:
+def test_a_document_without_a_version_is_refused() -> None:
     document = read_vector("v1_single.json")
     del document["schema_version"]
-    del document["plan"]
 
-    with pytest.raises(InjectionSpecDocumentError, match="schema_version"):
+    with pytest.raises(InjectionSpecDocumentError, match="schema_version is required") as raised:
         InjectionSpec.from_document(document)
+
+    assert not isinstance(raised.value, UnsupportedDocumentVersion)
+
+
+def test_a_wrapped_document_is_refused_as_one_without_a_version(tmp_path: Path) -> None:
+    wrapped = {"episode": {"turns": ["hello"], "plan": read_vector("v1_single.json")["plan"]}}
+    path = tmp_path / "wrapped.json"
+    path.write_text(json.dumps(wrapped), encoding="utf-8")
+
+    with pytest.raises(InjectionSpecDocumentError, match="schema_version is required"):
+        InjectionSpec.from_document(wrapped)
+    with pytest.raises(InjectionSpecDocumentError, match="schema_version is required"):
+        InjectionSpec.load_document(path)
 
 
 def test_the_version_is_read_before_anything_else() -> None:
