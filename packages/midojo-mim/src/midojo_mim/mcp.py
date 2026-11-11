@@ -30,9 +30,9 @@ from fastmcp.tools import Tool, ToolResult
 from mcp.shared.exceptions import McpError
 from mcp.types import CallToolRequest, CallToolResult, ContentBlock, TextContent
 from mcp.types import Tool as MCPTool
+from midojo_spec import injection as spec_injection
 from midojo_spec.context import ToolContext
 from midojo_spec.injection import (
-    MIDOJO_MCP_CAPABILITY,
     CapabilityError,
     CapabilityGap,
     InjectionOutcome,
@@ -342,7 +342,7 @@ class MidojoMCP:
     @property
     def injection_capability(self) -> InterceptorCapability:
         """The exact plan vocabulary this interceptor supports on mirrored results."""
-        return MIDOJO_MCP_CAPABILITY
+        return spec_injection.MIDOJO_MCP_CAPABILITY
 
     @property
     def injection_plan(self) -> InjectionPlan:

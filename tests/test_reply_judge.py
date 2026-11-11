@@ -24,6 +24,7 @@ from pathlib import Path
 import httpcore
 import httpx
 import pytest
+from midojo_spec.judge import SCHEMA, request_id
 
 import midojo
 from midojo.agent_client import AgentClient
@@ -39,7 +40,7 @@ from midojo.orchestrator import run_benchmark
 from midojo.runtimes import UnmanagedRuntime
 from midojo.types import Environment, FunctionCallRecord
 from midojo.verifiers import ConversationTurn, VerificationContext, parse_check
-from midojo.verifiers.judge import SCHEMA, JudgeRecord, ReplyJudge, request_id
+from midojo.verifiers.judge import JudgeRecord, ReplyJudge
 from midojo.yaml_task_suite import YAMLTaskSuite
 from tests.judge_service import MODEL, FakeJudge
 
@@ -822,7 +823,7 @@ def test_any_other_failure_in_a_judge_check_is_unknown(judge, monkeypatch):
     def broken(*args):
         raise KeyError(TOKEN)
 
-    monkeypatch.setattr(judge_module, "response_problem", broken)
+    monkeypatch.setattr(judge_module.spec, "response_problem", broken)
     ctx = context()
     result = parse_check(judge_spec(judge.url("/supported"))).assess(ctx)
 
@@ -1111,7 +1112,7 @@ async def test_any_exception_in_the_judge_path_is_unknown_recorded_and_never_sho
     def broken(*args, **kwargs):
         raise RuntimeError(f"boom with Authorization: Bearer {TOKEN} and {TOKEN}")
 
-    monkeypatch.setattr(judge_module, step, broken)
+    monkeypatch.setattr(judge_module.spec if step == "response_problem" else judge_module, step, broken)
     monkeypatch.setenv("TEST_JUDGE_URL", judge.url("/supported"))
     monkeypatch.setenv("TEST_JUDGE_TOKEN", TOKEN)
     grade = await graded_in_process(judged_episode(), REPLY)

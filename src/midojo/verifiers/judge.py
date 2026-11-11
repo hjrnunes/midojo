@@ -43,7 +43,7 @@ from datetime import date, datetime, time, timedelta
 from typing import Any, Literal
 
 import httpx
-from midojo_spec.judge import SCHEMA, request_id, response_problem
+from midojo_spec import judge as spec
 from pydantic import BaseModel, ConfigDict
 from pydantic_core import to_jsonable_python
 
@@ -245,7 +245,7 @@ class ReplyJudge:
         or ``judge-replay-ambiguous:`` and the id's first eight hex digits.
         """
         why = str(unanswered)
-        request = progress.request or {"schema": SCHEMA, "id": unanswered.request_id}
+        request = progress.request or {"schema": spec.SCHEMA, "id": unanswered.request_id}
         record = JudgeRecord(
             request_id=unanswered.request_id, endpoint=progress.endpoint, request=request, sent=False, failure=why
         )
@@ -306,7 +306,7 @@ class ReplyJudge:
             body = _json_data({"claim": self.claim, "rubric": self.rubric})
         except Exception:
             body = {}
-        return {"schema": SCHEMA, "id": request_id(body), **body}
+        return {"schema": spec.SCHEMA, "id": spec.request_id(body), **body}
 
     def evaluate(self, ctx: VerificationContext) -> bool | None:
         return self.assess(ctx).passed
@@ -350,7 +350,7 @@ class ReplyJudge:
             ]
             body["tool_calls_complete"] = ctx.function_calls_complete and all(c.complete for c in ctx.function_calls)
         body = _json_data(body)
-        return {"schema": SCHEMA, "id": request_id(body), **body}
+        return {"schema": spec.SCHEMA, "id": spec.request_id(body), **body}
 
     def ask(self, request: dict[str, Any], progress: _Progress | None = None) -> JudgeRecord:
         """Send ``request`` to the service and keep what it answered, or why there is no answer.
@@ -419,9 +419,9 @@ class ReplyJudge:
             return JudgeRecord(**sent, failure=f"the judge service's answer {exc}")
         except (ValueError, RecursionError):  # JSONDecodeError and UnicodeDecodeError are ValueErrors
             return JudgeRecord(**sent, failure="the judge service's answer is not JSON")
-        problem = response_problem(answer, fields["request_id"])
+        problem = spec.response_problem(answer, fields["request_id"])
         if problem is not None:
-            return JudgeRecord(**sent, failure=f"the judge service's answer is not a {SCHEMA} response: {problem}")
+            return JudgeRecord(**sent, failure=f"the judge service's answer is not a {spec.SCHEMA} response: {problem}")
         return JudgeRecord(
             **sent,
             verdict=answer["verdict"],

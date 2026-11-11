@@ -20,17 +20,7 @@ from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from typing import Any
 
-from midojo_spec.link import (
-    OPS,
-    Duplex,
-    Frame,
-    LinkError,
-    LinkFault,
-    LinkLost,
-    decode_answer,
-    encode_frame,
-    rejection_error,
-)
+from midojo_spec import link as wire
 from midojo_spec.recorder import (
     CAPTURE_REASON_MAX_LENGTH,
     CapturePhase,
@@ -54,7 +44,7 @@ class Link:
     of hanging the call. ``None`` waits for as long as the stream lives.
     """
 
-    def __init__(self, duplex: Duplex, *, answer_deadline: float | None = None) -> None:
+    def __init__(self, duplex: wire.Duplex, *, answer_deadline: float | None = None) -> None:
         if answer_deadline is not None and (
             isinstance(answer_deadline, bool) or not isinstance(answer_deadline, int | float) or answer_deadline <= 0
         ):
@@ -66,15 +56,15 @@ class Link:
         # Requests the caller abandoned (a cancelled tool call): their answers arrive to no one, and are dropped.
         self._abandoned: set[int] = set()
         self._reader: asyncio.Task[None] | None = None
-        self._lost: LinkError | None = None
+        self._lost: wire.LinkError | None = None
         self._lost_event = asyncio.Event()
 
     @property
-    def lost(self) -> LinkError | None:
+    def lost(self) -> wire.LinkError | None:
         """The loss that ended the link, or None while it's live: a transport that went, or a frame the peer broke."""
         return self._lost
 
-    async def wait_lost(self) -> LinkError:
+    async def wait_lost(self) -> wire.LinkError:
         """The loss that ended the link, waiting for it while the link is still live."""
         await self._lost_event.wait()
         assert self._lost is not None
@@ -82,8 +72,8 @@ class Link:
 
     async def request(self, op: str, args: Mapping[str, Any] | None = None) -> Any:
         """Send one frame and return its answer's result, or raise its rejection or the link's loss."""
-        if op not in OPS:
-            raise ValueError(f"unknown op {op!r}: the binding stream has {list(OPS)}")
+        if op not in wire.OPS:
+            raise ValueError(f"unknown op {op!r}: the binding stream has {list(wire.OPS)}")
         if self._lost is not None:
             raise self._lost
         self._ensure_reader()
@@ -92,14 +82,14 @@ class Link:
         answer: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
         self._pending[frame_id] = answer
         try:
-            await self._duplex.send(encode_frame(Frame(frame_id, op, dict(args or {}))))
+            await self._duplex.send(wire.encode_frame(wire.Frame(frame_id, op, dict(args or {}))))
         except asyncio.CancelledError:
             self._pending.pop(frame_id, None)
-            self._lose(LinkLost(f"frame {frame_id} was cancelled before it was sent"))
+            self._lose(wire.LinkLost(f"frame {frame_id} was cancelled before it was sent"))
             raise
         except Exception as e:
             self._pending.pop(frame_id, None)
-            lost = LinkLost(f"frame {frame_id} couldn't be sent: {e}")
+            lost = wire.LinkLost(f"frame {frame_id} couldn't be sent: {e}")
             self._lose(lost)
             raise lost from e
         try:
@@ -117,7 +107,7 @@ class Link:
         try:
             return await asyncio.wait_for(answer, self._answer_deadline)
         except TimeoutError:
-            self._lose(LinkLost(f"frame {frame_id} waited more than {self._answer_deadline:g}s for its answer"))
+            self._lose(wire.LinkLost(f"frame {frame_id} waited more than {self._answer_deadline:g}s for its answer"))
             # Raise the link's own loss: two requests that timed out together fail as one fact, not two.
             lost = self._lost
             assert lost is not None
@@ -125,7 +115,7 @@ class Link:
 
     def close(self, detail: str = "the service closed the binding") -> None:
         """End the link and its stream: the requests in flight fail, and so does every later one."""
-        self._lose(LinkLost(detail))
+        self._lose(wire.LinkLost(detail))
         with suppress(Exception):
             self._duplex.close()
 
@@ -150,11 +140,11 @@ class Link:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                self._lose(LinkLost(f"the binding stream ended: {e}"))
+                self._lose(wire.LinkLost(f"the binding stream ended: {e}"))
                 return
             try:
-                decoded = decode_answer(data)
-            except LinkFault as fault:
+                decoded = wire.decode_answer(data)
+            except wire.LinkFault as fault:
                 self._lose(fault)
                 return
             if decoded.re in self._abandoned:
@@ -162,18 +152,18 @@ class Link:
                 continue
             answer = self._pending.get(decoded.re)
             if answer is None or answer.done():
-                self._lose(LinkFault(f"the answer to frame {decoded.re} matches no request in flight"))
+                self._lose(wire.LinkFault(f"the answer to frame {decoded.re} matches no request in flight"))
                 return
             if decoded.rejected is None:
                 answer.set_result(decoded.ok)
                 continue
             try:
-                answer.set_exception(rejection_error(decoded.rejected))
-            except LinkFault as fault:
+                answer.set_exception(wire.rejection_error(decoded.rejected))
+            except wire.LinkFault as fault:
                 self._lose(fault)
                 return
 
-    def _lose(self, error: LinkError) -> None:
+    def _lose(self, error: wire.LinkError) -> None:
         if self._lost is None:
             self._lost = error
         self._lost_event.set()
@@ -197,7 +187,7 @@ class LinkRecorder:
         self._link = link
 
     @property
-    def lost(self) -> LinkError | None:
+    def lost(self) -> wire.LinkError | None:
         """The loss that ended the link, or None while it's live."""
         return self._link.lost
 
@@ -278,7 +268,7 @@ class LinkWorld:
         self._link = link
 
     @property
-    def lost(self) -> LinkError | None:
+    def lost(self) -> wire.LinkError | None:
         """The loss that ended the link, or None while it's live."""
         return self._link.lost
 
@@ -295,7 +285,7 @@ class LinkWorld:
 
 def _revision(answer: object) -> EnvironmentRevision:
     if not isinstance(answer, dict) or set(answer) != {"revision", "environment"}:
-        raise LinkFault(f"an environment answer holds a revision and an environment, not {answer!r}")
+        raise wire.LinkFault(f"an environment answer holds a revision and an environment, not {answer!r}")
     return EnvironmentRevision(answer["revision"], answer["environment"])
 
 

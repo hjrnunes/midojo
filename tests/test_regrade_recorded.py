@@ -24,6 +24,7 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
+from midojo_spec.judge import request_id
 
 import midojo
 from midojo import InjectionSpec
@@ -37,7 +38,6 @@ from midojo.verifiers.judge import (
     JudgeRecord,
     RecordedJudge,
     UnrecordedJudgeRequest,
-    request_id,
 )
 from tests.judge_service import FakeJudge
 from tests.regrade import RecordedEvaluation, load, regrade
