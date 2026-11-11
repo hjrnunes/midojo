@@ -1,7 +1,8 @@
 """MiDojo's snapshot ID: a sealed snapshot's content digest, and the read view of that content.
 
 MiDojo names a sealed snapshot by its own content (:func:`snapshot_digest`): ``sha256:<hex>``
-of a lossless encoding of everything in the snapshot but its ID. The encoding takes only JSON
+of a lossless encoding of the snapshot's content, the fields of :data:`CONTENT_FIELDS`: every field
+a sealed snapshot holds but its ID. The encoding takes only JSON
 values: ``str``, ``int``, ``bool`` and ``None`` are themselves; a float is
 ``["float", <its IEEE-754 bits as big-endian hex>]``, so ``-0.0`` encodes apart from ``0.0``;
 a list is ``["list", [items]]``; an object is ``["mapping", [[key, value], ...]]`` with its
@@ -11,10 +12,11 @@ carry (``bytes``, a date, a tuple, a set, a non-finite float, a mapping with a k
 text) is refused with :class:`DigestFault` rather than encoded: nothing JSON holds it back as.
 ``NaN`` and the infinities are refused in the snapshot's content wherever they come from: the
 bare JSON constants, a number past the range of a double (``1e999``), and a ``float`` in an
-object a caller passes in. Only :data:`CONTENT_FIELDS` are content. A field outside them is
-named by no ID, so the codec neither reads nor checks it, and :func:`verified` returns the
-snapshot with it as it came: read evidence from :data:`CONTENT_FIELDS` or from
-:class:`SnapshotView`, whose ``content`` holds those fields alone.
+object a caller passes in. Only :data:`CONTENT_FIELDS` are content, and ``snapshot_id`` is the
+name :func:`verified` compares them with. Any other field is named by no ID: the codec does not
+digest it or check its values, and :func:`verified` returns the snapshot with it as it came
+(read as JSON text, the whole text must still parse). Read evidence from :data:`CONTENT_FIELDS`
+or from :class:`SnapshotView`, whose ``content`` holds those fields alone.
 
 A snapshot is the JSON form ``GET /runs/{run_id}/evaluations/{eval_id}/snapshot`` serves, so a
 consumer reads the ID and verifies it (:func:`verified`, :class:`SnapshotView`) without any
@@ -161,8 +163,8 @@ def verified(snapshot: Mapping[str, object]) -> Mapping[str, object]:
 
     A snapshot without an ID, with an ID that is not text, or with content that digests to another
     ID is refused: nothing else holds the content, so a caller that wants it read only once holds
-    what this returned. A field outside :data:`CONTENT_FIELDS` is not content: the ID does not
-    name it and this checks nothing about it.
+    what this returned. A field other than ``snapshot_id`` that is not in :data:`CONTENT_FIELDS` is
+    not content: the ID does not name it, and this neither digests it nor checks its values.
     """
 
     if not isinstance(snapshot, Mapping):
