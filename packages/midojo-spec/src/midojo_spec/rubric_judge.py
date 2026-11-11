@@ -486,9 +486,10 @@ _FENCE_TAG = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123
 def strip_code_fence(content: str) -> str:
     """Return the body of a reply that is one fenced code block, else the reply.
 
-    A reply is one block when, after leading whitespace, it opens with three backticks, a
-    language tag (``[A-Za-z0-9_+-]*``), spaces or tabs and one newline, and ends with three
-    backticks and trailing whitespace; the body loses its trailing whitespace. This gives
+    A reply is one block when, after leading whitespace, it opens with three backticks, an
+    optional language tag (``[A-Za-z0-9_+-]*``), optional spaces or tabs and an optional
+    newline, and ends with three backticks and trailing whitespace; the body loses its
+    trailing whitespace. This gives
     what Garak's ``_CODE_FENCE`` pattern gives on every text, and runs in linear time: that
     pattern backtracks cubically on an opening fence followed by a long run of spaces
     (2,000 spaces take seconds), which a model that degenerates can send.
