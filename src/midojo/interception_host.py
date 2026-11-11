@@ -3,7 +3,7 @@
 The host (the process that runs the orchestrator) builds a
 :class:`HostInterceptor` for each evaluation of a host-mode run
 (``midojo-run --interception host``). It gets the evaluation's recording
-authority at setup, a ``midojo_sdk.recorder.Recorder`` for the evaluation's
+authority at setup, a ``midojo_spec.recorder.Recorder`` for the evaluation's
 session (in process, or over HTTP with the session token), and the tool-output
 part of the episode's injection plan. It mirrors the upstream MCP server (the
 real tools), records every call through that recorder and forwards it. A
@@ -46,9 +46,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import uvicorn
-from midojo_sdk.injection import InjectionOutcome, InjectionPlan
 from midojo_sdk.mcp import MidojoMCP
-from midojo_sdk.recorder import Recorder, WorldState
+from midojo_spec.injection import InjectionOutcome, InjectionPlan
+from midojo_spec.recorder import Recorder, WorldState
 
 from midojo.tool_endpoint import TOOL_PATH, ToolEndpoint, bare_host, tool_url
 

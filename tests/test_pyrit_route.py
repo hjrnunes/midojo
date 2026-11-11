@@ -41,7 +41,7 @@ with patch("appdirs.user_data_dir", side_effect=lambda name, *args: str(Path.cwd
     from pyrit.score.true_false.self_ask_true_false_scorer import SelfAskTrueFalseScorer
 
 from fastmcp import Client, FastMCP
-from midojo_sdk.injection import Channel, InjectionInstruction, InjectionPlan, InjectionTarget
+from midojo_spec.injection import Channel, InjectionInstruction, InjectionPlan, InjectionTarget
 
 from examples.pyrit_weather import (
     IPI_BRIEF,

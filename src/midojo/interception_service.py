@@ -55,21 +55,19 @@ from dataclasses import dataclass, field
 
 import uvicorn
 from midojo_sdk.binding import ANSWER_DEADLINE_SECONDS, HEARTBEAT_EXPIRY_SECONDS
-from midojo_sdk.injection import CapabilityError, Channel, InjectionPlan
-from midojo_sdk.link import (
+from midojo_sdk.link import Link, LinkRecorder, LinkWorld
+from midojo_sdk.mcp import MidojoMCP
+from midojo_spec.injection import CapabilityError, Channel, InjectionPlan
+from midojo_spec.link import (
     API,
     BIND_FIELDS,
     SUBPROTOCOL,
-    Link,
     LinkFault,
     LinkLost,
-    LinkRecorder,
-    LinkWorld,
     Message,
     decode_message,
     encode_message,
 )
-from midojo_sdk.mcp import MidojoMCP
 from starlette.applications import Starlette
 from starlette.routing import Mount, WebSocketRoute
 from starlette.types import ASGIApp, Receive, Scope, Send

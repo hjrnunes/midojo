@@ -48,7 +48,7 @@ from .service import ById, ControlPlane, OpenedEvaluation
 from .state import Snapshot
 
 if TYPE_CHECKING:
-    from midojo_sdk.recorder import Recorder, WorldState
+    from midojo_spec.recorder import Recorder, WorldState
 
 
 class InProcessControlClient:

@@ -14,7 +14,7 @@ import httpx
 import pytest
 from midojo_sdk.client import AgentControlPlaneClient
 from midojo_sdk.mcp import BLOCKED_REASON, MidojoMCP, ToolContext, UpstreamClient
-from midojo_sdk.recorder import Disposition
+from midojo_spec.recorder import Disposition
 
 from midojo.types import CallDisposition, FunctionCallRecord
 from tests.scripted_mcp import PROTOCOL_ERROR, SESSION_CALL, TOOLS, ScriptedMCP, wire_session

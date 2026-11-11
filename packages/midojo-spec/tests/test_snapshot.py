@@ -1,9 +1,9 @@
-"""The SDK's snapshot codec: the digest MiDojo names a sealed snapshot by, and the read view of one.
+"""The snapshot codec: the digest MiDojo names a sealed snapshot by, and the read view of one.
 
-The vectors in ``tests/fixtures/snapshot_digest/vectors.json`` were recorded from
-MiDojo's implementation before the digest moved here (commit 770118e), each with
-the JSON form ``GET .../snapshot`` served and the id that implementation computed for it.
-The SDK must reproduce every one of them, and refuse the corruptions listed with it.
+The vectors in ``vectors/snapshot/vectors.json`` were recorded from MiDojo's implementation
+before the digest moved out of the runtime (commit 770118e), each with the JSON form
+``GET .../snapshot`` served and the id that implementation computed for it. This package must
+reproduce every one of them, and refuse the corruptions listed with it.
 
 One recorded value changed afterwards: the run summary inside the ``recorded-openshell-run``
 vector names its schema ``agent-run-summary-v1``, and that vector's ``snapshot_id`` is the
@@ -12,7 +12,6 @@ digest of the edited snapshot.
 
 from __future__ import annotations
 
-import ast
 import json
 import os
 import subprocess
@@ -22,7 +21,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from midojo_sdk.snapshot import (
+
+from midojo_spec.snapshot import (
     CONTENT_FIELDS,
     LATER_OUTCOME_FIELDS,
     OBSERVATION_OMITS_WHEN_EMPTY,
@@ -36,9 +36,8 @@ from midojo_sdk.snapshot import (
     verified,
 )
 
-ROOT = Path(__file__).resolve().parent.parent
-SDK_SOURCE = ROOT / "interception/python-sdk/src/midojo_sdk"
-VECTORS_PATH = ROOT / "tests/fixtures/snapshot_digest/vectors.json"
+PACKAGE = Path(__file__).resolve().parent.parent
+VECTORS_PATH = PACKAGE / "vectors/snapshot/vectors.json"
 
 VECTORS = json.loads(VECTORS_PATH.read_text())
 ACCEPTED = [vector for vector in VECTORS if "refusal" not in vector]
@@ -288,15 +287,15 @@ def test_a_digest_fault_is_a_value_error():
 # --- the import boundary ---
 
 
-# Every top-level module that is neither the standard library nor the SDK is unimportable, so nothing the SDK
-# imports can hide: midojo, httpx, pydantic, fastapi, grpc, google.protobuf and openshell are all blocked.
+# Every top-level module that is neither the standard library nor this package is unimportable, so nothing the
+# module imports can hide: midojo, httpx, pydantic, fastapi, grpc, google.protobuf and openshell are all blocked.
 BLOCK_PREAMBLE = """
 import importlib.abc
 import json
 import sys
 from pathlib import Path
 
-ALLOWED = set(sys.stdlib_module_names) | {"midojo_sdk", "__main__"}
+ALLOWED = set(sys.stdlib_module_names) | {"midojo_spec", "__main__"}
 
 
 class Unavailable(importlib.abc.MetaPathFinder):
@@ -317,9 +316,9 @@ def outside_the_standard_library():
 """
 
 RUN_THE_SNAPSHOT_CODEC = """
-from midojo_sdk.snapshot import SnapshotView, canonical, dumps, snapshot_digest, verified
+from midojo_spec.snapshot import SnapshotView, canonical, dumps, snapshot_digest, verified
 
-vectors = json.loads(Path("tests/fixtures/snapshot_digest/vectors.json").read_text())
+vectors = json.loads(Path("vectors/snapshot/vectors.json").read_text())
 snapshot = next(entry for entry in vectors if entry["name"] == "recorded-openshell-run")["snapshot"]
 assert snapshot_digest(snapshot) == "sha256:d0e377a085a5526d0a5fb00e0dcfbd3de43b46951cbcf126a30af8b5f483f8ad"
 assert verified(snapshot) is snapshot
@@ -329,20 +328,13 @@ assert dumps(canonical(snapshot["function_calls"]))
 print(outside_the_standard_library())
 """
 
-IMPORT_THE_SDK = """
-import midojo_sdk.injection
-import midojo_sdk.injection_spec_schema
-import midojo_sdk.snapshot
-print(outside_the_standard_library())
-"""
-
 
 def _child(code: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, "-I", "-c", textwrap.dedent(code)],
         capture_output=True,
         text=True,
-        cwd=ROOT,
+        cwd=PACKAGE,
         env={**os.environ, "PYTHONPATH": ""},
         timeout=120,
     )
@@ -350,30 +342,6 @@ def _child(code: str) -> subprocess.CompletedProcess[str]:
 
 def test_the_snapshot_module_imports_and_runs_with_only_the_standard_library():
     result = _child(BLOCK_PREAMBLE + RUN_THE_SNAPSHOT_CODEC)
-
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "[]", f"loaded {result.stdout.strip()}"
-
-
-def test_the_sdk_never_imports_midojo():
-    offenders: list[str] = []
-    files = sorted(SDK_SOURCE.rglob("*.py"))
-    for path in files:
-        for node in ast.walk(ast.parse(path.read_text(), filename=str(path))):
-            if isinstance(node, ast.Import):
-                offenders += [f"{path.name}: import {alias.name}" for alias in node.names if _is_midojo(alias.name)]
-            elif isinstance(node, ast.ImportFrom) and node.module is not None and _is_midojo(node.module):
-                offenders.append(f"{path.name}: from {node.module} import")
-    assert offenders == [], offenders
-    assert len(files) >= 8, files
-
-
-def _is_midojo(name: str) -> bool:
-    return name == "midojo" or name.startswith("midojo.")
-
-
-def test_the_sdk_modules_import_with_midojo_blocked():
-    result = _child(BLOCK_PREAMBLE + IMPORT_THE_SDK)
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "[]", f"loaded {result.stdout.strip()}"

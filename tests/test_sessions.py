@@ -12,8 +12,8 @@ from fastapi.dependencies.models import Dependant
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from midojo_sdk.context import ToolContext
-from midojo_sdk.recorder import ControlPlaneRejectedError, InvalidRequestError, RejectionKind
 from midojo_sdk.session import MidojoSessionMiddleware, MissingSessionError, session_context, session_token
+from midojo_spec.recorder import ControlPlaneRejectedError, InvalidRequestError, RejectionKind
 from pydantic import ValidationError
 
 from midojo.control_plane.config import AppConfig

@@ -15,7 +15,7 @@ import re
 from collections.abc import Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any
+from typing import Any, TypeAlias
 
 PLAN_CODEC_VERSION = "midojo-plan-v1"
 """The version of the plan encoding :meth:`InjectionPlan.to_data` writes.
@@ -46,11 +46,12 @@ class RecordSelector:
             raise TypeError("record selector value must be an exact str or int")
 
 
-type PathPart = str | int | RecordSelector
-type FieldPath = tuple[PathPart, ...]
-type ArgumentValue = str | int | float | bool | None
-type CallArguments = tuple[tuple[str, ArgumentValue], ...]
-type CallArgumentsInput = CallArguments | Mapping[str, ArgumentValue]
+# ``TypeAlias``, not ``type``: the package runs on Python 3.11, which has no ``type`` statement.
+PathPart: TypeAlias = str | int | RecordSelector
+FieldPath: TypeAlias = tuple[PathPart, ...]
+ArgumentValue: TypeAlias = str | int | float | bool | None
+CallArguments: TypeAlias = tuple[tuple[str, ArgumentValue], ...]
+CallArgumentsInput: TypeAlias = CallArguments | Mapping[str, ArgumentValue]
 
 
 class Channel(enum.StrEnum):
@@ -499,6 +500,23 @@ class InterceptorCapability:
     mismatch_policies: frozenset[MismatchPolicy]
     call_arguments: bool = False
     result_record: bool = False
+
+
+MIDOJO_MCP_CAPABILITY = InterceptorCapability(
+    channels=frozenset({Channel.TOOL_OUTPUT}),
+    selector_surfaces=frozenset({SelectorSurface.CONTENT_BLOCK, SelectorSurface.STRUCTURED_CONTENT}),
+    content_block_types=frozenset({"text"}),
+    modes=frozenset(InjectionMode),
+    transformations=frozenset(Transformation),
+    mismatch_policies=frozenset(MismatchPolicy),
+    call_arguments=True,
+    result_record=True,
+)
+"""Placements MiDojo's MCP forwarding interceptor implements for mirrored tool results without degradation.
+
+It is declared here, with the plan it is checked against, so a reader of a plan and every interceptor that
+serves the same MCP face state one capability, not two copies that drift.
+"""
 
 
 @dataclass(frozen=True)

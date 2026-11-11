@@ -4,7 +4,7 @@ An injection-spec document is the same data an :class:`~midojo.injection_spec.In
 without the trusted code (the environment model and the verifier
 implementations): a suite, a driver or another repository can write one, read
 it and run it. The schema is the SDK's
-(``midojo_sdk.injection_spec_schema``), so every repository validates with the same
+(``midojo_spec.injection_spec_schema``), so every repository validates with the same
 file; this module is the reader and writer MiDojo itself uses, and a test holds
 the two in agreement over the golden vectors.
 
@@ -13,13 +13,13 @@ The document is closed. A key MiDojo does not define is refused at every level
 the tool policy and each runtime definition), so a misspelled field never
 silently disappears. ``schema_version`` says which form the document is: this
 module writes and reads only
-:data:`~midojo_sdk.injection_spec_schema.INJECTION_SPEC_DOCUMENT_V1`. Any other
+:data:`~midojo_spec.injection_spec_schema.INJECTION_SPEC_DOCUMENT_V1`. Any other
 version raises :class:`UnsupportedDocumentVersion`, naming it, and a document
 without one is refused.
 
 The plan in a document is the SDK's plan encoding; its version is the
 document's ``schema_version``, so changing the plan's bytes needs a new
-document version (see :data:`midojo_sdk.injection.PLAN_CODEC_VERSION`).
+document version (see :data:`midojo_spec.injection.PLAN_CODEC_VERSION`).
 
 ``verifiers`` is always an empty list: a verifier registry is trusted code, not
 data, so a document can name none. An injection spec built with its own
@@ -34,8 +34,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from midojo_sdk.injection import InjectionPlan
-from midojo_sdk.injection_spec_schema import INJECTION_SPEC_DOCUMENT_V1
+from midojo_spec.injection import InjectionPlan
+from midojo_spec.injection_spec_schema import INJECTION_SPEC_DOCUMENT_V1
 
 from midojo.injection_spec import InjectionSpec, InterceptionSettings, RuntimeCheckError, ToolPolicy, thaw
 

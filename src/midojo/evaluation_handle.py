@@ -56,7 +56,7 @@ from types import TracebackType
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
-from midojo_sdk.link import LINK_LOST_REASON
+from midojo_spec.link import LINK_LOST_REASON
 
 from midojo.control_plane.grading import Verdict
 from midojo.control_plane.grading import grade as grade_snapshot

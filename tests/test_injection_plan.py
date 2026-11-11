@@ -12,7 +12,9 @@ import pytest
 from fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult, TextContent
 from midojo_sdk import placement
-from midojo_sdk.injection import (
+from midojo_sdk.mcp import MidojoMCP, ToolContext
+from midojo_spec.injection import (
+    MIDOJO_MCP_CAPABILITY,
     CapabilityError,
     Channel,
     GeneratorInstructionError,
@@ -35,8 +37,7 @@ from midojo_sdk.injection import (
     instruction_from_generator_for_plan,
     payload_digest,
 )
-from midojo_sdk.mcp import MIDOJO_MCP_CAPABILITY, MidojoMCP, ToolContext
-from midojo_sdk.recorder import Disposition, InjectionRecord
+from midojo_spec.recorder import Disposition, InjectionRecord
 
 from midojo.injection_spec import InjectionSpec
 from midojo.suites import get_suite

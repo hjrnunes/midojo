@@ -19,7 +19,7 @@ from collections.abc import Iterator
 from typing import Any
 
 import pytest
-from midojo_sdk.injection import Channel, InjectionInstruction, InjectionPlan, InjectionTarget
+from midojo_spec.injection import Channel, InjectionInstruction, InjectionPlan, InjectionTarget
 
 import midojo
 import midojo.control_plane.grading
@@ -232,14 +232,14 @@ def test_the_in_process_client_has_no_open_episode() -> None:
 
 
 def test_the_old_document_constant_is_gone() -> None:
-    import midojo_sdk.injection_spec_schema as schema
+    import midojo_spec.injection_spec_schema as schema
 
     assert not hasattr(schema, "EPISODE_DOCUMENT_V1")
     assert "EPISODE_DOCUMENT_V1" not in schema.__all__
 
 
 def test_no_reader_keeps_an_old_document_version() -> None:
-    import midojo_sdk.injection_spec_schema as schema
+    import midojo_spec.injection_spec_schema as schema
 
     assert not hasattr(midojo.injection_spec_document, "LEGACY_DOCUMENT_VERSIONS")
     for name in ("LEGACY_INJECTION_SPEC_DOCUMENT_V1", "LEGACY_SCHEMA_FILE", "load_legacy_schema"):

@@ -319,7 +319,7 @@ A structured-content path normally uses string keys and non-negative integer ind
 A single-record lookup chooses its record by the call's argument (`lookup_order(order_id)` answers with one order object), so a path into its result can't tell one order from another. To place a payload only on the lookup of one record, give the target `call_arguments`: the call's arguments that must match. For `lookup_order` with `order_id == "ORD-102"`, replacing the order's `item`:
 
 ```python
-from midojo_sdk.injection import (
+from midojo_spec.injection import (
     Channel, InjectionInstruction, InjectionMode, InjectionPlan, InjectionTarget, SelectorSurface,
 )
 
@@ -351,7 +351,7 @@ In `InjectionPlan.to_json()` / `to_data()` the target is:
 Some lookups take another argument and name the record only in their result: `get_referral(patient_id)` answers `{"referral_id": "REF-1", "patient_id": "P-1", "reason": ...}`, and `get_education(patient_id)` answers `{"template_id": "EDU-1", ...}`. No argument tells one referral from another, so `call_arguments` can't select it. Give the target `result_record` instead, the single-object counterpart of the list record selector: the same `RecordSelector`, applied to the result's structured content itself. When the record's id is an argument of the call, use `call_arguments`; when it's only in the result, use `result_record`. For the referral `REF-1`, appending to its `reason`:
 
 ```python
-from midojo_sdk.injection import RecordSelector
+from midojo_spec.injection import RecordSelector
 
 InjectionTarget(
     tool="get_referral",

@@ -55,7 +55,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 
 import pytest
-from midojo_sdk.recorder import ControlPlaneRejectedError, RejectionKind
+from midojo_spec.recorder import ControlPlaneRejectedError, RejectionKind
 
 import midojo
 from midojo.control_plane.client import ControlClient

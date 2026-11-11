@@ -16,7 +16,7 @@ occurrences, applies the payload's transformation and size limit, splices the
 text into the structured content (re-serialising a JSON mirror in the
 upstream's layout) or into a content block, and applies the mismatch policy.
 
-This module is stdlib only, plus :mod:`midojo_sdk.injection`: it holds no MCP
+This module is stdlib only, plus :mod:`midojo_spec.injection`: it holds no MCP
 SDK, pydantic or ``midojo`` type, so a plan's placements can be decided and
 checked without the interceptor's dependencies. The views below mirror the
 fields of the MCP SDK's result and content blocks, and the result's copy API,
@@ -32,7 +32,7 @@ import threading
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal, Protocol, runtime_checkable
 
-from midojo_sdk.injection import (
+from midojo_spec.injection import (
     PLACED,
     Channel,
     InjectionInstruction,

@@ -25,7 +25,8 @@ from dataclasses import dataclass
 from typing import Any
 
 import pytest
-from midojo_sdk.injection import (
+from midojo_sdk.mcp import MidojoMCP
+from midojo_spec.injection import (
     Channel,
     InjectionInstruction,
     InjectionMode,
@@ -38,7 +39,6 @@ from midojo_sdk.injection import (
     SelectorSurface,
     Transformation,
 )
-from midojo_sdk.mcp import MidojoMCP
 
 from midojo.control_plane.config import AppConfig
 from midojo.control_plane.inprocess import InProcessAgentClient

@@ -42,7 +42,7 @@ from types import ModuleType
 from typing import Any
 
 import pytest
-from midojo_sdk.snapshot import verified
+from midojo_spec.snapshot import verified
 
 from midojo.control_plane.client import snapshot_from_response
 from midojo.control_plane.config import AppConfig

@@ -21,7 +21,8 @@ import httpx
 import pytest
 from mcp.types import CallToolResult, TextContent
 from midojo_sdk.client import AgentControlPlaneClient
-from midojo_sdk.injection import (
+from midojo_sdk.mcp import MidojoMCP
+from midojo_spec.injection import (
     PLACED,
     Channel,
     InjectionInstruction,
@@ -39,8 +40,7 @@ from midojo_sdk.injection import (
     Transformation,
     payload_digest,
 )
-from midojo_sdk.mcp import MidojoMCP
-from midojo_sdk.recorder import InjectionRecord
+from midojo_spec.recorder import InjectionRecord
 from pydantic import Field, ValidationError
 
 from midojo.agent_client import AgentClient

@@ -6,9 +6,16 @@ import typing
 import httpx
 import pytest
 from midojo_sdk import client as sdk_client
-from midojo_sdk import recorder as sdk_recorder
-from midojo_sdk.client import RECORD_ATTEMPTS, AgentControlPlaneClient, CallIds, InvalidHTTPRequestError, transient
-from midojo_sdk.injection import (
+from midojo_sdk.client import (
+    RECORD_ATTEMPTS,
+    AgentControlPlaneClient,
+    CallIds,
+    ControlPlaneRecorder,
+    InvalidHTTPRequestError,
+    transient,
+)
+from midojo_spec import recorder as sdk_recorder
+from midojo_spec.injection import (
     InjectionMode,
     InjectionSlot,
     InjectionTarget,
@@ -18,8 +25,7 @@ from midojo_sdk.injection import (
     Transformation,
     payload_digest,
 )
-from midojo_sdk.recorder import (
-    ControlPlaneRecorder,
+from midojo_spec.recorder import (
     ControlPlaneRejectedError,
     InjectionRecord,
     InvalidRequestError,

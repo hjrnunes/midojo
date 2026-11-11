@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import os
 import uuid
+import warnings
 from collections.abc import Sequence
 from typing import Any
 
 import httpx
-
-from midojo_sdk.recorder import (
+from midojo_spec.recorder import (
     CAPTURE_REASON_MAX_LENGTH,
     RECORD_ATTEMPTS,
     RECORD_BACKOFF_SECONDS,
@@ -21,6 +21,8 @@ from midojo_sdk.recorder import (
     InjectionRecord,
     InvalidRequestError,
     RejectionKind,
+    RetryingRecorder,
+    records_details,
     retry,
 )
 
@@ -31,6 +33,7 @@ __all__ = [
     "REVISION_HEADER",
     "AgentControlPlaneClient",
     "CallIds",
+    "ControlPlaneRecorder",
     "InvalidHTTPRequestError",
     "transient",
 ]
@@ -85,7 +88,7 @@ def transient(error: Exception) -> bool:
     """Whether resending a request that failed with ``error`` may succeed.
 
     A transport error is, and so is a 5xx response: a proxy's, or a server
-    error. A :class:`~midojo_sdk.recorder.ControlPlaneRejectedError` never is,
+    error. A :class:`~midojo_spec.recorder.ControlPlaneRejectedError` never is,
     nor any other 4xx.
     """
     if isinstance(error, httpx.TransportError):
@@ -96,16 +99,16 @@ def transient(error: Exception) -> bool:
 class AgentControlPlaneClient:
     """Access interception endpoints for one evaluation session.
 
-    The HTTP :class:`~midojo_sdk.recorder.Recorder` (and
-    :class:`~midojo_sdk.recorder.CaptureReporter`) and
-    :class:`~midojo_sdk.recorder.WorldState`, bound to the session token's
+    The HTTP :class:`~midojo_spec.recorder.Recorder` (and
+    :class:`~midojo_spec.recorder.CaptureReporter`) and
+    :class:`~midojo_spec.recorder.WorldState`, bound to the session token's
     evaluation. Their methods send each request once. A response that carries
     one of the control plane's rejection kinds raises
-    :class:`~midojo_sdk.recorder.ControlPlaneRejectedError`; any other failure
+    :class:`~midojo_spec.recorder.ControlPlaneRejectedError`; any other failure
     (a transport error, a proxy's error page, a request the API refuses before
     the control plane decides anything, such as one without a token) raises as
     an ``httpx`` error, which :func:`transient` classifies for a
-    :class:`~midojo_sdk.recorder.RetryingRecorder`.
+    :class:`~midojo_spec.recorder.RetryingRecorder`.
     """
 
     def __init__(self, base_url: str, session_token: str, *, http: httpx.AsyncClient) -> None:
@@ -302,3 +305,70 @@ def _raise_for_status(response: httpx.Response) -> None:
     if response.status_code == 422 and isinstance(body, dict) and isinstance(body.get("detail"), list):
         raise InvalidHTTPRequestError(str(body["detail"]), request=response.request, response=response)
     response.raise_for_status()
+
+
+class ControlPlaneRecorder:
+    """Deprecated: records calls through an :class:`AgentControlPlaneClient`.
+
+    The client is a :class:`~midojo_spec.recorder.Recorder` itself; wrap it in
+    ``RetryingRecorder(client, retryable=midojo_sdk.client.transient)`` for
+    resends. This adapter does exactly that, as it resent records before.
+    """
+
+    def __init__(self, client: AgentControlPlaneClient) -> None:
+        warnings.warn(
+            "ControlPlaneRecorder is deprecated: use the AgentControlPlaneClient as the recorder, wrapped in "
+            "RetryingRecorder(client, retryable=midojo_sdk.client.transient) for resends.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        self._recorder = RetryingRecorder(client, retryable=transient)
+
+    async def start_call(self, *, call_id: str, function: str, args: dict[str, Any], disposition: Disposition) -> None:
+        await self._recorder.start_call(call_id=call_id, function=function, args=args, disposition=disposition)
+
+    async def finish_call(
+        self,
+        *,
+        call_id: str,
+        function: str,
+        args: dict[str, Any],
+        result: str,
+        disposition: Disposition,
+        error: str | None = None,
+    ) -> None:
+        await self._recorder.finish_call(
+            call_id=call_id, function=function, args=args, result=result, disposition=disposition, error=error
+        )
+
+    @property
+    def records_details(self) -> bool:
+        """Whether the wrapped recorder records a finish's details (see :class:`~midojo_spec.recorder.DetailedRecorder`)."""
+        return records_details(self._recorder)
+
+    async def finish_call_detailed(
+        self,
+        *,
+        call_id: str,
+        function: str,
+        args: dict[str, Any],
+        result: str,
+        disposition: Disposition,
+        error: str | None = None,
+        structured_content: dict[str, Any] | None,
+        injection_outcomes: Sequence[InjectionRecord],
+    ) -> None:
+        """Finish the call through the wrapped recorder, with its details when that recorder records them."""
+        await self._recorder.finish_call_detailed(
+            call_id=call_id,
+            function=function,
+            args=args,
+            result=result,
+            disposition=disposition,
+            error=error,
+            structured_content=structured_content,
+            injection_outcomes=injection_outcomes,
+        )
+
+    async def report_capture_failure(self, *, call_id: str, function: str, phase: CapturePhase, reason: str) -> None:
+        await self._recorder.report_capture_failure(call_id=call_id, function=function, phase=phase, reason=reason)

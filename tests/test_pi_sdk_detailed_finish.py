@@ -14,7 +14,7 @@ from typing import Any
 import httpx
 import pytest
 from midojo_sdk.client import AgentControlPlaneClient
-from midojo_sdk.injection import payload_digest
+from midojo_spec.injection import payload_digest
 
 from midojo.types import CallInjectionOutcome, FunctionCallRecord
 

@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 from importlib import resources
 
-from midojo_sdk.injection import PLAN_CODEC_VERSION
+from .injection import PLAN_CODEC_VERSION
 
 __all__ = [
     "INJECTION_SPEC_DOCUMENT_V1",

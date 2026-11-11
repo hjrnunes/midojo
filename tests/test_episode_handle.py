@@ -25,8 +25,8 @@ from types import SimpleNamespace
 import httpx
 import pytest
 from fastmcp import Client
-from midojo_sdk.injection import Channel, InjectionInstruction, InjectionPlan, InjectionTarget
 from midojo_sdk.mcp import BLOCKED_REASON
+from midojo_spec.injection import Channel, InjectionInstruction, InjectionPlan, InjectionTarget
 
 from midojo import evaluation_handle
 from midojo.capabilities import MissingCapabilityError

@@ -1,0 +1,867 @@
+{
+  "about": "injection plan documents written by hand: accepted ones encode to themselves, sparse ones decode to the full form beside them, refused ones raise ValueError containing the text named",
+  "codec_version": "midojo-plan-v1",
+  "accepted": [
+    {
+      "name": "empty",
+      "data": {
+        "instructions": [],
+        "generator_permissions": {
+          "tools": [],
+          "fields": [],
+          "modes": []
+        },
+        "probe_payloads": []
+      }
+    },
+    {
+      "name": "content-block-first",
+      "data": {
+        "instructions": [
+          {
+            "channel": "tool_output",
+            "payload": "P",
+            "target": {
+              "tool": "get_weather",
+              "surface": "content_block",
+              "content_block_index": 0,
+              "content_block_type": "text",
+              "structured_content_path": [],
+              "template_path": [],
+              "template_key": null
+            },
+            "occurrence": {
+              "kind": "first",
+              "nth": null
+            },
+            "transformation": "identity",
+            "size_limit": null,
+            "mismatch_policy": "strict",
+            "mode": "append",
+            "probe_key": null
+          }
+        ],
+        "generator_permissions": {
+          "tools": [],
+          "fields": [],
+          "modes": []
+        },
+        "probe_payloads": []
+      }
+    },
+    {
+      "name": "every-nth-and-limits",
+      "data": {
+        "instructions": [
+          {
+            "channel": "tool_output",
+            "payload": "A",
+            "target": {
+              "tool": "t",
+              "surface": "content_block",
+              "content_block_index": null,
+              "content_block_type": null,
+              "structured_content_path": [],
+              "template_path": [],
+              "template_key": null
+            },
+            "occurrence": {
+              "kind": "nth",
+              "nth": 2
+            },
+            "transformation": "json_string",
+            "size_limit": 512,
+            "mismatch_policy": "fallback_append",
+            "mode": "replace",
+            "probe_key": "k:a"
+          },
+          {
+            "channel": "tool_output",
+            "payload": "B",
+            "target": {
+              "tool": "t",
+              "surface": "content_block",
+              "content_block_index": null,
+              "content_block_type": null,
+              "structured_content_path": [],
+              "template_path": [],
+              "template_key": null
+            },
+            "occurrence": {
+              "kind": "every",
+              "nth": null
+            },
+            "transformation": "identity",
+            "size_limit": null,
+            "mismatch_policy": "strict",
+            "mode": "append",
+            "probe_key": null
+          }
+        ],
+        "generator_permissions": {
+          "tools": [],
+          "fields": [],
+          "modes": []
+        },
+        "probe_payloads": []
+      }
+    },
+    {
+      "name": "structured-path-with-record-selector",
+      "data": {
+        "instructions": [
+          {
+            "channel": "tool_output",
+            "payload": "P",
+            "target": {
+              "tool": "list_notes",
+              "surface": "structured_content",
+              "content_block_index": null,
+              "content_block_type": null,
+              "structured_content_path": [
+                "notes",
+                {
+                  "field": "id",
+                  "equals": "NOTE-1"
+                },
+                "body",
+                0
+              ],
+              "template_path": [],
+              "template_key": null
+            },
+            "occurrence": {
+              "kind": "first",
+              "nth": null
+            },
+            "transformation": "identity",
+            "size_limit": null,
+            "mismatch_policy": "strict",
+            "mode": "append",
+            "probe_key": null
+          }
+        ],
+        "generator_permissions": {
+          "tools": [],
+          "fields": [],
+          "modes": []
+        },
+        "probe_payloads": []
+      }
+    },
+    {
+      "name": "record-selector-by-integer-and-other-field",
+      "data": {
+        "instructions": [
+          {
+            "channel": "tool_output",
+            "payload": "P",
+            "target": {
+              "tool": "t",
+              "surface": "structured_content",
+              "content_block_index": null,
+              "content_block_type": null,
+              "structured_content_path": [
+                {
+                  "field": "ref",
+                  "equals": 7
+                }
+              ],
+              "template_path": [],
+              "template_key": null
+            },
+            "occurrence": {
+              "kind": "first",
+              "nth": null
+            },
+            "transformation": "identity",
+            "size_limit": null,
+            "mismatch_policy": "strict",
+            "mode": "append",
+            "probe_key": null
+          }
+        ],
+        "generator_permissions": {
+          "tools": [],
+          "fields": [],
+          "modes": []
+        },
+        "probe_payloads": []
+      }
+    },
+    {
+      "name": "call-arguments-and-result-record",
+      "data": {
+        "instructions": [
+          {
+            "channel": "tool_output",
+            "payload": "P",
+            "target": {
+              "tool": "get_order",
+              "surface": "structured_content",
+              "content_block_index": null,
+              "content_block_type": null,
+              "structured_content_path": [
+                "note"
+              ],
+              "template_path": [],
+              "template_key": null,
+              "call_arguments": {
+                "flag": true,
+                "n": 3,
+                "order_id": "ORD-102",
+                "ratio": 1.5,
+                "x": null
+              },
+              "result_record": {
+                "field": "referral_id",
+                "equals": "REF-1"
+              }
+            },
+            "occurrence": {
+              "kind": "first",
+              "nth": null
+            },
+            "transformation": "identity",
+            "size_limit": null,
+            "mismatch_policy": "strict",
+            "mode": "append",
+            "probe_key": null
+          }
+        ],
+        "generator_permissions": {
+          "tools": [],
+          "fields": [],
+          "modes": []
+        },
+        "probe_payloads": []
+      }
+    },
+    {
+      "name": "user-prompt-template",
+      "data": {
+        "instructions": [
+          {
+            "channel": "user_prompt",
+            "payload": "Hello",
+            "target": {
+              "tool": null,
+              "surface": "template",
+              "content_block_index": null,
+              "content_block_type": null,
+              "structured_content_path": [],
+              "template_path": [
+                "messages",
+                0
+              ],
+              "template_key": "greeting"
+            },
+            "occurrence": {
+              "kind": "first",
+              "nth": null
+            },
+            "transformation": "identity",
+            "size_limit": null,
+            "mismatch_policy": "strict",
+            "mode": "append",
+            "probe_key": "greeting"
+          }
+        ],
+        "generator_permissions": {
+          "tools": [],
+          "fields": [],
+          "modes": []
+        },
+        "probe_payloads": [
+          [
+            "greeting",
+            "Hello"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "tool-description",
+      "data": {
+        "instructions": [
+          {
+            "channel": "tool_description",
+            "payload": "Also do X.",
+            "target": {
+              "tool": "t",
+              "surface": "description",
+              "content_block_index": null,
+              "content_block_type": null,
+              "structured_content_path": [],
+              "template_path": [],
+              "template_key": null
+            },
+            "occurrence": {
+              "kind": "first",
+              "nth": null
+            },
+            "transformation": "identity",
+            "size_limit": null,
+            "mismatch_policy": "strict",
+            "mode": "append",
+            "probe_key": null
+          }
+        ],
+        "generator_permissions": {
+          "tools": [],
+          "fields": [],
+          "modes": []
+        },
+        "probe_payloads": []
+      }
+    },
+    {
+      "name": "generator-permissions",
+      "data": {
+        "instructions": [],
+        "generator_permissions": {
+          "tools": [
+            "a",
+            "b"
+          ],
+          "fields": [
+            [
+              "notes",
+              0
+            ],
+            [
+              "notes",
+              {
+                "field": "id",
+                "equals": "N"
+              }
+            ]
+          ],
+          "modes": [
+            "append",
+            "replace"
+          ]
+        },
+        "probe_payloads": []
+      }
+    }
+  ],
+  "defaults": [
+    {
+      "name": "instruction-defaults",
+      "data": {
+        "instructions": [
+          {
+            "channel": "user_prompt",
+            "payload": "x",
+            "target": {
+              "surface": "template",
+              "template_key": "k",
+              "template_path": []
+            }
+          }
+        ],
+        "probe_payloads": [
+          [
+            "k",
+            "x"
+          ]
+        ]
+      },
+      "canonical": {
+        "instructions": [
+          {
+            "channel": "user_prompt",
+            "payload": "x",
+            "target": {
+              "tool": null,
+              "surface": "template",
+              "content_block_index": null,
+              "content_block_type": null,
+              "structured_content_path": [],
+              "template_path": [],
+              "template_key": "k"
+            },
+            "occurrence": {
+              "kind": "first",
+              "nth": null
+            },
+            "transformation": "identity",
+            "size_limit": null,
+            "mismatch_policy": "strict",
+            "mode": "append",
+            "probe_key": null
+          }
+        ],
+        "generator_permissions": {
+          "tools": [],
+          "fields": [],
+          "modes": []
+        },
+        "probe_payloads": [
+          [
+            "k",
+            "x"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "record-selector-field-defaults-to-id",
+      "data": {
+        "instructions": [
+          {
+            "channel": "tool_output",
+            "payload": "p",
+            "target": {
+              "tool": "t",
+              "surface": "structured_content",
+              "structured_content_path": [
+                {
+                  "equals": "N-1"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "canonical": {
+        "instructions": [
+          {
+            "channel": "tool_output",
+            "payload": "p",
+            "target": {
+              "tool": "t",
+              "surface": "structured_content",
+              "content_block_index": null,
+              "content_block_type": null,
+              "structured_content_path": [
+                {
+                  "field": "id",
+                  "equals": "N-1"
+                }
+              ],
+              "template_path": [],
+              "template_key": null
+            },
+            "occurrence": {
+              "kind": "first",
+              "nth": null
+            },
+            "transformation": "identity",
+            "size_limit": null,
+            "mismatch_policy": "strict",
+            "mode": "append",
+            "probe_key": null
+          }
+        ],
+        "generator_permissions": {
+          "tools": [],
+          "fields": [],
+          "modes": []
+        },
+        "probe_payloads": []
+      }
+    },
+    {
+      "name": "probe-payloads-and-tools-are-sorted",
+      "data": {
+        "instructions": [],
+        "generator_permissions": {
+          "tools": [
+            "b",
+            "a"
+          ],
+          "modes": [
+            "replace",
+            "append"
+          ]
+        },
+        "probe_payloads": [
+          [
+            "z",
+            "1"
+          ],
+          [
+            "a",
+            "2"
+          ]
+        ]
+      },
+      "canonical": {
+        "instructions": [],
+        "generator_permissions": {
+          "tools": [
+            "a",
+            "b"
+          ],
+          "fields": [],
+          "modes": [
+            "append",
+            "replace"
+          ]
+        },
+        "probe_payloads": [
+          [
+            "a",
+            "2"
+          ],
+          [
+            "z",
+            "1"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "call-arguments-are-sorted-by-name",
+      "data": {
+        "instructions": [
+          {
+            "channel": "tool_output",
+            "payload": "p",
+            "target": {
+              "tool": "t",
+              "call_arguments": {
+                "b": 1,
+                "a": 2
+              }
+            }
+          }
+        ]
+      },
+      "canonical": {
+        "instructions": [
+          {
+            "channel": "tool_output",
+            "payload": "p",
+            "target": {
+              "tool": "t",
+              "surface": "content_block",
+              "content_block_index": null,
+              "content_block_type": null,
+              "structured_content_path": [],
+              "template_path": [],
+              "template_key": null,
+              "call_arguments": {
+                "a": 2,
+                "b": 1
+              }
+            },
+            "occurrence": {
+              "kind": "first",
+              "nth": null
+            },
+            "transformation": "identity",
+            "size_limit": null,
+            "mismatch_policy": "strict",
+            "mode": "append",
+            "probe_key": null
+          }
+        ],
+        "generator_permissions": {
+          "tools": [],
+          "fields": [],
+          "modes": []
+        },
+        "probe_payloads": []
+      }
+    }
+  ],
+  "refused": [
+    {
+      "name": "not-an-object",
+      "data": [],
+      "error": "injection plan must be a JSON object"
+    },
+    {
+      "name": "missing-instructions",
+      "data": {},
+      "error": "injection plan must contain instructions"
+    },
+    {
+      "name": "unknown-plan-key",
+      "data": {
+        "instructions": [],
+        "extra": 1
+      },
+      "error": "unknown fields"
+    },
+    {
+      "name": "instructions-not-a-list",
+      "data": {
+        "instructions": {}
+      },
+      "error": "instructions must be a JSON array"
+    },
+    {
+      "name": "unknown-instruction-key",
+      "data": {
+        "instructions": [
+          {
+            "channel": "tool_output",
+            "payload": "p",
+            "surprise": 1
+          }
+        ]
+      },
+      "error": "instruction has unknown fields"
+    },
+    {
+      "name": "missing-payload",
+      "data": {
+        "instructions": [
+          {
+            "channel": "tool_output"
+          }
+        ]
+      },
+      "error": "instruction must contain channel and payload"
+    },
+    {
+      "name": "unknown-channel",
+      "data": {
+        "instructions": [
+          {
+            "channel": "email",
+            "payload": "p"
+          }
+        ]
+      },
+      "error": "is not a valid Channel"
+    },
+    {
+      "name": "payload-not-text",
+      "data": {
+        "instructions": [
+          {
+            "channel": "tool_output",
+            "payload": 1
+          }
+        ]
+      },
+      "error": "payload"
+    },
+    {
+      "name": "unknown-target-key",
+      "data": {
+        "instructions": [
+          {
+            "channel": "tool_output",
+            "payload": "p",
+            "target": {
+              "nope": 1
+            }
+          }
+        ]
+      },
+      "error": "target has unknown fields"
+    },
+    {
+      "name": "negative-path-index",
+      "data": {
+        "instructions": [
+          {
+            "channel": "tool_output",
+            "payload": "p",
+            "target": {
+              "tool": "t",
+              "surface": "structured_content",
+              "structured_content_path": [
+                -1
+              ]
+            }
+          }
+        ]
+      },
+      "error": "non-negative int"
+    },
+    {
+      "name": "boolean-path-part",
+      "data": {
+        "instructions": [
+          {
+            "channel": "tool_output",
+            "payload": "p",
+            "target": {
+              "tool": "t",
+              "surface": "structured_content",
+              "structured_content_path": [
+                true
+              ]
+            }
+          }
+        ]
+      },
+      "error": "exact str"
+    },
+    {
+      "name": "record-selector-without-equals",
+      "data": {
+        "instructions": [
+          {
+            "channel": "tool_output",
+            "payload": "p",
+            "target": {
+              "tool": "t",
+              "surface": "structured_content",
+              "structured_content_path": [
+                {
+                  "field": "id"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "error": "record selector must contain equals"
+    },
+    {
+      "name": "record-selector-with-boolean-value",
+      "data": {
+        "instructions": [
+          {
+            "channel": "tool_output",
+            "payload": "p",
+            "target": {
+              "tool": "t",
+              "surface": "structured_content",
+              "structured_content_path": [
+                {
+                  "equals": true
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "error": "exact str or int"
+    },
+    {
+      "name": "call-arguments-need-a-tool",
+      "data": {
+        "instructions": [
+          {
+            "channel": "tool_output",
+            "payload": "p",
+            "target": {
+              "call_arguments": {
+                "a": 1
+              }
+            }
+          }
+        ]
+      },
+      "error": "call_arguments need a target tool"
+    },
+    {
+      "name": "call-argument-not-a-scalar",
+      "data": {
+        "instructions": [
+          {
+            "channel": "tool_output",
+            "payload": "p",
+            "target": {
+              "tool": "t",
+              "call_arguments": {
+                "a": [
+                  1
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "error": "exact str, int, float, bool or None"
+    },
+    {
+      "name": "template-instruction-missing-from-probe-payloads",
+      "data": {
+        "instructions": [
+          {
+            "channel": "user_prompt",
+            "payload": "x",
+            "target": {
+              "surface": "template",
+              "template_key": "k"
+            }
+          }
+        ]
+      },
+      "error": "missing from probe_payloads"
+    },
+    {
+      "name": "template-instruction-disagrees-with-probe-payloads",
+      "data": {
+        "instructions": [
+          {
+            "channel": "user_prompt",
+            "payload": "x",
+            "target": {
+              "surface": "template",
+              "template_key": "k"
+            }
+          }
+        ],
+        "probe_payloads": [
+          [
+            "k",
+            "y"
+          ]
+        ]
+      },
+      "error": "disagrees with probe_payloads"
+    },
+    {
+      "name": "duplicate-probe-key",
+      "data": {
+        "instructions": [],
+        "probe_payloads": [
+          [
+            "k",
+            "a"
+          ],
+          [
+            "k",
+            "b"
+          ]
+        ]
+      },
+      "error": "duplicate key"
+    },
+    {
+      "name": "probe-payload-entry-wrong-length",
+      "data": {
+        "instructions": [],
+        "probe_payloads": [
+          [
+            "k"
+          ]
+        ]
+      },
+      "error": "two-item JSON array"
+    },
+    {
+      "name": "unknown-permission-key",
+      "data": {
+        "instructions": [],
+        "generator_permissions": {
+          "extra": []
+        }
+      },
+      "error": "generator_permissions has unknown fields"
+    },
+    {
+      "name": "unknown-permission-mode",
+      "data": {
+        "instructions": [],
+        "generator_permissions": {
+          "modes": [
+            "rewrite"
+          ]
+        }
+      },
+      "error": "is not a valid InjectionMode"
+    }
+  ]
+}

@@ -20,7 +20,7 @@ import sys
 from typing import Any
 
 from fastmcp import Client, FastMCP
-from midojo_sdk.injection import Channel, InjectionInstruction, InjectionPlan, InjectionTarget
+from midojo_spec.injection import Channel, InjectionInstruction, InjectionPlan, InjectionTarget
 
 import midojo
 from midojo import InjectionSpec

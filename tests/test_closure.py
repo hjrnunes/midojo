@@ -6,7 +6,7 @@ import time
 
 import pytest
 from fastapi.testclient import TestClient
-from midojo_sdk.recorder import ControlPlaneRejectedError
+from midojo_spec.recorder import ControlPlaneRejectedError
 
 from midojo.control_plane.config import AppConfig
 from midojo.control_plane.inprocess import InProcessAgentClient

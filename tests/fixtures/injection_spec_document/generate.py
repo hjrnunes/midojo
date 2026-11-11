@@ -40,7 +40,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from midojo_sdk.injection import (
+from midojo_spec.injection import (
     Channel,
     InjectionInstruction,
     InjectionMode,

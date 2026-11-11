@@ -1,7 +1,7 @@
 import uuid
 from typing import Annotated, Any, Literal
 
-from midojo_sdk.injection import InjectionSlot
+from midojo_spec.injection import InjectionSlot
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -52,18 +52,18 @@ CallProvenance = Literal["host", "interceptor", "agent"]
 
 
 # How one injection instruction fared on one call, as the interceptor that placed it reported it: the values of
-# ``midojo_sdk.injection.OutcomeStatus``. ``partial`` is a structured-content placement the result's text doesn't
+# ``midojo_spec.injection.OutcomeStatus``. ``partial`` is a structured-content placement the result's text doesn't
 # carry (its text isn't a JSON mirror of the structured content), so an agent reading only the text never saw it.
 InjectionStatus = Literal["applied", "partial", "fallback", "unmatched", "no_result", "too_large", "skipped_occurrence"]
 
-# The transformation an interceptor applied to a payload: the values of ``midojo_sdk.injection.Transformation``.
+# The transformation an interceptor applied to a payload: the values of ``midojo_spec.injection.Transformation``.
 InjectionTransformation = Literal["identity", "json_string"]
 
 # A part of a tool result an interceptor returned: its text (content) blocks or its structured content.
 ResultPart = Literal["content_block", "structured_content"]
 
 
-# The outcomes that wrote the payload into the result: the values of ``midojo_sdk.injection.PLACED``. Only these
+# The outcomes that wrote the payload into the result: the values of ``midojo_spec.injection.PLACED``. Only these
 # record what was placed and where.
 PLACED_STATUSES: frozenset[InjectionStatus] = frozenset({"applied", "partial", "fallback"})
 
@@ -72,7 +72,7 @@ PayloadDigest = Annotated[str, StringConstraints(strict=True, pattern=r"^sha256:
 
 
 class CallInjectionSlot(BaseModel):
-    """Where an instruction placed its payload on a call: ``midojo_sdk.injection.InjectionSlot.to_data``'s form.
+    """Where an instruction placed its payload on a call: ``midojo_spec.injection.InjectionSlot.to_data``'s form.
 
     ``target`` is the instruction's target in the plan codec's form (as
     ``InjectionPlan.to_data`` gives an instruction's ``target``: record

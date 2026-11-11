@@ -17,10 +17,10 @@ from langchain_core.tools import BaseTool, InjectedToolCallId, ToolException, to
 from langgraph.graph import MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
 from langgraph.types import Command
-from midojo_sdk import recorder as sdk_recorder
 from midojo_sdk.langchain import BLOCKED_REASON, MidojoMiddleware, ToolContext
-from midojo_sdk.recorder import ControlPlaneRejectedError, RejectionKind
 from midojo_sdk.session import MissingSessionError, session_context
+from midojo_spec import recorder as sdk_recorder
+from midojo_spec.recorder import ControlPlaneRejectedError, RejectionKind
 from pydantic import Field
 
 from midojo.control_plane.inprocess import InProcessAgentClient

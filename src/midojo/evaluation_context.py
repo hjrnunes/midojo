@@ -39,8 +39,8 @@ from types import TracebackType
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 import httpx
-from midojo_sdk.injection import Channel, InjectionOutcome
-from midojo_sdk.link import HEARTBEAT_INTERVAL_SECONDS
+from midojo_spec.injection import Channel, InjectionOutcome
+from midojo_spec.link import HEARTBEAT_INTERVAL_SECONDS
 
 from midojo.control_plane.client import ControlClient
 from midojo.control_plane.state import Snapshot

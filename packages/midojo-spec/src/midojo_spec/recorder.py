@@ -30,8 +30,8 @@ record. :class:`ReportingRecorder` sends that report whenever a record fails
 for good; the SDK's interception layers record through one.
 
 Implementations satisfy these protocols structurally and exchange plain values
-(dicts, ``None``): :class:`midojo_sdk.client.AgentControlPlaneClient` over HTTP,
-or the control plane's in-process client. They raise the same errors: a refusal
+(dicts, ``None``): the SDK's ``AgentControlPlaneClient`` over HTTP, the control
+plane's in-process client, or the interceptor service's link to its driver. They raise the same errors: a refusal
 by the control plane is a :class:`ControlPlaneRejectedError` carrying its
 :class:`RejectionKind`, whichever implementation sent it. This module imports
 nothing outside the standard library, so an implementation elsewhere can import
@@ -43,12 +43,8 @@ from __future__ import annotations
 import asyncio
 import enum
 import logging
-import warnings
 from collections.abc import Awaitable, Callable, Sequence
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple, NotRequired, Protocol, TypedDict, TypeVar, cast
-
-if TYPE_CHECKING:
-    from midojo_sdk.client import AgentControlPlaneClient
+from typing import Any, Literal, NamedTuple, NotRequired, Protocol, TypedDict, TypeVar, cast
 
 Disposition = Literal["forwarded", "denied", "simulated", "blocked"]
 """What the interception layer did with a call.
@@ -68,7 +64,7 @@ REFUSED: frozenset[Disposition] = frozenset({"denied", "blocked"})
 class InjectionRecord(TypedDict):
     """How one injection instruction fared on a call, as the call's detailed finish carries it.
 
-    ``status`` is a :class:`midojo_sdk.injection.OutcomeStatus` value as a
+    ``status`` is a :class:`midojo_spec.injection.OutcomeStatus` value as a
     plain ``str``: ``applied``, ``partial`` (structured content only),
     ``fallback``, ``unmatched``, ``too_large``, ``skipped_occurrence`` (the
     instruction matched the call but its occurrence rule skipped it) or
@@ -95,7 +91,7 @@ class InjectionRecord(TypedDict):
     ``sha256:<hex>`` of the instruction's payload's UTF-8 bytes before its
     transformation, ``placed_digest`` the same of the transformed text it
     wrote, and ``slot`` the instruction's target and mode,
-    :meth:`midojo_sdk.injection.InjectionSlot.to_data`'s
+    :meth:`midojo_spec.injection.InjectionSlot.to_data`'s
     ``{"id", "target", "mode"}``.
     """
 
@@ -405,8 +401,8 @@ class RetryingRecorder:
     """A :class:`Recorder` that resends each start and finish after a transient failure.
 
     ``retryable`` says which errors are transient: for the HTTP recorder,
-    :func:`midojo_sdk.client.transient` (a transport error, or a 5xx response
-    that isn't the control plane's own rejection). A
+    the SDK's ``midojo_sdk.client.transient`` (a transport error, or a 5xx
+    response that isn't the control plane's own rejection). A
     :class:`ControlPlaneRejectedError` or an :class:`InvalidRequestError` is
     never resent, whatever ``retryable`` says.
 
@@ -614,72 +610,3 @@ def _reporter(recorder: object) -> Callable[..., Awaitable[None]]:
     if not callable(report):
         raise NotImplementedError(f"{type(recorder).__name__} can't report a capture failure")
     return cast("Callable[..., Awaitable[None]]", report)
-
-
-class ControlPlaneRecorder:
-    """Deprecated: records calls through an :class:`~midojo_sdk.client.AgentControlPlaneClient`.
-
-    The client is a :class:`Recorder` itself; wrap it in
-    ``RetryingRecorder(client, retryable=midojo_sdk.client.transient)`` for
-    resends. This adapter does exactly that, as it resent records before.
-    """
-
-    def __init__(self, client: AgentControlPlaneClient) -> None:
-        from midojo_sdk.client import transient
-
-        warnings.warn(
-            "ControlPlaneRecorder is deprecated: use the AgentControlPlaneClient as the recorder, wrapped in "
-            "RetryingRecorder(client, retryable=midojo_sdk.client.transient) for resends.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        self._recorder = RetryingRecorder(client, retryable=transient)
-
-    async def start_call(self, *, call_id: str, function: str, args: dict[str, Any], disposition: Disposition) -> None:
-        await self._recorder.start_call(call_id=call_id, function=function, args=args, disposition=disposition)
-
-    async def finish_call(
-        self,
-        *,
-        call_id: str,
-        function: str,
-        args: dict[str, Any],
-        result: str,
-        disposition: Disposition,
-        error: str | None = None,
-    ) -> None:
-        await self._recorder.finish_call(
-            call_id=call_id, function=function, args=args, result=result, disposition=disposition, error=error
-        )
-
-    @property
-    def records_details(self) -> bool:
-        """Whether the wrapped recorder records a finish's details (see :class:`DetailedRecorder`)."""
-        return records_details(self._recorder)
-
-    async def finish_call_detailed(
-        self,
-        *,
-        call_id: str,
-        function: str,
-        args: dict[str, Any],
-        result: str,
-        disposition: Disposition,
-        error: str | None = None,
-        structured_content: dict[str, Any] | None,
-        injection_outcomes: Sequence[InjectionRecord],
-    ) -> None:
-        """Finish the call through the wrapped recorder, with its details when that recorder records them."""
-        await self._recorder.finish_call_detailed(
-            call_id=call_id,
-            function=function,
-            args=args,
-            result=result,
-            disposition=disposition,
-            error=error,
-            structured_content=structured_content,
-            injection_outcomes=injection_outcomes,
-        )
-
-    async def report_capture_failure(self, *, call_id: str, function: str, phase: CapturePhase, reason: str) -> None:
-        await self._recorder.report_capture_failure(call_id=call_id, function=function, phase=phase, reason=reason)

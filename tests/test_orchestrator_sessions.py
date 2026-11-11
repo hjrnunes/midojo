@@ -14,7 +14,8 @@ import pytest
 import pytest_asyncio
 from fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult, TextContent
-from midojo_sdk.injection import (
+from midojo_sdk.mcp import MidojoMCP
+from midojo_spec.injection import (
     Channel,
     InjectionInstruction,
     InjectionPlan,
@@ -24,8 +25,7 @@ from midojo_sdk.injection import (
     SelectorSurface,
     payload_digest,
 )
-from midojo_sdk.mcp import MidojoMCP
-from midojo_sdk.recorder import ControlPlaneRejectedError, RejectionKind
+from midojo_spec.recorder import ControlPlaneRejectedError, RejectionKind
 from openshell import SandboxClient, WorkspaceClient
 from pydantic import BaseModel
 

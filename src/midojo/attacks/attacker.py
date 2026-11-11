@@ -25,7 +25,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
-from midojo_sdk.injection import InjectionInstruction, InjectionPlan
+from midojo_spec.injection import InjectionInstruction, InjectionPlan
 
 from midojo.control_plane.models import GradeResponse
 from midojo.delivery import EXPOSURE_BOUNDARIES, DeliveryFact, Exposure

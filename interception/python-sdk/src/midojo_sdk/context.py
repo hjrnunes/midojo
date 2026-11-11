@@ -6,7 +6,7 @@ import warnings
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from midojo_sdk.recorder import EnvironmentRevision, WorldState
+from midojo_spec.recorder import EnvironmentRevision, WorldState
 
 Forward = Callable[[str, dict[str, Any]], Awaitable[str]]
 

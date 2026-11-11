@@ -19,7 +19,7 @@ import pytest
 from fastapi.testclient import TestClient
 from midojo_sdk.client import AgentControlPlaneClient
 from midojo_sdk.mcp import BLOCKED_REASON, MidojoMCP, ToolContext
-from midojo_sdk.recorder import ControlPlaneRejectedError, RejectionKind
+from midojo_spec.recorder import ControlPlaneRejectedError, RejectionKind
 
 from midojo.control_plane.config import AppConfig
 from midojo.control_plane.lifecycle import (

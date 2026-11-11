@@ -22,8 +22,8 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import uvicorn
-from midojo_sdk.injection import InjectionPlan
-from midojo_sdk.link import API, SUBPROTOCOL, LinkFault, Message, decode_message, encode_message
+from midojo_spec.injection import InjectionPlan
+from midojo_spec.link import API, SUBPROTOCOL, LinkFault, Message, decode_message, encode_message
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import InvalidStatus
 from websockets.typing import Subprotocol

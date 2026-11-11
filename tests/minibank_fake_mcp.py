@@ -19,7 +19,7 @@ from collections.abc import Callable
 from typing import Any
 
 from midojo_sdk.mcp import MidojoMCP, ToolContext
-from midojo_sdk.recorder import Recorder, WorldState
+from midojo_spec.recorder import Recorder, WorldState
 
 # ---------------------------------------------------------------------------
 # READ tools — forward to upstream, inject from environment

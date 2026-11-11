@@ -82,7 +82,7 @@ from typing import Any
 
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import StreamableHttpTransport
-from midojo_sdk.snapshot import verified
+from midojo_spec.snapshot import verified
 
 import midojo
 from midojo.control_plane import service, state, store

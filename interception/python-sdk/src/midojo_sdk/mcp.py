@@ -27,25 +27,16 @@ from fastmcp.tools import Tool, ToolResult
 from mcp.shared.exceptions import McpError
 from mcp.types import CallToolRequest, CallToolResult, ContentBlock, TextContent
 from mcp.types import Tool as MCPTool
-from pydantic import PrivateAttr
-
-from midojo_sdk import placement
-from midojo_sdk.client import AgentControlPlaneClient, transient
-from midojo_sdk.context import ToolContext
-from midojo_sdk.injection import (
+from midojo_spec.injection import (
+    MIDOJO_MCP_CAPABILITY,
     CapabilityError,
     CapabilityGap,
-    Channel,
-    InjectionMode,
     InjectionOutcome,
     InjectionPlan,
     InterceptorCapability,
-    MismatchPolicy,
-    SelectorSurface,
-    Transformation,
     capability_gaps,
 )
-from midojo_sdk.recorder import (
+from midojo_spec.recorder import (
     Disposition,
     InjectionRecord,
     Recorder,
@@ -54,9 +45,14 @@ from midojo_sdk.recorder import (
     finish_detailed,
     reporting,
 )
+from pydantic import PrivateAttr
+
+from midojo_sdk import placement
+from midojo_sdk.client import AgentControlPlaneClient, transient
+from midojo_sdk.context import ToolContext
 from midojo_sdk.session import SESSION_HEADER, session_token
 
-__all__ = ["BLOCKED_REASON", "MIDOJO_MCP_CAPABILITY", "MidojoMCP", "ToolContext", "UpstreamClient"]
+__all__ = ["BLOCKED_REASON", "MidojoMCP", "ToolContext", "UpstreamClient"]
 
 logger = logging.getLogger(__name__)
 
@@ -98,18 +94,6 @@ Denial = Callable[[dict[str, Any]], str | None]
 # forwarding layer hands an upstream JSON-RPC error to its tools/call handler
 # here, and the handler raises it as the same JSON-RPC error.
 _protocol_errors: ContextVar[list[McpError] | None] = ContextVar("midojo_protocol_errors", default=None)
-
-MIDOJO_MCP_CAPABILITY = InterceptorCapability(
-    channels=frozenset({Channel.TOOL_OUTPUT}),
-    selector_surfaces=frozenset({SelectorSurface.CONTENT_BLOCK, SelectorSurface.STRUCTURED_CONTENT}),
-    content_block_types=frozenset({"text"}),
-    modes=frozenset(InjectionMode),
-    transformations=frozenset(Transformation),
-    mismatch_policies=frozenset(MismatchPolicy),
-    call_arguments=True,
-    result_record=True,
-)
-"""Placements the MCP forwarding interceptor implements for mirrored tool results without degradation."""
 
 
 class UpstreamClient:

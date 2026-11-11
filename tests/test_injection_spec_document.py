@@ -23,9 +23,9 @@ from typing import Any
 
 import jsonschema
 import pytest
-from midojo_sdk import injection, injection_spec_schema
-from midojo_sdk.injection import InjectionPlan
-from midojo_sdk.injection_spec_schema import (
+from midojo_spec import injection, injection_spec_schema
+from midojo_spec.injection import InjectionPlan
+from midojo_spec.injection_spec_schema import (
     INJECTION_SPEC_DOCUMENT_V1,
     PLAN_CODEC_VERSION,
     SCHEMA_FILE,
@@ -97,7 +97,7 @@ def mutated(document: dict[str, Any], path: tuple[object, ...], key: str, value:
 # --- the schema, its package data and the vectors ---
 
 
-def test_the_schema_is_package_data_the_sdk_loads() -> None:
+def test_the_schema_is_package_data_the_spec_package_loads() -> None:
     schema = load_schema()
     definitions = schema["$defs"]
 
@@ -110,13 +110,13 @@ def test_the_schema_is_package_data_the_sdk_loads() -> None:
     assert isinstance(properties, dict)
     assert INJECTION_SPEC_DOCUMENT_V1 == "midojo-injection-spec-v1"
     assert properties["schema_version"]["const"] == INJECTION_SPEC_DOCUMENT_V1
-    assert json.loads(resources.files("midojo_sdk").joinpath(SCHEMA_FILE).read_text(encoding="utf-8")) == schema
+    assert json.loads(resources.files("midojo_spec").joinpath(SCHEMA_FILE).read_text(encoding="utf-8")) == schema
     schema["title"] = "changed by a caller"
     assert load_schema()["title"] != "changed by a caller"
 
 
-def test_the_sdk_packages_one_schema() -> None:
-    packaged = sorted(path.name for path in resources.files("midojo_sdk").joinpath("schemas").iterdir())
+def test_the_spec_package_packages_one_schema() -> None:
+    packaged = sorted(path.name for path in resources.files("midojo_spec").joinpath("schemas").iterdir())
 
     assert packaged == ["midojo-injection-spec-v1.schema.json"]
 
@@ -406,7 +406,9 @@ def test_the_plan_codec_version_is_the_document_version() -> None:
 
 
 def test_the_plan_sub_schema_validates_the_bundled_plan() -> None:
-    plan = json.loads((ROOT / "tests" / "fixtures" / "injection_plan_before_call_arguments.json").read_text())
+    plan = json.loads(
+        (ROOT / "packages" / "midojo-spec" / "vectors" / "plan" / "before_call_arguments.json").read_text()
+    )
 
     plan_validator().validate(plan)
     assert InjectionPlan.from_data(plan).to_data() == plan

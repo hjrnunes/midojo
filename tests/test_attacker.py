@@ -15,7 +15,7 @@ from types import MappingProxyType
 
 import click
 import pytest
-from midojo_sdk.injection import Channel, InjectionInstruction, InjectionPlan, InjectionTarget, SelectorSurface
+from midojo_spec.injection import Channel, InjectionInstruction, InjectionPlan, InjectionTarget, SelectorSurface
 from rich.console import Console
 
 from midojo import orchestrator

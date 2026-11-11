@@ -8,7 +8,7 @@ import type { TSchema } from "typebox";
 // extension returned to the agent and what it did with it (its `Disposition`). A
 // `WorldState` reads and changes the simulated environment that the
 // extension's own tools act on. Both are bound to one evaluation by whoever
-// builds them, as in the Python SDK (`midojo_sdk.recorder`). `ControlPlaneClient`
+// builds them, as in the Python SDK (`midojo_spec.recorder`). `ControlPlaneClient`
 // implements both over the control plane's /agent API. Nothing here is a
 // transaction across them: a record and an environment change commit, or fail,
 // on their own.

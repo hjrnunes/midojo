@@ -1,6 +1,6 @@
 """The interception layer's seams, in the control plane's own process: no HTTP layer, the same single writer.
 
-:class:`InProcessAgentClient` is a ``midojo_sdk.recorder.Recorder`` (and
+:class:`InProcessAgentClient` is a ``midojo_spec.recorder.Recorder`` (and
 ``CaptureReporter``) and ``WorldState`` for the evaluation a session token is bound to, as
 ``midojo_sdk.client.AgentControlPlaneClient`` is over HTTP. It calls
 :class:`~midojo.control_plane.service.ControlPlane` directly, so every event
@@ -21,7 +21,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any, TypeVar
 
-from midojo_sdk.recorder import (
+from midojo_spec.recorder import (
     CAPTURE_REASON_MAX_LENGTH,
     REFUSED,
     CapturePhase,

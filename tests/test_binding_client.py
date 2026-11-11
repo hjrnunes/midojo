@@ -46,8 +46,8 @@ from midojo_sdk.binding import (
     BindingRefusedError,
     binding_url,
 )
-from midojo_sdk.injection import Channel, InjectionInstruction, InjectionPlan, InjectionTarget
-from midojo_sdk.link import decode_message
+from midojo_spec.injection import Channel, InjectionInstruction, InjectionPlan, InjectionTarget
+from midojo_spec.link import decode_message
 from websockets.asyncio.client import ClientConnection
 
 from midojo.control_plane.inprocess_control import InProcessControlClient

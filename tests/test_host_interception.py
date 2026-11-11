@@ -22,7 +22,7 @@ from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.tools import ToolResult
 from mcp.types import CallToolResult, ContentBlock, TextContent
-from midojo_sdk.injection import (
+from midojo_spec.injection import (
     Channel,
     InjectionInstruction,
     InjectionMode,

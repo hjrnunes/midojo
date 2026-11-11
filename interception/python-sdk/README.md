@@ -7,7 +7,7 @@ pip install "midojo-sdk[mcp]"        # fake MCP servers (also installs FastMCP a
 pip install "midojo-sdk[langchain]"  # LangChain agents
 ```
 
-The `mcp` extra includes `websockets` because `midojo_sdk.binding` imports it directly.
+The `mcp` extra includes `websockets` because `midojo_sdk.binding` imports it directly. The SDK depends on [`midojo-spec`](../../packages/midojo-spec), which holds the contracts it speaks: the injection plan and its codec, the injection-spec schema, the snapshot digest, the `Recorder` and `WorldState` seams and the binding frame codec.
 
 ## Fake MCP servers
 
@@ -83,9 +83,9 @@ A server checks the plan only when its engine declares one (`placement.Planned`)
 
 ## Recorder and WorldState
 
-`midojo_sdk.recorder` defines the two seams an interception layer talks to. A `Recorder` starts and finishes the calls of one evaluation, each with its disposition. A `WorldState` reads the evaluation's simulated environment (`read()`: its revision and fields) and changes it (`change(values, expected_revision=None)`: one atomic step, or `None` when `expected_revision` is stale). `midojo_sdk.client.AgentControlPlaneClient` implements both over HTTP for one session; `midojo.control_plane.inprocess.InProcessAgentClient` implements both in the control plane's own process, with no HTTP.
+`midojo_spec.recorder` defines the two seams an interception layer talks to. A `Recorder` starts and finishes the calls of one evaluation, each with its disposition. A `WorldState` reads the evaluation's simulated environment (`read()`: its revision and fields) and changes it (`change(values, expected_revision=None)`: one atomic step, or `None` when `expected_revision` is stale). `midojo_sdk.client.AgentControlPlaneClient` implements both over HTTP for one session; `midojo.control_plane.inprocess.InProcessAgentClient` implements both in the control plane's own process, with no HTTP.
 
-`MidojoMCP(name, recorder=..., world=...)` records through `recorder` and gives simulated tools `world`; without them it uses the control plane at `control_plane_url` for the request's session. Forwarding (`mirror_upstream`) needs only a recorder: a server built with a recorder and no `control_plane_url` has no environment, and `ctx.env` raises. Both implementations raise `midojo_sdk.recorder.ControlPlaneRejectedError` when the control plane refuses an event, with its `kind` (a `RejectionKind`, such as `call_conflict` or `session_closed`) and `late_fact`, and `midojo_sdk.recorder.InvalidRequestError` for a request the API can't take as sent, such as a `call_id` over 256 characters (over HTTP it's the 422, and also an `httpx.HTTPStatusError`); over HTTP, any other failure is an `httpx` error. Each recorder sends an event once: wrap one in `RetryingRecorder(recorder, retryable=midojo_sdk.client.transient)` to resend after a transport error or a 5xx, as `MidojoMCP` does with the control plane's. A rejection or an invalid request is never resent, whatever `retryable` says. `ControlPlaneRecorder(client)` and `ToolContext(client=...)` still work, deprecated.
+`MidojoMCP(name, recorder=..., world=...)` records through `recorder` and gives simulated tools `world`; without them it uses the control plane at `control_plane_url` for the request's session. Forwarding (`mirror_upstream`) needs only a recorder: a server built with a recorder and no `control_plane_url` has no environment, and `ctx.env` raises. Both implementations raise `midojo_spec.recorder.ControlPlaneRejectedError` when the control plane refuses an event, with its `kind` (a `RejectionKind`, such as `call_conflict` or `session_closed`) and `late_fact`, and `midojo_spec.recorder.InvalidRequestError` for a request the API can't take as sent, such as a `call_id` over 256 characters (over HTTP it's the 422, and also an `httpx.HTTPStatusError`); over HTTP, any other failure is an `httpx` error. Each recorder sends an event once: wrap one in `RetryingRecorder(recorder, retryable=midojo_sdk.client.transient)` to resend after a transport error or a 5xx, as `MidojoMCP` does with the control plane's. A rejection or an invalid request is never resent, whatever `retryable` says. `ControlPlaneRecorder(client)` and `ToolContext(client=...)` still work, deprecated.
 
 A record is what the agent asked for and what the layer returned to it, not proof the agent received the result, nor of an effect; the environment is what simulated tools did; what a forwarded call did to a real system is neither, and a runtime observes it. Nothing makes them one transaction: a record, an environment change and a real tool's effect each commit, or fail, on their own.
 
@@ -93,7 +93,7 @@ A record is what the agent asked for and what the layer returned to it, not proo
 
 Three modules support a remote interceptor and a judge service; most interception layers don't need them:
 
-- `midojo_sdk.link` holds the `midojo-binding-v1` frame codec and the service side of a remote interception link: `LinkRecorder` and `LinkWorld` record and read the environment through frames instead of HTTP. It imports only the standard library and `midojo_sdk`.
+- `midojo_sdk.link` holds the service's end of a remote interception link: `Link` sends the frames, and `LinkRecorder` and `LinkWorld` record and read the environment through them instead of HTTP. The `midojo-binding-v1` frame codec itself is `midojo_spec.link`. `midojo_sdk.link` imports only the standard library and `midojo_spec`.
 - `midojo_sdk.binding` is the driver's end of that link: `Binding` dials out to the interceptor service over one WebSocket per evaluation, with the subprotocol `midojo-binding.v1`. It needs the `mcp` extra (`websockets`).
 - `midojo_spec.rubric_judge` (the `midojo-spec` package, which has moved out of the SDK) is a strict yes/no semantic judge for a reply oracle. It builds the evidence and the request from a rubric and the recorded calls, and checks the response. It imports only the standard library.
 

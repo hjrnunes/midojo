@@ -40,8 +40,8 @@ import pytest
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 from mcp.types import TextContent
-from midojo_sdk.injection import Channel, InjectionInstruction, InjectionPlan, InjectionTarget, payload_digest
-from midojo_sdk.link import LinkFault, decode_message
+from midojo_spec.injection import Channel, InjectionInstruction, InjectionPlan, InjectionTarget, payload_digest
+from midojo_spec.link import LinkFault, decode_message
 
 from midojo.control_plane.config import AppConfig
 from midojo.control_plane.link_dispatch import LinkDispatcher

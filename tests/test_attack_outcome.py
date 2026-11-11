@@ -7,8 +7,8 @@ from typing import Any
 import pytest
 from fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult, TextContent
-from midojo_sdk.injection import Channel, InjectionInstruction, InjectionPlan, InjectionTarget, SelectorSurface
 from midojo_sdk.mcp import MidojoMCP
+from midojo_spec.injection import Channel, InjectionInstruction, InjectionPlan, InjectionTarget, SelectorSurface
 
 from midojo.control_plane.config import AppConfig
 from midojo.control_plane.inprocess import InProcessAgentClient

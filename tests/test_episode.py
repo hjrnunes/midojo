@@ -9,7 +9,7 @@ import datetime
 
 import pytest
 from fastapi.testclient import TestClient
-from midojo_sdk.injection import (
+from midojo_spec.injection import (
     Channel,
     InjectionInstruction,
     InjectionMode,

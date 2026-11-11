@@ -1,7 +1,7 @@
 """The driver side of a ``midojo-binding-v1`` link: one session's frames, applied in order, one at a time.
 
 An interception layer in another process sends ``{"id", "op", "args"}`` frames
-(see ``midojo_sdk.link``); :class:`LinkDispatcher` applies each one to the
+(see ``midojo_spec.link``); :class:`LinkDispatcher` applies each one to the
 session's :class:`~midojo.control_plane.inprocess.InProcessAgentClient` and
 answers ``{"re", "ok"}`` or ``{"re", "rejected": {"kind", "detail",
 "late_fact"}}``. It is the session's only writer: the session token and the
@@ -33,7 +33,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from midojo_sdk.link import (
+from midojo_spec.link import (
     INVALID_REQUEST,
     LINK_LOST_REASON,
     Answer,
@@ -47,7 +47,7 @@ from midojo_sdk.link import (
     encode_answer,
     encode_message,
 )
-from midojo_sdk.recorder import ControlPlaneRejectedError, EnvironmentRevision, InvalidRequestError
+from midojo_spec.recorder import ControlPlaneRejectedError, EnvironmentRevision, InvalidRequestError
 
 from midojo.observations import FUNCTION_CALLS
 

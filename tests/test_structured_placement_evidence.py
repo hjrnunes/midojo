@@ -15,7 +15,8 @@ from typing import Any
 import pytest
 from mcp.types import CallToolResult, TextContent
 from midojo_sdk.client import transient
-from midojo_sdk.injection import (
+from midojo_sdk.mcp import MidojoMCP
+from midojo_spec.injection import (
     Channel,
     InjectionInstruction,
     InjectionMode,
@@ -25,8 +26,7 @@ from midojo_sdk.injection import (
     RecordSelector,
     SelectorSurface,
 )
-from midojo_sdk.mcp import MidojoMCP
-from midojo_sdk.recorder import (
+from midojo_spec.recorder import (
     Disposition,
     ReportingRecorder,
     RetryingRecorder,

@@ -26,7 +26,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from midojo_sdk.injection import (
+from midojo_sdk.link import Link, LinkRecorder, LinkWorld
+from midojo_sdk.mcp import MidojoMCP
+from midojo_spec.injection import (
     InjectionMode,
     InjectionOutcome,
     InjectionSlot,
@@ -36,17 +38,14 @@ from midojo_sdk.injection import (
     Transformation,
     payload_digest,
 )
-from midojo_sdk.link import (
+from midojo_spec.link import (
     INVALID_REQUEST,
     LINK_LOST_REASON,
     Answer,
     Frame,
-    Link,
     LinkError,
     LinkFault,
     LinkLost,
-    LinkRecorder,
-    LinkWorld,
     Rejection,
     decode_answer,
     decode_frame,
@@ -56,8 +55,7 @@ from midojo_sdk.link import (
     encode_message,
     rejection_error,
 )
-from midojo_sdk.mcp import MidojoMCP
-from midojo_sdk.recorder import ControlPlaneRejectedError, InvalidRequestError
+from midojo_spec.recorder import ControlPlaneRejectedError, InvalidRequestError
 
 from midojo.control_plane.config import AppConfig
 from midojo.control_plane.service import ById, ControlPlane
@@ -70,6 +68,7 @@ from tests.scripted_mcp import wire_session
 
 SDK = Path(__file__).resolve().parents[1] / "interception" / "python-sdk" / "src"
 LINK_MODULE = SDK / "midojo_sdk" / "link.py"
+SPEC_LINK_MODULE = Path(__file__).resolve().parents[1] / "packages" / "midojo-spec" / "src" / "midojo_spec" / "link.py"
 THIRD_PARTY = ("anyio", "websockets", "fastmcp", "pydantic", "midojo", "starlette")
 
 
@@ -273,33 +272,42 @@ def test_an_injection_outcome_document_that_is_not_one_is_a_value_error():
 # --- the standard-library-only promise ---
 
 
-def _imported_roots(path: Path) -> set[str]:
+def _imported_roots(path: Path, package: str) -> set[str]:
     roots: set[str] = set()
     for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
         if isinstance(node, ast.Import):
             roots.update(alias.name.split(".")[0] for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
             if node.level:
-                roots.add("midojo_sdk")  # a relative import: midojo_sdk's own modules
+                roots.add(package)  # a relative import: the package's own modules
             elif node.module:
                 roots.add(node.module.split(".")[0])
     return roots
 
 
-def test_the_link_module_imports_only_the_standard_library():
-    roots = _imported_roots(LINK_MODULE)
+def test_the_link_modules_import_only_the_standard_library_and_the_spec():
+    sdk_roots = _imported_roots(LINK_MODULE, "midojo_sdk")
+    spec_roots = _imported_roots(SPEC_LINK_MODULE, "midojo_spec")
 
-    assert roots - sys.stdlib_module_names - {"midojo_sdk"} == set()
-    assert not (roots & set(THIRD_PARTY))
+    assert sdk_roots - sys.stdlib_module_names - {"midojo_sdk", "midojo_spec"} == set()
+    assert spec_roots - sys.stdlib_module_names - {"midojo_spec"} == set()
+    assert not ((sdk_roots | spec_roots) & set(THIRD_PARTY))
 
 
-def test_the_link_module_holds_the_codec_the_recorder_and_the_world():
-    source = LINK_MODULE.read_text(encoding="utf-8")
+def test_the_sdk_link_holds_the_link_the_recorder_and_the_world_and_the_spec_the_codec():
+    def declared(path: Path) -> set[str]:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        return {node.name for node in tree.body if isinstance(node, ast.ClassDef | ast.FunctionDef)}
 
-    for name in ("Frame", "Answer", "Message", "LinkRecorder", "LinkWorld", "Link", "LinkLost", "LinkFault"):
-        assert f"class {name}" in source, name
-    for name in ("encode_frame", "decode_frame", "encode_answer", "decode_answer", "encode_message", "decode_message"):
-        assert f"def {name}" in source, name
+    sdk, spec = declared(LINK_MODULE), declared(SPEC_LINK_MODULE)
+    classes = {"LinkRecorder", "LinkWorld", "Link"}
+    codec = {"Frame", "Answer", "Message", "LinkLost", "LinkFault"}
+    functions = {"encode_frame", "decode_frame", "encode_answer", "decode_answer", "encode_message", "decode_message"}
+
+    assert classes <= sdk
+    assert not classes & spec
+    assert (codec | functions) <= spec
+    assert not (codec | functions) & sdk
 
 
 def test_the_link_module_imports_with_no_third_party_package_available():
@@ -309,7 +317,8 @@ def test_the_link_module_imports_with_no_third_party_package_available():
             f"sys.path.insert(0, {str(SDK)!r})",
             f"for name in {list(THIRD_PARTY)!r}:",
             "    sys.modules[name] = None",  # an import of a blocked name fails at once
-            "import midojo_sdk.link as link",
+            "import midojo_sdk.link",
+            "import midojo_spec.link as link",
             "from midojo_sdk import Frame, LinkRecorder, LinkWorld",
             "assert link.API == 'midojo-binding-v1'",
             "assert link.SUBPROTOCOL == 'midojo-binding.v1'",

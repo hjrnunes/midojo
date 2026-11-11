@@ -2227,6 +2227,7 @@ version = "0.1.0"
 source = { editable = "interception/python-sdk" }
 dependencies = [
     { name = "httpx" },
+    { name = "midojo-spec" },
 ]
 
 [package.optional-dependencies]
@@ -2243,6 +2244,7 @@ requires-dist = [
     { name = "fastmcp", marker = "extra == 'mcp'", specifier = ">=3.2.4,<3.3" },
     { name = "httpx", specifier = ">=0.28" },
     { name = "langchain", marker = "extra == 'langchain'", specifier = ">=1.4" },
+    { name = "midojo-spec", editable = "packages/midojo-spec" },
     { name = "websockets", marker = "extra == 'mcp'", specifier = ">=16,<18" },
 ]
 provides-extras = ["mcp", "langchain"]

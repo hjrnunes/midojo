@@ -22,7 +22,7 @@ from midojo.observations import observation_type
 from midojo.types import Environment, FunctionCallRecord, InterceptionMode
 
 if TYPE_CHECKING:
-    from midojo_sdk.recorder import Recorder, WorldState
+    from midojo_spec.recorder import Recorder, WorldState
 
 ResponseModel = TypeVar("ResponseModel", bound=BaseModel)
 
@@ -244,7 +244,7 @@ class ControlPlaneClient:
     def recorder(self, session_token: str) -> Recorder:
         """The session's recorder over HTTP, on this client's connection pool, resending after a transient failure."""
         from midojo_sdk.client import AgentControlPlaneClient, transient
-        from midojo_sdk.recorder import RetryingRecorder
+        from midojo_spec.recorder import RetryingRecorder
 
         return RetryingRecorder(
             AgentControlPlaneClient(self._base_url, session_token, http=self._http), retryable=transient

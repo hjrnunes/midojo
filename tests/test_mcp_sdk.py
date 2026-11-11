@@ -7,10 +7,10 @@ import uuid
 import httpx
 import pytest
 from fastmcp.exceptions import ToolError
-from midojo_sdk import recorder as sdk_recorder
 from midojo_sdk.client import AgentControlPlaneClient
 from midojo_sdk.mcp import BLOCKED_REASON, MidojoMCP, ToolContext
-from midojo_sdk.recorder import ControlPlaneRejectedError, RejectionKind
+from midojo_spec import recorder as sdk_recorder
+from midojo_spec.recorder import ControlPlaneRejectedError, RejectionKind
 
 
 def test_midojo_mcp_tool_registration():

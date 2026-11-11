@@ -17,6 +17,8 @@ classifiers = [
 requires-python = ">= 3.12"
 dependencies = [
     "httpx>=0.28",
+    # The plan, snapshot, recorder and binding contracts the SDK speaks.
+    "midojo-spec",
 ]
 
 [project.optional-dependencies]

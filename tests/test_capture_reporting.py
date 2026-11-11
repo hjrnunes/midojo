@@ -10,11 +10,11 @@ import pytest
 from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.tools import tool
-from midojo_sdk import recorder as sdk_recorder
 from midojo_sdk.client import AgentControlPlaneClient, transient
 from midojo_sdk.langchain import MidojoMiddleware
 from midojo_sdk.mcp import MidojoMCP, ToolContext
-from midojo_sdk.recorder import (
+from midojo_spec import recorder as sdk_recorder
+from midojo_spec.recorder import (
     CAPTURE_REASON_MAX_LENGTH,
     ControlPlaneRejectedError,
     RejectionKind,
@@ -297,7 +297,7 @@ async def test_a_report_that_fails_too_is_logged_and_the_records_error_is_raised
     error = httpx.ConnectError("unreachable")
     failing = Failing(error, report_error)
 
-    with caplog.at_level(logging.WARNING, logger="midojo_sdk.recorder"), pytest.raises(httpx.ConnectError) as raised:
+    with caplog.at_level(logging.WARNING, logger="midojo_spec.recorder"), pytest.raises(httpx.ConnectError) as raised:
         await finish(ReportingRecorder(failing))
 
     assert raised.value is error
@@ -311,7 +311,7 @@ async def test_a_recorder_that_cannot_report_still_raises_the_records_error(capl
         async def start_call(self, **kwargs) -> None:
             raise httpx.ConnectError("unreachable")
 
-    with caplog.at_level(logging.WARNING, logger="midojo_sdk.recorder"), pytest.raises(httpx.ConnectError):
+    with caplog.at_level(logging.WARNING, logger="midojo_spec.recorder"), pytest.raises(httpx.ConnectError):
         await start(ReportingRecorder(Unreachable()))  # type: ignore[arg-type]
 
     assert "capture failure of f (c1)" in caplog.text

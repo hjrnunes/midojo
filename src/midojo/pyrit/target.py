@@ -11,7 +11,7 @@ from dataclasses import dataclass, replace
 from types import ModuleType
 from typing import Literal
 
-from midojo_sdk.injection import InjectionPlan
+from midojo_spec.injection import InjectionPlan
 from pyrit.models.messages.conversations import construct_response_from_request
 from pyrit.models.messages.message import Message
 from pyrit.prompt_target.common.prompt_target import PromptTarget

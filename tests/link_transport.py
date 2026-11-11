@@ -22,8 +22,9 @@ from dataclasses import dataclass
 from typing import Any
 
 import anyio
-from midojo_sdk.link import Link, LinkRecorder, LinkWorld, encode_frame
-from midojo_sdk.recorder import EnvironmentRevision
+from midojo_sdk.link import Link, LinkRecorder, LinkWorld
+from midojo_spec.link import encode_frame
+from midojo_spec.recorder import EnvironmentRevision
 
 from midojo.control_plane.link_dispatch import LinkDispatcher
 from midojo.control_plane.service import ControlPlane
@@ -212,7 +213,7 @@ class LinkSession:
 class LinkAgent:
     """The :class:`LinkRecorder` and :class:`LinkWorld` pair as one agent, started on first use.
 
-    A ``midojo_sdk.recorder.Recorder`` (and ``DetailedRecorder`` and
+    A ``midojo_spec.recorder.Recorder`` (and ``DetailedRecorder`` and
     ``CaptureReporter``) and a ``WorldState``: the same surface as
     ``InProcessAgentClient``, over the link instead of a direct call.
     """

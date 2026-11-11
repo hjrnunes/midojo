@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import yaml
-from midojo_sdk.injection import (
+from midojo_spec.injection import (
     Channel,
     InjectionInstruction,
     InjectionMode,

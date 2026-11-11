@@ -35,7 +35,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Literal
 
-from midojo_sdk.injection import Channel, InjectionInstruction, InjectionPlan
+from midojo_spec.injection import Channel, InjectionInstruction, InjectionPlan
 from pydantic import BaseModel, model_validator
 
 from midojo.observations import FUNCTION_CALLS, EvidenceStatus

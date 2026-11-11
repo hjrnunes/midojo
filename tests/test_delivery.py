@@ -7,7 +7,8 @@ from typing import Any
 
 import pytest
 from mcp.types import CallToolResult, TextContent
-from midojo_sdk.injection import (
+from midojo_sdk.mcp import MidojoMCP
+from midojo_spec.injection import (
     Channel,
     InjectionInstruction,
     InjectionPlan,
@@ -15,7 +16,6 @@ from midojo_sdk.injection import (
     RecordSelector,
     SelectorSurface,
 )
-from midojo_sdk.mcp import MidojoMCP
 
 from midojo.control_plane.config import AppConfig
 from midojo.control_plane.inprocess import InProcessAgentClient

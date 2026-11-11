@@ -23,7 +23,7 @@ from datetime import UTC, date, datetime, time, timedelta, timezone
 from types import MappingProxyType
 from typing import Any
 
-from midojo_sdk import snapshot as sdk_snapshot
+from midojo_spec import snapshot as spec_snapshot
 from pydantic import BaseModel
 from pydantic_core import TzInfo
 
@@ -216,7 +216,7 @@ class Snapshot:
     def snapshot_digest(self) -> str:
         """This snapshot's content digest: what ``snapshot_id`` names, computed again from its content.
 
-        It is :func:`midojo_sdk.snapshot.snapshot_digest` of the JSON form
+        It is :func:`midojo_spec.snapshot.snapshot_digest` of the JSON form
         ``GET .../snapshot`` serves (:func:`snapshot_digest`), so a client
         verifies the snapshot with the SDK alone.
         """
@@ -228,7 +228,7 @@ class Snapshot:
         The content is read once, through the copying reads, and digested
         again: a snapshot whose content no longer has its ID (one of its
         private copies, or a field, was changed after it was made) raises
-        :class:`midojo_sdk.snapshot.DigestFault`, and so does one whose content
+        :class:`midojo_spec.snapshot.DigestFault`, and so does one whose content
         can't be read back at all (a field deleted, or set to a value of
         another type). What is returned is checked, and nothing else holds it.
         """
@@ -240,7 +240,7 @@ class Snapshot:
             data = _json_data(_snapshot_content(self))
             if data is not _NOT_JSON:
                 # The SDK checks the ID its JSON form carries, the way a client does.
-                sdk_snapshot.verified({**data, "snapshot_id": self.snapshot_id})
+                spec_snapshot.verified({**data, "snapshot_id": self.snapshot_id})
             turns, capture_failures = copy.deepcopy((self.turns, self.capture_failures))
             held = Snapshot(
                 evaluation_id=self.evaluation_id,
@@ -257,14 +257,14 @@ class Snapshot:
                 sealed_at=self.sealed_at,
                 capture_failures=capture_failures,
             )
-        except sdk_snapshot.DigestFault as fault:
-            raise sdk_snapshot.DigestFault(f"{changed}: {fault}") from None
+        except spec_snapshot.DigestFault as fault:
+            raise spec_snapshot.DigestFault(f"{changed}: {fault}") from None
         except Exception as error:
-            raise sdk_snapshot.DigestFault(
+            raise spec_snapshot.DigestFault(
                 f"{changed}: its content can't be read back ({type(error).__name__}: {error})"
             ) from error
         if held.snapshot_id != self.snapshot_id:
-            raise sdk_snapshot.DigestFault(f"{changed}: its content differs from its snapshot_id")
+            raise spec_snapshot.DigestFault(f"{changed}: its content differs from its snapshot_id")
         return held
 
     def __hash__(self) -> int:
@@ -281,7 +281,7 @@ def snapshot_digest(snapshot: Snapshot) -> str:
     """``sha256:<hex>`` of the snapshot's content, everything in it but its ID, in a lossless encoding.
 
     Two snapshots share a digest only when their content is equal. The ID is
-    :func:`midojo_sdk.snapshot.snapshot_digest` of the snapshot's JSON form, the
+    :func:`midojo_spec.snapshot.snapshot_digest` of the snapshot's JSON form, the
     one ``GET .../snapshot`` serves: a sealed snapshot holds only values JSON
     carries back as the types it keeps, so one implementation names it.
 
@@ -303,7 +303,7 @@ def snapshot_digest(snapshot: Snapshot) -> str:
     content = _snapshot_content(snapshot)
     data = _json_data(content)
     if data is not _NOT_JSON:
-        return sdk_snapshot.snapshot_digest(data)
+        return spec_snapshot.snapshot_digest(data)
     return f"sha256:{hashlib.sha256(_dumps(_canonical(content)).encode()).hexdigest()}"
 
 

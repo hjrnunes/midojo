@@ -49,9 +49,9 @@ import httpx
 import pytest
 from fastmcp import Client
 from mcp.types import TextContent
-from midojo_sdk.injection import Channel, InjectionInstruction, InjectionPlan, InjectionTarget
 from midojo_sdk.link import LinkRecorder, LinkWorld
-from midojo_sdk.recorder import RetryingRecorder
+from midojo_spec.injection import Channel, InjectionInstruction, InjectionPlan, InjectionTarget
+from midojo_spec.recorder import RetryingRecorder
 
 import midojo.evaluation_handle as handles
 from midojo.control_plane.client import ControlPlaneClient

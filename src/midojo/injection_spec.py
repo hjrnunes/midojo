@@ -30,7 +30,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, cast
 
-from midojo_sdk.injection import InjectionPlan
+from midojo_spec.injection import InjectionPlan
 from pydantic import BaseModel, TypeAdapter
 
 from midojo.capabilities import OPENSHELL_PREDICATE_ON_UNMANAGED_RUNTIME

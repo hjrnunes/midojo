@@ -46,12 +46,8 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
-from websockets.asyncio.client import ClientConnection, connect
-from websockets.exceptions import InvalidStatus
-from websockets.typing import Subprotocol
-
-from .injection import InjectionPlan
-from .link import (
+from midojo_spec.injection import InjectionPlan
+from midojo_spec.link import (
     API,
     HEARTBEAT_INTERVAL_SECONDS,
     SUBPROTOCOL,
@@ -61,6 +57,9 @@ from .link import (
     decode_message,
     encode_message,
 )
+from websockets.asyncio.client import ClientConnection, connect
+from websockets.exceptions import InvalidStatus
+from websockets.typing import Subprotocol
 
 BIND_PATH = "/v1/bindings"
 MAX_FRAME_BYTES = 16 * 1024 * 1024

@@ -25,12 +25,12 @@ import types
 from dataclasses import dataclass, field
 from typing import Any
 
-import midojo_sdk.injection as injection
 import midojo_sdk.mcp as interceptor
 import midojo_sdk.placement as splice
+import midojo_spec.injection as injection
 import pytest
 from mcp.types import CallToolResult, ImageContent, TextContent
-from midojo_sdk.injection import (
+from midojo_spec.injection import (
     Channel,
     InjectionInstruction,
     InjectionMode,

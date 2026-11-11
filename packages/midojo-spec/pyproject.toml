@@ -1,7 +1,7 @@
 [project]
 name = "midojo-spec"
 version = "0.1.0"
-description = "The MiDojo contracts on the standard library alone: the judge.v1 rules, the rubric judge and the judge exchange record"
+description = "The MiDojo contracts on the standard library alone: the injection-spec schema, plan and binding codecs, snapshot digest, recorder seams, judge.v1 rules, rubric judge and judge exchange record"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]

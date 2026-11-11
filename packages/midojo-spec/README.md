@@ -17,6 +17,11 @@ python -c "from midojo_spec import judge; print(judge.SCHEMA)"
 | `judge` | The `midojo.judge.v1` request and response rules: `request_id`, `request_problem`, `response_problem`. |
 | `judge_exchange` | The record a judge service keeps of each model request (`midojo.judge-exchange.v1`): the row, redaction, the append-only JSONL log and its strict reader. |
 | `rubric_judge` | The rubric judge, a port of Garak's at 968cc22, and `http_judge`, its one-shot HTTP call with an observer for the exchange record. |
+| `snapshot` | A sealed snapshot's ID, `snapshot_digest`, and the lossless encoding it hashes (with the rules that keep older digests valid). |
+| `injection` | The immutable injection plan (`InjectionPlan`, instructions, selectors, targets, outcomes, capability gaps) and its codec, and `MIDOJO_MCP_CAPABILITY`, what MiDojo's MCP interceptor places. |
+| `injection_spec_schema` | The injection-spec document's version and closed JSON Schema (package data), and the plan codec's version. |
+| `recorder` | The two seams an interception layer talks to, `Recorder` and `WorldState`, the facts and dispositions they carry, and the retrying and reporting recorders. |
+| `link` | The `midojo-binding-v1` frame and message codec: encode and decode of frames, answers, rejections, `bind`, `bound` and `unbind`, and the errors a link raises. |
 
 Import the module you need: the package imports none of them.
 
@@ -39,8 +44,10 @@ distribution, not the wheel.
 
 | Directory | Files |
 | --- | --- |
-| `vectors/judge/` | `request_id.json`, `request.json`, `response.json`, `exchange.json` |
+| `vectors/judge/` | `request_id.json`, `request.json`, `response.json`, `exchange.json`; see its README |
 | `vectors/rubric/` | `vectors.json`, `fidelity.json`, `turns.json`; see its README |
+| `vectors/snapshot/` | `vectors.json`: snapshots and their digests |
+| `vectors/plan/` | `plans.json` (accepted plans, defaults and refusals; an accepted plan is a fixpoint of decode then encode) and `before_call_arguments.json` (a plan as an older codec wrote it) |
 
 ## Tests
 
@@ -67,7 +74,8 @@ with its neighbours) is refused with `ExchangeFormatError`. A secret that two me
 in halves is in neither, and is not found.
 
 Every integer in a row fits a signed 64-bit integer (`MAX_INTEGER`, `MIN_INTEGER`); `usage`
-drops one that does not, and any other field refuses it.
+drops one that does not, and any other field refuses it. A log whose last row holds the
+largest sequence refuses the next row and stays readable.
 
 `ExchangeLog` assumes one process appends to a file at a time. It makes its path absolute
 when you make it, and every log on the same file in a process shares a lock and a count,

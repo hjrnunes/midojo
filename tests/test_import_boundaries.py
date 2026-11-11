@@ -73,10 +73,14 @@ LIGHT_MODULES = (
     "midojo.control_plane.client",
     "midojo.control_plane.inprocess",
     "midojo.control_plane.inprocess_control",
-    # The SDK's snapshot codec, which names a sealed snapshot: stdlib only.
-    "midojo_sdk.snapshot",
-    # The SDK's injection spec schema accessor and the plan codec it names: stdlib only.
-    "midojo_sdk.injection_spec_schema",
+    # The spec package's snapshot codec, which names a sealed snapshot: stdlib only.
+    "midojo_spec.snapshot",
+    # The spec package's plan codec, injection spec schema accessor and recorder seams: stdlib only.
+    "midojo_spec.injection",
+    "midojo_spec.injection_spec_schema",
+    "midojo_spec.recorder",
+    # The spec package's binding frame codec: stdlib only.
+    "midojo_spec.link",
     # The SDK's placement engine: decides a plan's placements, and the plan codec it names, stdlib only.
     "midojo_sdk.placement",
     # The spec package's judge modules: stdlib only, and they import nothing from Asago.

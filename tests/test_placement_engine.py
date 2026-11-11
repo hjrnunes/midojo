@@ -23,7 +23,8 @@ from typing import Any, cast
 import pytest
 from mcp.types import CallToolResult, TextContent
 from midojo_sdk import placement
-from midojo_sdk.injection import (
+from midojo_sdk.mcp import MidojoMCP
+from midojo_spec.injection import (
     Channel,
     InjectionInstruction,
     InjectionMode,
@@ -34,7 +35,6 @@ from midojo_sdk.injection import (
     SelectorSurface,
     payload_digest,
 )
-from midojo_sdk.mcp import MidojoMCP
 
 ROOT = Path(__file__).resolve().parent.parent
 

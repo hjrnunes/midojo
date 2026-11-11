@@ -20,10 +20,7 @@ from langchain.agents.middleware import AgentMiddleware, ToolCallRequest
 from langchain_core.messages import ToolMessage
 from langgraph.errors import GraphBubbleUp
 from langgraph.types import Command
-
-from midojo_sdk.client import AgentControlPlaneClient, CallIds, transient
-from midojo_sdk.context import ToolContext
-from midojo_sdk.recorder import (
+from midojo_spec.recorder import (
     ControlPlaneRejectedError,
     Disposition,
     Recorder,
@@ -31,6 +28,9 @@ from midojo_sdk.recorder import (
     WorldState,
     reporting,
 )
+
+from midojo_sdk.client import AgentControlPlaneClient, CallIds, transient
+from midojo_sdk.context import ToolContext
 from midojo_sdk.session import session_token
 
 __all__ = ["BLOCKED_REASON", "MidojoMiddleware", "ToolContext"]
