@@ -593,11 +593,18 @@ def _messages(value: Any) -> bool:
     )
 
 
+_UTC_SUFFIXES = ("+00:00", "Z")
+"""The two spellings of UTC a ``started_at`` ends with: the one the writer emits, and the ISO 8601 designator."""
+
+
 def _timestamp(value: Any) -> bool:
     if type(value) is not str:
         return False
+    # UTC is part of the format, and so is how it is spelled: a reader that took any zone would accept a time its
+    # writers never produce, and ``fromisoformat`` reads ``+0000``, ``-00:00`` and ``+00:00:00.1`` as a zero offset too.
+    if not value.endswith(_UTC_SUFFIXES):
+        return False
     try:
-        # UTC is part of the format: a reader that took any zone would accept a time its writers never produce.
         return datetime.fromisoformat(value).utcoffset() == timedelta(0)
     except ValueError:
         return False
