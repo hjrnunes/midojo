@@ -10,9 +10,11 @@ may use them. Three things hold meanwhile.
   nothing else (``packages/midojo-mim/tests/test_service.py`` holds those refusals), the evaluation handle accepts only
   a host or a remote interception, and ``midojo-run`` refuses a suite whose tools live on the host without
   ``--interception host``.
-- No code, dependency or lock entry of this repository names a package of Asago's driver: the modules that drove
-  MiDojo from the orchestrator, from the consumer's ``bundle-midojo`` and from ``--tool midojo`` live in those
-  repositories and are removed there, never reached from here.
+- No Python or TypeScript import in this repository's own source, and no dependency in its manifests or lock, names
+  a package of Asago's driver: the modules that drove MiDojo from the orchestrator, from the consumer's
+  ``bundle-midojo`` and from ``--tool midojo`` live in those repositories and are removed there. The scan reads
+  literal import names only. A name built at run time, a tests tree (a fixture may name an Asago package as data) and
+  a file that is not Python or TypeScript source (shell, YAML, a Containerfile, documents) are outside it.
 """
 
 from __future__ import annotations
@@ -78,14 +80,17 @@ SCANNED_CODE = [
     "packages/midojo-spec/src",
     "packages/midojo-mim/src",
 ]
-"""Every tree of this repository's own code. Tests are not scanned: a fixture may name an Asago package as data."""
+"""The trees of this repository's own Python source. Tests are not scanned: a fixture may name an Asago package as data."""
+
+SCANNED_TYPESCRIPT = ["interception/pi-sdk/src"]
+"""The TypeScript SDK's own source, read for its import specifiers."""
 
 DYNAMIC_IMPORTS = {"import_module", "__import__"}
 
 
 def is_asago(name: str) -> bool:
-    """A package of Asago's: the orchestrator's, the consumer's bundles and everything else prefixed ``asago``."""
-    return re.split(r"[._\-/]", name.strip().lower(), maxsplit=1)[0] == "asago"
+    """A package of Asago's: any name that starts with ``asago``, with or without an npm scope (``@asago/...``)."""
+    return name.strip().lower().lstrip("@").startswith("asago")
 
 
 def imported_names(tree: ast.Module) -> set[str]:
@@ -145,13 +150,15 @@ def test_the_scan_names_what_a_file_imports(source: str, found: set[str]):
         ("asago-bundle-midojo", True),
         ("asago.orch", True),
         ("Asago_Package", True),
-        ("asagoo", False),
+        ("asagobundle", True),
+        ("@asago/driver", True),
         ("midojo_spec", False),
         ("fastmcp", False),
+        ("midojo_asago", False),
         ("", False),
     ],
 )
-def test_the_name_check_reads_the_first_part_of_a_dotted_or_dashed_name(name: str, asago: bool):
+def test_the_name_check_flags_every_name_that_starts_with_asago(name: str, asago: bool):
     assert is_asago(name) is asago
 
 
@@ -226,4 +233,45 @@ def test_the_typescript_sdk_depends_on_no_package_of_asagos_driver():
         for name in package.get(section, {})
     }
     assert names, "the scan found no dependency to read"
-    assert {name for name in names if is_asago(name.removeprefix("@"))} == set()
+    assert {name for name in names if is_asago(name)} == set()
+
+
+TYPESCRIPT_IMPORT = re.compile(r"""(?:\bfrom|\bimport|\brequire\s*\()\s*\(?\s*["']([^"']+)["']""")
+
+
+def typescript_imports(source: str) -> set[str]:
+    """Every module specifier a TypeScript or JavaScript file names in an import, an export-from, a require or an import()."""
+    return set(TYPESCRIPT_IMPORT.findall(source))
+
+
+def typescript_files() -> list[Path]:
+    return sorted(
+        path
+        for tree in SCANNED_TYPESCRIPT
+        for pattern in ("*.ts", "*.mts", "*.js", "*.mjs")
+        for path in (ROOT / tree).rglob(pattern)
+    )
+
+
+def test_the_typescript_sdks_source_imports_no_package_of_asagos_driver():
+    files = typescript_files()
+    imported = {name for path in files for name in typescript_imports(path.read_text(encoding="utf-8"))}
+    assert "@earendil-works/pi-coding-agent" in imported, "the scan did not read the SDK's source"
+    assert {name for name in imported if is_asago(name)} == set()
+
+
+@pytest.mark.parametrize(
+    ("source", "found"),
+    [
+        ('import { a } from "@asago/driver";', {"@asago/driver"}),
+        ("import type { T } from 'asago-driver';", {"asago-driver"}),
+        ('import "asago-side-effect";', {"asago-side-effect"}),
+        ('export * from "asago-reexport";', {"asago-reexport"}),
+        ('const x = require("asago-cjs");', {"asago-cjs"}),
+        ('const x = await import("asago-dynamic");', {"asago-dynamic"}),
+        ('import { createHash } from "node:crypto";', {"node:crypto"}),
+        ("// no import here", set()),
+    ],
+)
+def test_the_typescript_scan_names_what_a_file_imports(source: str, found: set[str]):
+    assert typescript_imports(source) == found
