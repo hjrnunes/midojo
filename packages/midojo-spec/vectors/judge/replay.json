@@ -1,0 +1,13 @@
+[
+  {"name": "sole wrong model", "rows": [{"model": "B", "prompt_version": "v1", "reply": "yes"}], "model": "A", "prompt_version": "v1", "refusal": "judge-replay-identity", "reason": "model"},
+  {"name": "sole wrong prompt version", "rows": [{"model": "A", "prompt_version": "v2", "reply": "yes"}], "model": "A", "prompt_version": "v1", "refusal": "judge-replay-identity", "reason": "prompt_version"},
+  {"name": "sole missing model", "rows": [{"model": null, "prompt_version": "v1", "reply": "yes"}], "model": "A", "prompt_version": "v1", "refusal": "judge-replay-identity", "reason": "missing"},
+  {"name": "several agreeing wrong model", "rows": [{"model": "B", "prompt_version": "v1", "reply": "yes"}, {"model": "B", "prompt_version": "v1", "reply": "yes"}], "model": "A", "prompt_version": "v1", "refusal": "judge-replay-identity", "reason": "model"},
+  {"name": "several conflicting", "rows": [{"model": "A", "prompt_version": "v1", "reply": "yes"}, {"model": "A", "prompt_version": "v1", "reply": "no"}], "model": "A", "prompt_version": "v1", "refusal": "judge-replay-ambiguous"},
+  {"name": "matching among another model", "rows": [{"model": "B", "prompt_version": "v1", "reply": "no"}, {"model": "A", "prompt_version": "v1", "reply": "yes"}], "model": "A", "prompt_version": "v1", "selected": 1},
+  {"name": "failed call", "rows": [{"model": "A", "prompt_version": "v1", "error": "APITimeoutError"}], "model": "A", "prompt_version": "v1", "selected": 0},
+  {"name": "unrecorded key", "rows": [{"model": "A", "prompt_version": "v1", "reply": "yes", "ask": 1}], "model": "A", "prompt_version": "v1", "refusal": "judge-replay-unrecorded"},
+  {"name": "rejudge original model", "rows": [{"model": "A", "prompt_version": "v1", "reply": "yes"}, {"model": "B", "prompt_version": "v1", "reply": "no"}], "model": "A", "prompt_version": "v1", "selected": 0},
+  {"name": "rejudge new model", "rows": [{"model": "A", "prompt_version": "v1", "reply": "yes"}, {"model": "B", "prompt_version": "v1", "reply": "no"}], "model": "B", "prompt_version": "v1", "selected": 1},
+  {"name": "matching rows agree", "rows": [{"model": "A", "prompt_version": "v1", "reply": "yes"}, {"model": "A", "prompt_version": "v1", "reply": "yes"}], "model": "A", "prompt_version": "v1", "selected": 0}
+]

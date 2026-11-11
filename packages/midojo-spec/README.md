@@ -16,6 +16,7 @@ python -c "from midojo_spec import judge; print(judge.SCHEMA)"
 | --- | --- |
 | `judge` | The `midojo.judge.v1` request and response rules: `request_id`, `request_problem`, `response_problem`. |
 | `judge_exchange` | The record a judge service keeps of each model request (`midojo.judge-exchange.v1`): the row, redaction, the append-only JSONL log and its strict reader. |
+| `judge_replay` | Strict offline replay of exchanges keyed by request and judge identity, with stable refusal reasons. |
 | `rubric_judge` | The rubric judge, a port of Garak's at 968cc22, and `http_judge`, its one-shot HTTP call with an observer for the exchange record. |
 | `snapshot` | A sealed snapshot's ID, `snapshot_digest`, and the lossless encoding it hashes (with the rules that keep older digests valid). |
 | `injection` | The immutable injection plan (`InjectionPlan`, instructions, selectors, targets, outcomes, capability gaps) and its codec, and `MIDOJO_MCP_CAPABILITY`, what MiDojo's MCP interceptor places. |
@@ -45,7 +46,7 @@ distribution, not the wheel.
 
 | Directory | Files |
 | --- | --- |
-| `vectors/judge/` | `request_id.json`, `request.json`, `response.json`, `exchange.json`; see its README |
+| `vectors/judge/` | `request_id.json`, `request.json`, `response.json`, `exchange.json`, `replay.json`; see its README |
 | `vectors/rubric/` | `vectors.json`, `fidelity.json`, `turns.json`; see its README |
 | `vectors/snapshot/` | `vectors.json`: snapshots and their digests, and the snapshots a reader must refuse (`refusal`; `refused_value` names the `bytes` or non-finite `float` that JSON cannot carry, and the `paths` it replaces) |
 | `vectors/plan/` | `plans.json` (accepted plans, defaults and refusals; an accepted plan is a fixpoint of decode then encode) and `before_call_arguments.json` (a plan as an older codec wrote it) |
@@ -57,6 +58,22 @@ distribution, not the wheel.
 ```sh
 uv run --no-project --python 3.11 --with pytest --with-editable packages/midojo-spec python -m pytest packages/midojo-spec
 ```
+
+## Replay
+
+`judge_replay.replay(exchanges, request_id, ask, model=..., prompt_version=...)`
+returns the first row with that key and identity if all matching rows agree on
+`reply` and `error`. A matching failed call returns its row with `error`, not a
+reply. The requested model and prompt version must each be a non-empty string.
+`identity_problem` checks each candidate's model and prompt version in that order:
+missing identity, wrong model, then wrong prompt version. A missing key raises
+`UnrecordedExchange`; a key without the requested identity raises `IdentityRefused`
+with `reason` (`missing`, `model`, or `prompt_version`); disagreeing matching rows
+raise `AmbiguousExchange`. Their stable `why` values are
+`judge-replay-unrecorded`, `judge-replay-identity`, and
+`judge-replay-ambiguous`. The functions read no environment and open no connection.
+A live re-judge with another model remains possible; each model's recorded rows
+replay under its own identity.
 
 ## The judge exchange record
 
