@@ -521,7 +521,8 @@ def http_judge(
 
     ``observer(messages, observed)`` is called once for each request sent, after the
     outcome is known and before the call returns or raises: with the reply's text and usage
-    when the model answered, and with the failed call's label when it did not. The call's
+    when the model answered, and with the failed call's label when it did not (the exception's
+    class name for a failure this module does not name, which is raised as it was). The call's
     own result is unchanged. An observer that raises stops the call with that exception, so
     a request that cannot be recorded is never taken for one that was.
     """
@@ -544,12 +545,23 @@ def http_judge(
 
         try:
             answer = _exchange(request, timeout, deadline)
-            reply = _reply(answer)
         except _Rejected:
             observe(http_status=400)
             return None
         except JudgeCallError as exc:
             observe(http_status=exc.status, error=exc.label)
+            raise
+        except Exception as exc:
+            # A request that was sent leaves a record whatever went wrong after it.
+            observe(error=type(exc).__name__)
+            raise
+        try:
+            reply = _reply(answer)
+        except JudgeCallError as exc:
+            observe(http_status=exc.status, error=exc.label)
+            raise
+        except Exception as exc:
+            observe(http_status=answer.status, error=type(exc).__name__)
             raise
         text = reply.content if isinstance(reply.content, str) else None
         observe(

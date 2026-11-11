@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 import json
 import os
 import stat
@@ -67,6 +68,68 @@ def test_a_model_request_becomes_its_row(case: dict[str, Any]) -> None:
     assert exchange.to_json() == case["expected"]
 
 
+REDACTION_REFUSED = VECTORS["redaction_refused"]
+
+
+@pytest.mark.parametrize("case", REDACTION_REFUSED, ids=[case["name"] for case in REDACTION_REFUSED])
+def test_a_redaction_that_would_lose_the_identity_or_spell_a_secret_is_refused(case: dict[str, Any]) -> None:
+    with pytest.raises(ExchangeFormatError) as refused:
+        Exchange.observed(Observed(**case["observed"]), secrets=case["secrets"], **case["identity"])
+
+    assert str(refused.value) == case["problem"]
+    for secret in case["secrets"]:
+        assert secret in record.REDACTED or secret not in str(refused.value)
+
+
+def test_a_secret_in_the_judge_identity_is_refused_and_never_rewritten() -> None:
+    for fields in ({"model": "m-tok"}, {"prompt_version": "v-tok"}):
+        with pytest.raises(ExchangeFormatError, match="identify the judge"):
+            observed_exchange(secrets=["tok"], **fields)
+
+    redacted = observed_exchange(secrets=["u"])
+
+    assert (redacted.model, redacted.prompt_version, redacted.redacted) == ("m", "v", True)
+
+
+def test_redaction_scrubs_every_text_and_leaves_no_listed_secret() -> None:
+    secrets = ["sk-live-1", "live-12", "e-123x", "abc"]
+    text = "sk-live-123x abc live-12 xabcx sk-live-1sk-live-1"
+    exchange = observed_exchange(
+        observed=Observed(
+            started_at="2026-11-11T09:30:00.123+00:00",
+            duration_ms=1,
+            content=text,
+            finish_reason="stop abc",
+            response_model="x abc",
+            usage={"abc": ["sk-live-1", {"deep": "abc live-12"}]},
+        ),
+        messages=[{"role": "system", "content": text}, {"role": "user", "content": text}],
+    )
+    scrubbed_text = "[redacted] [redacted] [redacted] x[redacted]x [redacted]"
+
+    scrubbed = record.redact(exchange, secrets)
+
+    assert scrubbed.messages == (("system", scrubbed_text), ("user", scrubbed_text))
+    assert scrubbed.reply == scrubbed_text
+    assert scrubbed.finish_reason == "stop [redacted]"
+    assert scrubbed.response_model == "x [redacted]"
+    assert scrubbed.usage == {"[redacted]": ["[redacted]", {"deep": "[redacted] [redacted]"}]}
+    assert scrubbed.redacted is True
+    assert scrubbed.request_sha256 == exchange.request_sha256
+    assert scrubbed.response_sha256 == exchange.response_sha256
+    with pytest.raises(ExchangeFormatError):
+        record.redact(exchange, [*secrets, "[red"])
+
+
+def test_overlapping_and_touching_secrets_become_one_marker_each_run() -> None:
+    exchange = observed_exchange(
+        observed=Observed(started_at="2026-11-11T09:30:00.123+00:00", duration_ms=1, content="..xabz..cd.ab.ab")
+    )
+
+    assert record.redact(exchange, ["ab", "xa", "cd"]).reply == "..[redacted]z..[redacted].[redacted].[redacted]"
+    assert record.redact(exchange, ["abz.", "xab"]).reply == "..[redacted].cd.ab.ab"
+
+
 def test_the_vector_digests_are_sha256_of_utf8() -> None:
     for case in VECTORS["digests"]:
         assert record.sha256_text(case["text"]) == case["sha256"]
@@ -84,10 +147,13 @@ def test_a_problem_never_holds_what_the_row_says() -> None:
 
 
 def test_the_digests_come_from_the_last_message() -> None:
+    # The two digests are `printf u | shasum -a 256` and `printf reply | shasum -a 256`; the
+    # first message, "s", hashes to 043a7187..., which must not be the request digest.
     exchange = observed_exchange()
 
-    assert exchange.request_sha256 == record.sha256_text("u")
-    assert exchange.response_sha256 == record.sha256_text("reply")
+    assert exchange.request_sha256 == "0bfe935e70c321c7ca3afc75ce0d0ca2f98b5422e008bb31c00c6d7f1f1c0ad6"
+    assert exchange.response_sha256 == "5782b18687e6cf8a482fc32d2db5b196d8821c458a0c069c6acf3953446e7bb5"
+    assert not exchange.request_sha256.startswith("043a7187")
 
 
 def test_a_model_request_with_no_messages_is_refused() -> None:
@@ -259,3 +325,182 @@ def test_a_row_deeper_than_the_parser_allows_is_a_format_error(tmp_path: Path) -
 
     with pytest.raises(ExchangeFormatError, match="line 1"):
         record.read_exchanges(path)
+
+
+NOT_JSON_USAGE = [
+    {"a": float("nan")},
+    {"a": float("inf")},
+    {"a": -float("inf")},
+    {"a": {1: 2}},
+    {"a": object()},
+    {"a": (1, 2)},
+    {"a": {1, 2}},
+    {"a": b"x"},
+    {"a": [{"b": float("nan")}]},
+]
+
+
+@pytest.mark.parametrize("usage", NOT_JSON_USAGE, ids=[repr(usage) for usage in NOT_JSON_USAGE])
+def test_a_usage_that_is_not_plain_json_is_dropped_from_an_observation_and_refused_in_a_row(
+    usage: dict[str, Any], tmp_path: Path
+) -> None:
+    observation = Observed(started_at="2026-11-11T09:30:00.123+00:00", duration_ms=1, content="x", usage=usage)
+    exchange = observed_exchange(observed=observation)
+    forced = dataclasses.replace(exchange, usage=usage)
+    log = ExchangeLog(tmp_path / "log.jsonl")
+
+    assert exchange.usage is None
+    assert record.exchange_problem({**forced.to_json(), "sequence": 0}) == "usage is not valid"
+    with pytest.raises(ExchangeFormatError, match="usage is not valid"):
+        log.append(forced)
+    assert not log.path.exists()
+
+
+def test_usage_in_a_row_that_is_plain_json_is_kept() -> None:
+    usage = {"total_tokens": 3, "ratio": 0.5, "ok": True, "none": None, "list": [1, {"a": "b"}], "text": "t"}
+
+    assert (
+        observed_exchange(
+            observed=Observed(started_at="2026-11-11T09:30:00.123+00:00", duration_ms=1, content="x", usage=usage)
+        ).usage
+        == usage
+    )
+
+
+def test_a_row_whose_digests_are_of_other_text_is_refused_by_the_append_and_the_reader(tmp_path: Path) -> None:
+    exchange = observed_exchange()
+    tampered = dataclasses.replace(exchange, response_sha256=record.sha256_text("something else"))
+    log = ExchangeLog(tmp_path / "log.jsonl")
+
+    with pytest.raises(ExchangeFormatError, match="response_sha256 is not the digest of the reply"):
+        log.append(tampered)
+    assert not log.path.exists()
+    path = write_lines(tmp_path / "read.jsonl", json.dumps({**tampered.to_json(), "sequence": 0}))
+    with pytest.raises(ExchangeFormatError, match=r"line 1: response_sha256 is not the digest of the reply"):
+        record.read_exchanges(path)
+
+
+def test_two_logs_on_one_file_number_the_rows_as_one(tmp_path: Path) -> None:
+    path = tmp_path / "log.jsonl"
+    first, second = ExchangeLog(path), ExchangeLog(path)
+
+    written = [log.append(observed_exchange()) for log in (first, second, first, second)]
+
+    assert [exchange.sequence for exchange in written] == [0, 1, 2, 3]
+    assert [exchange.sequence for exchange in record.read_exchanges(path)] == [0, 1, 2, 3]
+
+
+def test_logs_named_by_different_paths_to_one_file_share_it(tmp_path: Path) -> None:
+    (tmp_path / "dir").mkdir()
+    path = tmp_path / "dir" / "log.jsonl"
+    link = tmp_path / "link.jsonl"
+    link.symlink_to(path)
+    first, second = ExchangeLog(path), ExchangeLog(tmp_path / "dir" / ".." / "dir" / "log.jsonl")
+    third = ExchangeLog(link)
+
+    for log in (first, second, third, first):
+        log.append(observed_exchange())
+
+    assert [exchange.sequence for exchange in record.read_exchanges(path)] == [0, 1, 2, 3]
+
+
+def test_many_logs_on_one_file_from_many_threads_keep_the_file_readable(tmp_path: Path) -> None:
+    path = tmp_path / "log.jsonl"
+
+    def work(worker: int) -> None:
+        log = ExchangeLog(path)
+        for ask in range(20):
+            log.append(observed_exchange(ask=ask, messages=[{"role": "user", "content": f"{worker}:{ask}"}]))
+
+    threads = [threading.Thread(target=work, args=(worker,)) for worker in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert [exchange.sequence for exchange in record.read_exchanges(path)] == list(range(160))
+
+
+def test_a_row_another_writer_added_is_counted_before_the_next_one(tmp_path: Path) -> None:
+    path = tmp_path / "log.jsonl"
+    log = ExchangeLog(path)
+    log.append(observed_exchange())
+    with path.open("a", encoding="ascii") as other:
+        other.write(valid_line(1) + "\n")
+
+    assert log.append(observed_exchange()).sequence == 2
+    assert [exchange.sequence for exchange in record.read_exchanges(path)] == [0, 1, 2]
+
+
+class Stop(BaseException):
+    """What a signal handler or a cancelled task raises: not an ``Exception``."""
+
+
+def failing_row_write(monkeypatch: pytest.MonkeyPatch, fails: BaseException) -> None:
+    """Make the write of a row put half of it on disk and then fail with ``fails``."""
+    real = os.write
+
+    def write(descriptor: int, data: Any) -> int:
+        if bytes(data).startswith(b'{"schema"'):
+            real(descriptor, bytes(data)[: len(data) // 2])
+            raise fails
+        return real(descriptor, data)
+
+    monkeypatch.setattr(os, "write", write)
+
+
+@pytest.mark.parametrize("fails", [OSError("disk full"), Stop()], ids=["an error", "a stop"])
+def test_a_write_that_fails_leaves_no_partial_row_and_the_next_append_is_whole(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fails: BaseException
+) -> None:
+    log = ExchangeLog(tmp_path / "log.jsonl")
+    log.append(observed_exchange())
+    whole = log.path.read_bytes()
+    with monkeypatch.context() as patched:
+        failing_row_write(patched, fails)
+        with pytest.raises(type(fails)):
+            log.append(observed_exchange())
+
+    assert log.path.read_bytes() == whole
+    assert log.append(observed_exchange()).sequence == 1
+    assert [exchange.sequence for exchange in record.read_exchanges(log.path)] == [0, 1]
+
+
+def test_a_write_that_cannot_be_cut_back_is_not_followed_by_a_row_glued_to_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log = ExchangeLog(tmp_path / "log.jsonl")
+    log.append(observed_exchange())
+    with monkeypatch.context() as patched:
+        failing_row_write(patched, OSError("disk full"))
+
+        def refuse(_descriptor: int, _length: int) -> None:
+            raise OSError("read-only")
+
+        patched.setattr(os, "ftruncate", refuse)
+        with pytest.raises(OSError, match="disk full"):
+            log.append(observed_exchange())
+    torn = log.path.read_bytes()
+
+    with pytest.raises(ExchangeFormatError, match="partial row"):
+        log.append(observed_exchange())
+    assert log.path.read_bytes() == torn
+
+
+def test_a_file_that_ends_in_a_partial_row_is_not_appended_to(tmp_path: Path) -> None:
+    path = tmp_path / "log.jsonl"
+    path.write_text(valid_line(0) + "\n" + valid_line(1)[:40], encoding="utf-8")
+    before = path.read_bytes()
+
+    with pytest.raises(ExchangeFormatError, match="partial row"):
+        ExchangeLog(path).append(observed_exchange())
+    assert path.read_bytes() == before
+
+
+def test_a_file_that_does_not_read_as_a_log_is_not_appended_to(tmp_path: Path) -> None:
+    path = write_lines(tmp_path / "log.jsonl", valid_line(0), "not json")
+    before = path.read_bytes()
+
+    with pytest.raises(ExchangeFormatError, match="line 2"):
+        ExchangeLog(path).append(observed_exchange())
+    assert path.read_bytes() == before

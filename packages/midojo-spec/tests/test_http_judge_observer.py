@@ -160,6 +160,17 @@ def test_a_body_that_is_not_json_is_a_failed_call_with_its_status(model: Model) 
     assert (observed.error, observed.http_status) == ("JSONDecodeError", 200)
 
 
+def test_a_body_too_deeply_nested_to_parse_is_observed_and_raised_as_it_was(model: Model) -> None:
+    model.status, model.body = 200, b"[" * 100_000 + b"]" * 100_000
+
+    result, seen, failure = run(model)
+
+    assert result is None
+    assert isinstance(failure, RecursionError)
+    ((_, observed),) = seen
+    assert (observed.error, observed.http_status, observed.content) == ("RecursionError", 200, None)
+
+
 def test_an_answer_with_no_text_is_observed_without_content_and_returns_what_it_returned_before(model: Model) -> None:
     model.answer(choices=[{"message": {"content": ["part"]}}], usage={"total_tokens": 1})
 

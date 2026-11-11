@@ -51,8 +51,12 @@ def test_a_request_without_an_id_does_not_hold_one() -> None:
     assert not judge.id_holds({"schema": judge.SCHEMA, **REQUEST_IDS[0]["body"]})
 
 
-def test_a_body_that_is_not_json_data_has_no_id_that_holds() -> None:
-    assert not judge.id_holds({"schema": judge.SCHEMA, "id": "sha256:x", "claim": object()})
+def test_a_body_that_is_not_json_data_does_not_hold_and_does_not_raise() -> None:
+    well_formed = "sha256:" + "0" * 64
+    with pytest.raises(TypeError):
+        judge.request_id({"claim": object()})
+
+    assert judge.id_holds({"schema": judge.SCHEMA, "id": well_formed, "claim": object()}) is False
 
 
 @pytest.mark.parametrize("case", REQUESTS, ids=[case["name"] for case in REQUESTS])

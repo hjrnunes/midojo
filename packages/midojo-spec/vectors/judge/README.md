@@ -7,7 +7,7 @@ What the `midojo.judge.v1` rules and the `midojo.judge-exchange.v1` record must 
 | `request_id.json` | Request bodies and their `sha256:` ids | `test_judge_vectors.py` |
 | `request.json` | Values and why each is not a judge request, or `null` | `test_judge_vectors.py` |
 | `response.json` | Answers and why each is not a response to the request id `expected_id`, or `null` | `test_judge_vectors.py` |
-| `exchange.json` | Exchange rows that are valid (and whether their digests hold), rows that must be refused, how a model request becomes a row under redaction, and SHA-256 of texts | `test_judge_exchange.py` |
+| `exchange.json` | Exchange rows that are valid (and whether their digests hold), rows that must be refused (a digest that is not of the row's text included), how a model request becomes a row under redaction, the redactions that are refused (`redaction_refused`), and SHA-256 of texts | `test_judge_exchange.py` |
 
 ## How they were computed
 

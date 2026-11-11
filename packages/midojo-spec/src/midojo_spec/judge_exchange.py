@@ -24,14 +24,24 @@ A row (:class:`Exchange`, schema ``midojo.judge-exchange.v1``) holds:
 - ``redacted``: true when a secret was replaced by ``[redacted]`` in a text field.
 
 The digests are taken from the text as it was sent and received, before any redaction, so a
-row's digests equal the grade's whatever was redacted. :func:`digests_hold` therefore
-recomputes them only for a row that was not redacted, and says so (``None``) otherwise.
+row's digests equal the grade's whatever was redacted. A row that was not redacted must hold
+the digests of its own text, and :func:`exchange_problem` refuses one that does not; a
+redacted row cannot be checked, so :func:`digests_hold` says ``None`` for it.
+
+Redaction replaces each occurrence of a secret in a text field with ``[redacted]``, in one pass
+over each text, so overlapping secrets leave no tail and a marker is never rescanned. It does not
+reassemble a secret that two fields hold in halves. ``model`` and ``prompt_version`` are the
+judge's identity and are never rewritten: a secret that occurs in either, or in the marker
+itself, is refused with :class:`ExchangeFormatError`, because a row that leaked it or lost the
+identity a replay checks would be worse than no row.
 
 The file is ASCII JSON, one object on each line, so a lone surrogate in a model's reply
-survives a round trip and its digest still holds. :class:`ExchangeLog` appends under a lock,
-with each row in one ``write`` of a descriptor opened for append. A reader
-(:func:`read_exchanges`) is strict: a line that is not a row, or a file whose sequences do not
-rise, is an :class:`ExchangeFormatError` naming the line and the rule, never its content.
+survives a round trip and its digest still holds. :class:`ExchangeLog` appends under a lock that
+every log on one file in one process shares, with each row in one ``write`` of a descriptor
+opened for append; a write that fails is cut back, so no partial row stays. One process appends
+to a file at a time. A reader (:func:`read_exchanges`) is strict: a line that is not a row, or a
+file whose sequences do not rise, is an :class:`ExchangeFormatError` naming the line and the
+rule, never its content.
 """
 
 from __future__ import annotations
@@ -39,10 +49,12 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import math
 import os
 import re
 import threading
 from collections.abc import Iterable, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -261,6 +273,12 @@ def exchange_problem(row: Any) -> str | None:
         return "reply and response_sha256 are both present or both null"
     if row["error"] is not None and row["reply"] is not None:
         return "a failed call has no reply"
+    if not row["redacted"]:
+        # Only a row that kept its text can vouch for its digests; a redacted one cannot be checked.
+        if row["request_sha256"] != sha256_text(row["messages"][-1]["content"]):
+            return "request_sha256 is not the digest of the last message"
+        if row["reply"] is not None and row["response_sha256"] != sha256_text(row["reply"]):
+            return "response_sha256 is not the digest of the reply"
     return None
 
 
@@ -278,15 +296,27 @@ def digests_hold(exchange: Exchange) -> bool | None:
 def redact(exchange: Exchange, secrets: Iterable[str]) -> Exchange:
     """``exchange`` with each of ``secrets`` replaced by ``[redacted]`` in every text it holds.
 
-    Digests, field names and the numbers stay as they are. The longest secret goes first, so
-    one that contains another leaves no tail. ``redacted`` is set when a replacement happened.
+    Digests, field names and the numbers stay as they are. Each text is scanned once for every
+    occurrence of every secret, and each run of overlapping or touching occurrences becomes one
+    marker, so no tail of a secret that contains or overlaps another stays, and a marker is never
+    scanned again. ``redacted`` is set when a replacement happened.
+
+    Raises :class:`ExchangeFormatError`, naming no secret, when a secret occurs in the ``model``
+    or the ``prompt_version`` (the identity a replay checks, which is never rewritten), in the
+    marker itself, or would be spelled by the marker and the text beside it. A secret that two
+    messages hold in halves is in neither and is not found.
     """
     found = sorted({secret for secret in secrets if secret}, key=len, reverse=True)
     if not found:
         return exchange
+    if any(secret in REDACTED for secret in found):
+        raise ExchangeFormatError(f"a secret occurs in the redaction marker {REDACTED}")
+    if any(secret in (exchange.model or "") or secret in exchange.prompt_version for secret in found):
+        raise ExchangeFormatError(
+            "a secret occurs in the model or the prompt version, which identify the judge and are never redacted"
+        )
     scrubbed = dataclasses.replace(
         exchange,
-        model=_scrub(exchange.model, found),
         messages=tuple((_scrub(role, found), _scrub(content, found)) for role, content in exchange.messages),
         reply=_scrub(exchange.reply, found),
         error=_scrub(exchange.error, found),
@@ -294,46 +324,111 @@ def redact(exchange: Exchange, secrets: Iterable[str]) -> Exchange:
         response_model=_scrub(exchange.response_model, found),
         usage=_scrub(exchange.usage, found),
     )
+    texts = [
+        *(text for message in scrubbed.messages for text in message),
+        *_strings(scrubbed.reply),
+        *_strings(scrubbed.error),
+        *_strings(scrubbed.finish_reason),
+        *_strings(scrubbed.response_model),
+        *_strings(scrubbed.usage),
+    ]
+    if any(secret in text for secret in found for text in texts):
+        # Only the marker joined to its neighbours can still spell a secret.
+        raise ExchangeFormatError(f"a secret is spelled by the redaction marker {REDACTED} and the text beside it")
     return dataclasses.replace(scrubbed, redacted=exchange.redacted or scrubbed != exchange)
+
+
+def _strings(value: Any) -> Iterable[str]:
+    if type(value) is str:
+        yield value
+    elif type(value) is dict:
+        for key, item in value.items():
+            yield from _strings(key)
+            yield from _strings(item)
+    elif type(value) is list:
+        for item in value:
+            yield from _strings(item)
+
+
+class _Shared:
+    """What every log on one file in this process shares: the lock, and the file as this process left it."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        # The file's size after this process's last append, and the sequence its next row takes;
+        # a size that differs says someone else wrote, and the file is read again.
+        self.size: int | None = None
+        self.next = 0
+
+
+_SHARED: dict[str, _Shared] = {}
+_SHARED_LOCK = threading.Lock()
 
 
 class ExchangeLog:
     """An append-only JSONL file of exchanges: thread-safe, one row in one ``write``.
 
-    One process writes a file: ``sequence`` continues from the rows already there, and the
-    lock that orders it is this object's. The file is created with mode 0600, as it holds
-    prompts and replies.
+    One process appends to a file at a time. Every ``ExchangeLog`` on the same file in a process
+    shares one lock and one count, so two of them number the rows as one. ``sequence`` continues
+    from the rows already in the file, read strictly the first time and again whenever the file's
+    size is not what this process left. A file that ends in a partial row is refused, and a write
+    that fails is cut back to where it began, so no partial row stays. The file is created with
+    mode 0600, as it holds prompts and replies.
     """
 
     def __init__(self, path: str | os.PathLike[str]) -> None:
         self.path = Path(path)
-        self._lock = threading.Lock()
-        self._next = 0
-        if self.path.exists():
-            with self.path.open("rb") as existing:
-                self._next = sum(1 for line in existing if line.strip())
+        with _SHARED_LOCK:
+            self._shared = _SHARED.setdefault(os.path.realpath(self.path), _Shared())
 
     def append(self, exchange: Exchange) -> Exchange:
         """Write ``exchange`` as the next row and return it with its ``sequence``.
 
-        A row that is not valid is refused before anything is written.
+        A row that is not valid is refused before anything is written, and so is a file that does
+        not read as a log.
         """
-        with self._lock:
-            row = dataclasses.replace(exchange, sequence=self._next)
-            document = row.to_json()
-            if (problem := exchange_problem(document)) is not None:
-                raise ExchangeFormatError(problem)
-            line = json.dumps(document, ensure_ascii=True, separators=(",", ":")).encode("ascii") + b"\n"
+        if (problem := exchange_problem(dataclasses.replace(exchange, sequence=0).to_json())) is not None:
+            raise ExchangeFormatError(problem)
+        shared = self._shared
+        with shared.lock:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             descriptor = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
             try:
-                view = memoryview(line)
-                while view:
-                    view = view[os.write(descriptor, view) :]
+                size = os.fstat(descriptor).st_size
+                if shared.size != size:
+                    shared.next, shared.size = self._continued(size), size
+                row = dataclasses.replace(exchange, sequence=shared.next)
+                line = json.dumps(row.to_json(), ensure_ascii=True, separators=(",", ":")).encode("ascii") + b"\n"
+                try:
+                    view = memoryview(line)
+                    while view:
+                        view = view[os.write(descriptor, view) :]
+                except BaseException:
+                    # Cut the write back: a torn row left here would be glued to the next one.
+                    cut = False
+                    with suppress(OSError):
+                        os.ftruncate(descriptor, size)
+                        cut = True
+                    if not cut:
+                        shared.size = None
+                    raise
+                shared.size, shared.next = size + len(line), shared.next + 1
+                return row
             finally:
                 os.close(descriptor)
-            self._next += 1
-            return row
+
+    def _continued(self, size: int) -> int:
+        """The sequence the next row takes in a file of ``size`` bytes: after the last row, read strictly."""
+        if size == 0:
+            return 0
+        with self.path.open("rb") as existing:
+            existing.seek(-1, os.SEEK_END)
+            if existing.read(1) != b"\n":
+                raise ExchangeFormatError("the file ends in a partial row; nothing was written")
+        rows = read_exchanges(self.path)
+        last = rows[-1].sequence if rows else -1
+        assert last is not None  # a row read from a file has its sequence
+        return last + 1
 
 
 def read_exchanges(path: str | os.PathLike[str]) -> list[Exchange]:
@@ -381,9 +476,7 @@ def _no_constants(name: str) -> Any:
 
 def _scrub(value: Any, secrets: Sequence[str]) -> Any:
     if type(value) is str:
-        for secret in secrets:
-            value = value.replace(secret, REDACTED)
-        return value
+        return _scrub_text(value, secrets)
     if type(value) is dict:
         return {_scrub(key, secrets): _scrub(item, secrets) for key, item in value.items()}
     if type(value) is list:
@@ -391,16 +484,57 @@ def _scrub(value: Any, secrets: Sequence[str]) -> Any:
     return value
 
 
+def _scrub_text(text: str, secrets: Sequence[str]) -> str:
+    """``text`` with every run of overlapping or touching secret occurrences replaced by one marker."""
+    spans: list[tuple[int, int]] = []
+    for secret in secrets:
+        start = text.find(secret)
+        while start != -1:
+            spans.append((start, start + len(secret)))
+            start = text.find(secret, start + 1)
+    if not spans:
+        return text
+    spans.sort()
+    pieces: list[str] = []
+    cursor = 0
+    run_start, run_end = spans[0]
+    for start, end in [*spans[1:], (len(text) + 1, len(text) + 1)]:
+        if start <= run_end:
+            run_end = max(run_end, end)
+            continue
+        pieces.append(text[cursor:run_start])
+        pieces.append(REDACTED)
+        cursor = run_end
+        run_start, run_end = start, end
+    pieces.append(text[cursor:])
+    return "".join(pieces)
+
+
 def _usage_fits(usage: Any) -> bool:
+    """Whether ``usage`` is plain JSON the file can hold: text keys, finite numbers, at most ``MAX_USAGE_DEPTH`` deep."""
     if usage is None:
         return True
     if type(usage) is not dict:
         return False
-    levels, level = 0, [usage]
-    while containers := [item for item in level if type(item) in (dict, list)]:
-        levels += 1
-        level = [child for item in containers for child in (item.values() if type(item) is dict else item)]
-    return levels <= MAX_USAGE_DEPTH
+    stack: list[tuple[Any, int]] = [(usage, 1)]
+    while stack:
+        value, level = stack.pop()
+        kind = type(value)
+        if kind is dict or kind is list:
+            if level > MAX_USAGE_DEPTH:
+                return False
+            if kind is dict:
+                if any(type(key) is not str for key in value):
+                    return False
+                stack.extend((item, level + 1) for item in value.values())
+            else:
+                stack.extend((item, level + 1) for item in value)
+        elif kind is float:
+            if not math.isfinite(value):
+                return False
+        elif kind not in (str, int, bool, type(None)):
+            return False
+    return True
 
 
 def _index(value: Any) -> bool:

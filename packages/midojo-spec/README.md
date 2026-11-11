@@ -55,8 +55,21 @@ A judge service appends one row for each model request, answered or failed, to a
 `prompt_version`), what was sent and received (`messages`, `reply`, `error`, `http_status`,
 `finish_reason`, `response_model`, `usage`), the timing (`started_at`, `duration_ms`) and the
 SHA-256 of the judge request and of the reply (`request_sha256`, `response_sha256`), which
-equal the digests the sealed grade's judgements hold. `digests_hold` recomputes them for a
-row that was not redacted. The module docstring of `judge_exchange` is the field reference.
+equal the digests the sealed grade's judgements hold. A row that was not redacted must hold
+the digests of its own text, and the log and the reader refuse one that does not;
+`digests_hold` says `None` for a redacted row, which cannot be checked.
+
+Redaction replaces each occurrence of each secret with `[redacted]` in the messages, the
+reply, the error, the finish reason, the response model and the usage, and never in the
+digests. It does not touch `model` or `prompt_version`: they are the identity a replay
+checks, so a secret that occurs in either (or in the marker, or that the marker would spell
+with its neighbours) is refused with `ExchangeFormatError`. A secret that two messages hold
+in halves is in neither, and is not found.
+
+`ExchangeLog` assumes one process appends to a file at a time. Every log on one file in a
+process shares a lock and a count, a write that fails is cut back so no partial row stays,
+and a file that ends in a partial row or does not read as a log is refused, not appended to.
+The module docstring of `judge_exchange` is the field reference.
 
 ```python
 from midojo_spec.judge_exchange import Exchange, ExchangeLog
