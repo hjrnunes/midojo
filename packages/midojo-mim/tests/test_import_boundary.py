@@ -19,6 +19,8 @@ import textwrap
 import tomllib
 from pathlib import Path
 
+import pytest
+
 import midojo_mim
 
 PACKAGE_ROOT = Path(__file__).resolve().parent.parent
@@ -36,14 +38,39 @@ def distribution_names() -> set[str]:
 
 
 def imported_modules(tree: ast.Module) -> set[str]:
-    """The top-level names every import in ``tree`` reaches; a relative import is ``midojo_mim``."""
+    """The top-level names every import in ``tree`` reaches.
+
+    A relative import of one level stays inside the package and is ``midojo_mim``. A relative import of more levels
+    leaves it (the package's modules are all at its top), and is named by its dots so that no allowed name matches.
+    """
     names: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             names |= {alias.name.split(".")[0] for alias in node.names}
         elif isinstance(node, ast.ImportFrom):
-            names.add("midojo_mim" if node.level else (node.module or "").split(".")[0])
+            if node.level == 1:
+                names.add("midojo_mim")
+            elif node.level:
+                names.add("." * node.level + (node.module or ""))
+            else:
+                names.add((node.module or "").split(".")[0])
     return names
+
+
+DYNAMIC_IMPORTS = {"import_module", "__import__"}
+"""The calls that import a module by name at run time: invisible to a reading of the import statements."""
+
+
+def dynamic_import_lines(tree: ast.Module) -> list[int]:
+    """The line of every call that imports a module by name, however it is reached."""
+    lines: list[int] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else func.id if isinstance(func, ast.Name) else None
+            if name in DYNAMIC_IMPORTS:
+                lines.append(node.lineno)
+    return sorted(lines)
 
 
 def test_the_package_has_modules():
@@ -62,6 +89,43 @@ def test_every_import_is_the_standard_library_the_package_or_a_declared_dependen
     for path in MODULES:
         outside = imported_modules(ast.parse(path.read_text(encoding="utf-8"), filename=str(path))) - allowed
         assert outside == set(), f"{path.name} imports {sorted(outside)}, which pyproject.toml does not declare"
+
+
+def test_no_module_imports_a_module_by_name_at_run_time():
+    """A name built at run time can reach the harness past every other check here, so the package holds no such call."""
+    found = {
+        path.name: dynamic_import_lines(ast.parse(path.read_text(encoding="utf-8"), filename=str(path)))
+        for path in MODULES
+    }
+    assert {name: lines for name, lines in found.items() if lines} == {}
+
+
+@pytest.mark.parametrize(
+    ("source", "reached"),
+    [
+        ("import midojo.verifiers", {"midojo"}),
+        ("def f():\n    from midojo import verifiers", {"midojo"}),
+        ("from . import link", {"midojo_mim"}),
+        ("def f():\n    from ... import midojo", {"..."}),
+        ("from .. import midojo", {".."}),
+        ("from ..midojo import verifiers", {"..midojo"}),
+    ],
+)
+def test_the_import_reader_names_what_an_import_reaches(source: str, reached: set[str]):
+    assert imported_modules(ast.parse(source)) == reached
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import importlib\nimportlib.import_module('midojo.verifiers')",
+        "from importlib import import_module\ndef f():\n    return import_module('openai')",
+        "__import__('midojo')",
+        "import importlib\nimportlib.__import__('midojo')",
+    ],
+)
+def test_the_dynamic_import_reader_finds_a_call_that_imports_by_name(source: str):
+    assert dynamic_import_lines(ast.parse(source)) != []
 
 
 def test_the_distribution_depends_on_the_spec_and_never_on_the_harness_or_the_sdk():

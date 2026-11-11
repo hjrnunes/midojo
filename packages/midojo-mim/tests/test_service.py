@@ -239,6 +239,34 @@ async def test_the_first_frame_is_a_bind_and_anything_else_is_rejected():
         assert remote.service.published == ()
 
 
+@pytest.mark.asyncio
+async def test_a_plan_that_targets_a_tool_the_upstream_lacks_is_rejected_as_invalid_plan():
+    """The service can't place a payload on a tool the upstream never lists, so no binding exists to run it."""
+    missing = InjectionPlan(
+        (
+            InjectionInstruction(
+                channel=Channel.TOOL_OUTPUT,
+                payload=PAYLOAD,
+                target=InjectionTarget(tool="tool_that_does_not_exist"),
+                probe_key="w:missing",
+            ),
+        )
+    )
+    async with serving() as remote:
+        websocket = await upgrade(remote.url, CREDENTIAL)
+        with pytest.raises(RefusedError) as rejected:
+            await send_bind(websocket, upstream_url=remote.upstream_url, plan=missing)
+        assert rejected.value.kind == "invalid_plan"
+        assert "tool_that_does_not_exist" in rejected.value.detail
+        await websocket.wait_closed()
+        assert remote.service.published == ()
+        assert remote.events == []
+
+        # The same service binds a plan whose tool the upstream has: the refusal is the plan's, not the service's.
+        driver, _ = await remote.bind(plan=PLAN)
+        assert driver.bound.tools == ("get_weather", "list_alerts")
+
+
 # --- one binding ---
 
 

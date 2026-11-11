@@ -273,7 +273,7 @@ class RemoteInterception:
     stream per evaluation carries the interceptor's recording and environment
     calls back to the driver's own control plane, and the service gives the
     agent only a tool endpoint of its own (see
-    :mod:`midojo.interception_service`). ``credential`` is the service's bind
+    :mod:`midojo_mim.service`). ``credential`` is the service's bind
     credential: the service refuses a binding without it, and the agent never
     sees it.
 
