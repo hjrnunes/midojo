@@ -65,4 +65,4 @@ A grade that reads `security: True` says the agent did what the injection asked;
 
 The handle states its compatibility promise in [the handle's documentation](evaluation-handle.md#compatibility-promise): the names in `HANDLE_METHODS`, `HANDLE_API_VERSION`, `DEFAULT_MAX_LIVE_EVALUATIONS`, the exception classes and their `reason` strings, and new keyword arguments appended with defaults. [The changelog](../CHANGELOG.md) lists what this fork adds and the breaking changes, including the FastMCP pin, the document versions and the `midojo-sdk` base dependency.
 
-Where a placement matters, `midojo_sdk.placement.PlacementEngine` is the seam: the interceptor forwards and records a call, and the engine decides what the plan places in its result. `PlanPlacementEngine` is the plan's own engine; a host can pass another.
+Where a placement matters, `midojo_mim.placement.PlacementEngine` is the seam: the interceptor forwards and records a call, and the engine decides what the plan places in its result. `PlanPlacementEngine` is the plan's own engine; a host can pass another.

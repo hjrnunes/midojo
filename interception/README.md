@@ -24,7 +24,7 @@ The SDKs intercept tools the same way, so a suite's evaluation means the same th
 - **Errors don't end the run.** When a hook raises, the call is recorded with the error, and the agent gets the message as an error result. The agent carries on as it would after any failed tool call.
 - **No session, no call.** An intercepted call needs the evaluation's session. Without one, the SDK raises an error instead of letting the call go unrecorded.
 
-The Python SDK's placement logic lives in `midojo_sdk.placement` (`PlacementEngine`, with `PlanPlacementEngine` as the default), which matches a call to its plan's instructions and builds the result; `midojo_sdk.mcp.MidojoMCP` forwards the call, applies that result and records it. See the [Python SDK README](python-sdk/README.md#placement-engines).
+The Python interceptor's placement logic lives in the `midojo-mim` package, in `midojo_mim.placement` (`PlacementEngine`, with `PlanPlacementEngine` as the default), which matches a call to its plan's instructions and builds the result; `midojo_mim.mcp.MidojoMCP` forwards the call, applies that result and records it, and `midojo_sdk.mcp.MidojoMCP` is that face with agent mode added. See the [`midojo-mim` README](../packages/midojo-mim/README.md#placement-engines).
 
 Where each SDK stands:
 

@@ -466,6 +466,8 @@ export MIDOJO_INTERCEPTOR_CREDENTIAL=a-random-secret
 uv run midojo-intercept-serve --host 0.0.0.0 --port 8765
 ```
 
+The service is the [`midojo-mim`](packages/midojo-mim) package: it depends on [`midojo-spec`](packages/midojo-spec) and FastMCP and on nothing of this harness, so you can install it alone (`pip install midojo-mim`) or run its image, built from the repository root with `docker build -f packages/midojo-mim/Containerfile -t midojo-intercept-serve .`. This checkout installs it with the harness, which is why `uv run midojo-intercept-serve` works here.
+
 The service accepts `--host`, `--port`, `--advertise-host` and `--credential` (default: `MIDOJO_INTERCEPTOR_CREDENTIAL`), and prints the URL a driver dials. The driver dials out to the service over one WebSocket binding stream per evaluation, with the subprotocol `midojo-binding.v1`, so it holds no listening socket. Every call record, delivery fact and environment read crosses that stream and lands on the driver's own control plane.
 
 `midojo.evaluation_handle.open` selects the service in one of two ways:

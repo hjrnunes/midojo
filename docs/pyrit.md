@@ -8,8 +8,8 @@ uv run --frozen pytest -q tests/test_pyrit_route.py tests/test_pyrit_optional.py
 uv run --frozen pyright --project pyright-pyrit.json
 ```
 
-The extra supports PyRIT 1.1.x; the lock selects **1.1.0**. It includes
-`midojo-sdk[mcp]` for host interception. Core `import midojo` does not load
+The extra supports PyRIT 1.1.x; the lock selects **1.1.0**. Host interception
+needs `midojo-mim`, which `midojo` always installs. Core `import midojo` does not load
 PyRIT; importing `midojo.pyrit` without the extra raises an installation hint.
 
 The default Pyright configuration excludes the optional module, example and
