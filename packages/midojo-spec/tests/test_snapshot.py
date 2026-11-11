@@ -8,6 +8,10 @@ reproduce every one of them, and refuse the corruptions listed with it.
 One recorded value changed afterwards: the run summary inside the ``recorded-openshell-run``
 vector names its schema ``agent-run-summary-v1``, and that vector's ``snapshot_id`` is the
 digest of the edited snapshot.
+
+The refusals of ``NaN`` and the infinities came later: each holds the id the codec computed for
+that value's IEEE-754 bits before it refused them (checked with ``shasum -a 256``), which is the id
+MiDojo's own encoder names such a snapshot by, so only the refusal of the value stops it.
 """
 
 from __future__ import annotations
@@ -89,6 +93,9 @@ def test_the_vectors_cover_every_required_case():
         "float-edge",
         "non-ascii",
         "refused-non-json-value",
+        "refused-nan",
+        "refused-infinity",
+        "refused-negative-infinity",
         "refused-missing-field",
         "refused-tampered-id",
     } <= covered
@@ -104,12 +111,13 @@ def materialized(entry: dict) -> dict:
     """The snapshot a refusal entry describes, with the non-JSON value JSON can only name put back."""
     value = json.loads(json.dumps(entry["snapshot"]))
     refused = entry["refused_value"]
-    assert refused["type"] == "bytes"
+    assert refused["type"] in ("bytes", "float")
+    held = bytes.fromhex(refused["bytes_hex"]) if refused["type"] == "bytes" else float(refused["value"])
     for path in refused["paths"]:
         holder = value
         for step in path[:-1]:
             holder = holder[step]
-        holder[path[-1]] = bytes.fromhex(refused["bytes_hex"])
+        holder[path[-1]] = held
     return value
 
 
@@ -126,8 +134,12 @@ def test_every_refusal_case_raises_a_digest_fault(entry):
         # The fixture can only name the value, so the snapshot holding it is rebuilt before asking.
         with pytest.raises(DigestFault):
             snapshot_digest(materialized(entry))
+        # The id is the one that value's own bits digest to, so only the refusal of the value itself stops it.
+        resealed = {**materialized(entry), "snapshot_id": entry["snapshot_id"]}
         with pytest.raises(DigestFault):
-            verified({**materialized(entry), "snapshot_id": entry["snapshot_id"]})
+            verified(resealed)
+        with pytest.raises(DigestFault):
+            SnapshotView.from_json(resealed)
     else:
         with pytest.raises(DigestFault):
             snapshot_digest(entry["snapshot"])
@@ -203,8 +215,32 @@ def test_the_encoding_keeps_apart_the_values_json_does_not():
 
 @pytest.mark.parametrize(
     "value",
-    [b"x", bytearray(b"x"), (1,), {1}, frozenset({1}), object(), {1: "a"}],
-    ids=["bytes", "bytearray", "tuple", "set", "frozenset", "object", "non-text-key"],
+    [
+        b"x",
+        bytearray(b"x"),
+        (1,),
+        {1},
+        frozenset({1}),
+        object(),
+        {1: "a"},
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        [{"a": [float("nan")]}],
+    ],
+    ids=[
+        "bytes",
+        "bytearray",
+        "tuple",
+        "set",
+        "frozenset",
+        "object",
+        "non-text-key",
+        "nan",
+        "infinity",
+        "negative-infinity",
+        "nan-nested",
+    ],
 )
 def test_the_encoding_refuses_a_value_json_does_not_carry_back(value):
     with pytest.raises(DigestFault):
@@ -278,6 +314,57 @@ def test_a_missing_field_and_a_non_json_value_are_digest_faults_not_other_errors
         SnapshotView.from_json('[{"snapshot_id": "sha256:' + "0" * 64 + '"}]')
     with pytest.raises(DigestFault):
         SnapshotView.from_json('{"snapshot_id": "sha256:' + "0" * 64 + '", "evaluation_id": NaN}')
+
+
+@pytest.mark.parametrize("name", ["refused-infinity", "refused-negative-infinity"])
+def test_a_json_number_past_the_range_of_a_double_is_refused_like_the_bare_constants(name):
+    # json.loads reads 1e999 as an infinity without asking parse_constant, so this text holds a number
+    # whose own bits digest to the id it names.
+    entry = vector(name)
+    text = json.dumps({**materialized(entry), "snapshot_id": entry["snapshot_id"]}).replace("Infinity", "1e999")
+
+    decoded = json.loads(text)
+    assert decoded["environment"]["data"]["reading"] == float(entry["refused_value"]["value"])
+    assert decoded["snapshot_id"] == entry["snapshot_id"]
+    with pytest.raises(DigestFault, match="not a JSON value"):
+        SnapshotView.from_json(text)
+    with pytest.raises(DigestFault, match="not a JSON value"):
+        SnapshotView.from_json(text.encode())
+
+
+class _NameThatRaises(type):
+    """A metaclass whose classes' ``__name__`` raises while ``armed``, so the test runner can still name them."""
+
+    armed = False
+
+    @property
+    def __name__(cls) -> str:  # pyright: ignore[reportIncompatibleVariableOverride]
+        if _NameThatRaises.armed:
+            raise RuntimeError("the name is not readable")
+        return "Hostile"
+
+
+class _Hostile(metaclass=_NameThatRaises):
+    pass
+
+
+def test_an_object_whose_type_name_cannot_be_read_raises_its_own_error_and_is_never_verified():
+    # The module docstring says so: DigestFault covers what JSON can hold, and json.loads builds no such object.
+    snapshot = vector("minimal")["snapshot"]
+    holders = [
+        {**snapshot, "snapshot_id": _Hostile()},
+        {**snapshot, "environment": {"data": {"x": _Hostile()}}},
+    ]
+
+    _NameThatRaises.armed = True
+    try:
+        for held in holders:
+            with pytest.raises(RuntimeError, match="not readable"):
+                verified(held)
+            with pytest.raises(RuntimeError, match="not readable"):
+                SnapshotView.from_json(held)
+    finally:
+        _NameThatRaises.armed = False
 
 
 def test_a_digest_fault_is_a_value_error():

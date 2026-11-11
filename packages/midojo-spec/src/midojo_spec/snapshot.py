@@ -3,13 +3,14 @@
 MiDojo names a sealed snapshot by its own content (:func:`snapshot_digest`): ``sha256:<hex>``
 of a lossless encoding of everything in the snapshot but its ID. The encoding takes only JSON
 values: ``str``, ``int``, ``bool`` and ``None`` are themselves; a float is
-``["float", <its IEEE-754 bits as big-endian hex>]``, so ``-0.0``, every NaN payload and every
-sign encode apart from the values around them; a list is ``["list", [items]]``; an object is
-``["mapping", [[key, value], ...]]`` with its items sorted by their encoding, written compactly
-(``separators=(",", ":")``) with ASCII escapes. Two snapshots share an ID only when their
-content is equal, and a value JSON does not carry (``bytes``, a date, a tuple, a set, a
-non-finite float, a mapping with a key that is not text) is refused with :class:`DigestFault`
-rather than encoded: nothing JSON holds it back as.
+``["float", <its IEEE-754 bits as big-endian hex>]``, so ``-0.0`` encodes apart from ``0.0``;
+a list is ``["list", [items]]``; an object is ``["mapping", [[key, value], ...]]`` with its
+items sorted by their encoding, written compactly (``separators=(",", ":")``) with ASCII
+escapes. Two snapshots share an ID only when their content is equal, and a value JSON does not
+carry (``bytes``, a date, a tuple, a set, a non-finite float, a mapping with a key that is not
+text) is refused with :class:`DigestFault` rather than encoded: nothing JSON holds it back as.
+``NaN`` and the infinities are refused wherever they come from: the bare JSON constants, a
+number past the range of a double (``1e999``), and a ``float`` in an object a caller passes in.
 
 A snapshot is the JSON form ``GET /runs/{run_id}/evaluations/{eval_id}/snapshot`` serves, so a
 consumer reads the ID and verifies it (:func:`verified`, :class:`SnapshotView`) without any
@@ -35,12 +36,18 @@ Two rules keep a snapshot's ID stable across MiDojo releases:
 
 ``SNAPSHOT_DIGEST_VERSION`` names this encoding. A change to the bytes it hashes is a change to
 every ID, so it requires a new version and a migration, not a quiet edit.
+
+:class:`DigestFault` is the refusal of what a JSON document cannot hold. A Python object built
+to misbehave (a metaclass whose ``__name__`` raises, say) can raise its own error from a
+message that names its type instead, and an object that raises is never returned as verified.
+``json.loads`` builds no such object, so a snapshot read as JSON text never meets one.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import math
 import struct
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -170,16 +177,20 @@ def canonical(value: object) -> object:
     """Return the lossless encoding of a JSON ``value``: unequal values encode differently.
 
     Exactly ``str``, ``int`` and ``bool``, and ``None``, are themselves; any other value is a
-    ``[tag, content]`` pair, so no value is mistaken for another. A float is its IEEE-754 bits,
-    so every NaN payload and sign encodes apart too. Raises :class:`DigestFault` for any value
-    JSON does not carry (``bytes``, a tuple, a set, a date, a mapping with a key that is not text).
+    ``[tag, content]`` pair, so no value is mistaken for another. A finite float is its IEEE-754
+    bits, so ``-0.0`` encodes apart from ``0.0``. Raises :class:`DigestFault` for any value JSON
+    does not carry (``bytes``, a tuple, a set, a date, ``NaN`` or an infinity, a mapping with a
+    key that is not text).
     """
 
     kind = type(value)
     if value is None or kind in (str, int, bool):
         return value
     if kind is float:
-        return ["float", struct.pack(">d", cast("float", value)).hex()]
+        number = cast("float", value)
+        if not math.isfinite(number):
+            raise DigestFault(f"{number!r} is not a JSON value")
+        return ["float", struct.pack(">d", number).hex()]
     if kind is list:
         return ["list", [canonical(item) for item in cast("list[object]", value)]]
     if kind is dict:
@@ -214,7 +225,8 @@ class SnapshotView:
         """Read and verify a sealed snapshot, from its JSON text or from the JSON object itself.
 
         Raises :class:`DigestFault` for text that is not JSON (``NaN`` and the infinities
-        included), for JSON that is not an object, and for a snapshot :func:`verified` refuses.
+        included), for a number past the range of a double (``1e999``), for JSON that is not
+        an object, and for a snapshot :func:`verified` refuses.
         """
 
         snapshot = _read(data)

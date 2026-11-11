@@ -47,7 +47,7 @@ distribution, not the wheel.
 | --- | --- |
 | `vectors/judge/` | `request_id.json`, `request.json`, `response.json`, `exchange.json`; see its README |
 | `vectors/rubric/` | `vectors.json`, `fidelity.json`, `turns.json`; see its README |
-| `vectors/snapshot/` | `vectors.json`: snapshots and their digests |
+| `vectors/snapshot/` | `vectors.json`: snapshots and their digests, and the snapshots a reader must refuse (`refusal`; `refused_value` names the `bytes` or non-finite `float` that JSON cannot carry, and the `paths` it replaces) |
 | `vectors/plan/` | `plans.json` (accepted plans, defaults and refusals; an accepted plan is a fixpoint of decode then encode) and `before_call_arguments.json` (a plan as an older codec wrote it) |
 | `vectors/binding/` | `codec.json`: frames, answers, rejections and messages the link codec accepts and refuses |
 | `vectors/policy/` | `policy.json`: the tool policy's accepted and refused document data, and the tools it mirrors and blocks |

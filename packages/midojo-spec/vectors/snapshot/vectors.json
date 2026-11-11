@@ -1222,6 +1222,231 @@
     }
   },
   {
+    "name": "refused-nan",
+    "snapshot": {
+      "evaluation_id": "47ee75fed7",
+      "run_id": null,
+      "snapshot_id": "sha256:b48755da928db8fd65e6b19f7f3c1fda70700fd333a536446ac30c09578c793b",
+      "user_task_id": null,
+      "injection_task_id": null,
+      "agent_output": "ORD-101 holds tea.",
+      "pre_environment": {
+        "data": {
+          "reading": null
+        }
+      },
+      "environment": {
+        "data": {
+          "reading": null
+        }
+      },
+      "function_calls": [
+        {
+          "call_id": "c1",
+          "function": "lookup_order",
+          "args": {
+            "order_id": "ORD-101"
+          },
+          "result": "{\"item\":\"tea\"}",
+          "error": null,
+          "blocked": false,
+          "disposition": "forwarded",
+          "structured_content": {
+            "item": "tea"
+          },
+          "injection_outcomes": null,
+          "complete": true,
+          "provenance": "interceptor",
+          "timestamp": "2026-10-29T10:00:00+00:00",
+          "turn": 0,
+          "pre_environment": null,
+          "post_environment": null
+        }
+      ],
+      "turns": [
+        {
+          "index": 0,
+          "message": "Can you look up ORD-101 for me?",
+          "reply": "ORD-101 holds tea.",
+          "started_at": "2026-10-30T01:33:28.342822+00:00",
+          "ended_at": null
+        }
+      ],
+      "observations": {},
+      "evidence_status": {},
+      "sealed_at": "2026-10-29T10:02:41.831044+00:00",
+      "capture_failures": []
+    },
+    "snapshot_id": "sha256:b48755da928db8fd65e6b19f7f3c1fda70700fd333a536446ac30c09578c793b",
+    "refusal": "non-json",
+    "refused_value": {
+      "type": "float",
+      "value": "nan",
+      "paths": [
+        [
+          "pre_environment",
+          "data",
+          "reading"
+        ],
+        [
+          "environment",
+          "data",
+          "reading"
+        ]
+      ]
+    }
+  },
+  {
+    "name": "refused-infinity",
+    "snapshot": {
+      "evaluation_id": "47ee75fed7",
+      "run_id": null,
+      "snapshot_id": "sha256:fb184e7a8939efbc2e140eaacb4c64981c9abf4b4f1bf07b25555f475e2e6861",
+      "user_task_id": null,
+      "injection_task_id": null,
+      "agent_output": "ORD-101 holds tea.",
+      "pre_environment": {
+        "data": {
+          "reading": null
+        }
+      },
+      "environment": {
+        "data": {
+          "reading": null
+        }
+      },
+      "function_calls": [
+        {
+          "call_id": "c1",
+          "function": "lookup_order",
+          "args": {
+            "order_id": "ORD-101"
+          },
+          "result": "{\"item\":\"tea\"}",
+          "error": null,
+          "blocked": false,
+          "disposition": "forwarded",
+          "structured_content": {
+            "item": "tea"
+          },
+          "injection_outcomes": null,
+          "complete": true,
+          "provenance": "interceptor",
+          "timestamp": "2026-10-29T10:00:00+00:00",
+          "turn": 0,
+          "pre_environment": null,
+          "post_environment": null
+        }
+      ],
+      "turns": [
+        {
+          "index": 0,
+          "message": "Can you look up ORD-101 for me?",
+          "reply": "ORD-101 holds tea.",
+          "started_at": "2026-10-30T01:33:28.342822+00:00",
+          "ended_at": null
+        }
+      ],
+      "observations": {},
+      "evidence_status": {},
+      "sealed_at": "2026-10-29T10:02:41.831044+00:00",
+      "capture_failures": []
+    },
+    "snapshot_id": "sha256:fb184e7a8939efbc2e140eaacb4c64981c9abf4b4f1bf07b25555f475e2e6861",
+    "refusal": "non-json",
+    "refused_value": {
+      "type": "float",
+      "value": "inf",
+      "paths": [
+        [
+          "pre_environment",
+          "data",
+          "reading"
+        ],
+        [
+          "environment",
+          "data",
+          "reading"
+        ]
+      ]
+    }
+  },
+  {
+    "name": "refused-negative-infinity",
+    "snapshot": {
+      "evaluation_id": "47ee75fed7",
+      "run_id": null,
+      "snapshot_id": "sha256:5030b44504fb4c62c0a1acaee75c7243793697bf7007bdafb32ddd4348889c99",
+      "user_task_id": null,
+      "injection_task_id": null,
+      "agent_output": "ORD-101 holds tea.",
+      "pre_environment": {
+        "data": {
+          "reading": null
+        }
+      },
+      "environment": {
+        "data": {
+          "reading": null
+        }
+      },
+      "function_calls": [
+        {
+          "call_id": "c1",
+          "function": "lookup_order",
+          "args": {
+            "order_id": "ORD-101"
+          },
+          "result": "{\"item\":\"tea\"}",
+          "error": null,
+          "blocked": false,
+          "disposition": "forwarded",
+          "structured_content": {
+            "item": "tea"
+          },
+          "injection_outcomes": null,
+          "complete": true,
+          "provenance": "interceptor",
+          "timestamp": "2026-10-29T10:00:00+00:00",
+          "turn": 0,
+          "pre_environment": null,
+          "post_environment": null
+        }
+      ],
+      "turns": [
+        {
+          "index": 0,
+          "message": "Can you look up ORD-101 for me?",
+          "reply": "ORD-101 holds tea.",
+          "started_at": "2026-10-30T01:33:28.342822+00:00",
+          "ended_at": null
+        }
+      ],
+      "observations": {},
+      "evidence_status": {},
+      "sealed_at": "2026-10-29T10:02:41.831044+00:00",
+      "capture_failures": []
+    },
+    "snapshot_id": "sha256:5030b44504fb4c62c0a1acaee75c7243793697bf7007bdafb32ddd4348889c99",
+    "refusal": "non-json",
+    "refused_value": {
+      "type": "float",
+      "value": "-inf",
+      "paths": [
+        [
+          "pre_environment",
+          "data",
+          "reading"
+        ],
+        [
+          "environment",
+          "data",
+          "reading"
+        ]
+      ]
+    }
+  },
+  {
     "name": "refused-missing-field",
     "snapshot": {
       "evaluation_id": "47ee75fed7",
