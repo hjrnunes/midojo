@@ -272,3 +272,52 @@ def test_an_observed_answer_becomes_a_row_whose_digests_hold(model: Model) -> No
 
     assert digests_hold(exchange) is True
     assert exchange.request_sha256 == hashlib.sha256(b"u").hexdigest()
+
+
+@pytest.mark.parametrize("stage", ["_exchange", "_reply"])
+def test_an_interrupt_after_the_request_was_sent_is_observed_and_raised(
+    model: Model, monkeypatch: pytest.MonkeyPatch, stage: str
+) -> None:
+    model.answer(choices=[{"message": {"content": "x"}}])
+
+    def interrupted(*_args: Any, **_kwargs: Any) -> Any:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(rubric_judge, stage, interrupted)
+    seen: list[Observed] = []
+    call = http_judge(model.url, "judge-model", observer=lambda _messages, observed: seen.append(observed))
+
+    with pytest.raises(KeyboardInterrupt):
+        call(MESSAGES)
+
+    (observed,) = seen
+    assert observed.error == "KeyboardInterrupt"
+    assert observed.content is None
+    assert observed.http_status == (None if stage == "_exchange" else 200)
+
+
+def test_an_observer_that_fails_during_an_interrupt_leaves_the_interrupt_the_error(
+    model: Model, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def interrupted(*_args: Any, **_kwargs: Any) -> Any:
+        raise KeyboardInterrupt
+
+    def refuse(_messages: Any, _observed: Observed) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(rubric_judge, "_exchange", interrupted)
+
+    with pytest.raises(KeyboardInterrupt) as raised:
+        http_judge(model.url, "judge-model", observer=refuse)(MESSAGES)
+
+    assert raised.value.__notes__ == ["the observer failed too: OSError"]
+
+
+def test_an_observer_that_fails_while_a_call_fails_replaces_its_error(model: Model) -> None:
+    model.answer(500, error="down")
+
+    def refuse(_messages: Any, _observed: Observed) -> None:
+        raise OSError("disk full")
+
+    with pytest.raises(OSError, match="disk full"):
+        http_judge(model.url, "judge-model", observer=refuse)(MESSAGES)

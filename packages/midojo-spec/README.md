@@ -66,9 +66,16 @@ checks, so a secret that occurs in either (or in the marker, or that the marker 
 with its neighbours) is refused with `ExchangeFormatError`. A secret that two messages hold
 in halves is in neither, and is not found.
 
-`ExchangeLog` assumes one process appends to a file at a time. Every log on one file in a
-process shares a lock and a count, a write that fails is cut back so no partial row stays,
-and a file that ends in a partial row or does not read as a log is refused, not appended to.
+Every integer in a row fits a signed 64-bit integer (`MAX_INTEGER`, `MIN_INTEGER`); `usage`
+drops one that does not, and any other field refuses it.
+
+`ExchangeLog` assumes one process appends to a file at a time. It makes its path absolute
+when you make it, and every log on the same file in a process shares a lock and a count,
+whatever path each names (the file's device and inode decide, so a relative path, a symlink or
+a renamed directory cannot make two logs number rows alike). It reads the file again, strictly,
+when its size or modification time is not what the process left, and refuses a file that does
+not read as a log or ends in a partial row; an edit that keeps both size and modification time
+goes unnoticed until the file is read. A write that fails is cut back so no partial row stays.
 The module docstring of `judge_exchange` is the field reference.
 
 ```python

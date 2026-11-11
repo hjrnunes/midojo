@@ -504,3 +504,129 @@ def test_a_file_that_does_not_read_as_a_log_is_not_appended_to(tmp_path: Path) -
     with pytest.raises(ExchangeFormatError, match="line 2"):
         ExchangeLog(path).append(observed_exchange())
     assert path.read_bytes() == before
+
+
+def test_a_log_made_with_a_relative_path_stays_on_that_file_when_the_directory_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    here, there = tmp_path / "here", tmp_path / "there"
+    here.mkdir()
+    there.mkdir()
+    monkeypatch.chdir(here)
+    first = ExchangeLog("log.jsonl")
+    assert first.path.is_absolute()
+    first.append(observed_exchange())
+    monkeypatch.chdir(there)
+    second = ExchangeLog(here / "log.jsonl")
+
+    first.append(observed_exchange())
+    second.append(observed_exchange())
+
+    assert [exchange.sequence for exchange in record.read_exchanges(here / "log.jsonl")] == [0, 1, 2]
+    assert list(there.iterdir()) == []
+
+
+def test_a_log_whose_symlink_is_pointed_elsewhere_numbers_each_file_by_its_own_rows(tmp_path: Path) -> None:
+    def row(text: str) -> Exchange:
+        return observed_exchange(messages=[{"role": "user", "content": text}])
+
+    first, second, probe = tmp_path / "first.jsonl", tmp_path / "second.jsonl", tmp_path / "probe.jsonl"
+    for _ in range(2):
+        ExchangeLog(second).append(row("b"))
+    ExchangeLog(probe).append(row("a"))
+    # One long row in the first file, as many bytes as the two short rows of the second: the sizes
+    # match, so a count kept by size alone would be taken for the second file's.
+    padding = "a" * (1 + second.stat().st_size - probe.stat().st_size)
+    link = tmp_path / "log.jsonl"
+    link.symlink_to(first)
+    through_link = ExchangeLog(link)
+    through_link.append(row(padding))
+    assert first.stat().st_size == second.stat().st_size
+    link.unlink()
+    link.symlink_to(second)
+
+    appended = through_link.append(row("c"))
+
+    assert appended.sequence == 2
+    assert [exchange.sequence for exchange in record.read_exchanges(first)] == [0]
+    assert [exchange.sequence for exchange in record.read_exchanges(second)] == [0, 1, 2]
+
+
+def test_a_file_emptied_between_appends_is_numbered_from_zero(tmp_path: Path) -> None:
+    log = ExchangeLog(tmp_path / "log.jsonl")
+    log.append(observed_exchange())
+    log.append(observed_exchange())
+    log.path.write_bytes(b"")
+
+    assert log.append(observed_exchange()).sequence == 0
+
+
+def edit_in_place(path: Path, old: bytes, new: bytes) -> None:
+    assert len(old) == len(new)
+    path.write_bytes(path.read_bytes().replace(old, new, 1))
+
+
+def test_an_edit_that_keeps_the_size_but_not_the_time_makes_the_next_append_read_the_file(tmp_path: Path) -> None:
+    log = ExchangeLog(tmp_path / "log.jsonl")
+    log.append(observed_exchange())
+    before = log.path.stat()
+    edit_in_place(log.path, b"midojo.judge-exchange.v1", b"midojo.judge-exchange.v2")
+    os.utime(log.path, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000))
+    edited = log.path.read_bytes()
+
+    with pytest.raises(ExchangeFormatError, match=r'line 1: schema is not "midojo.judge-exchange.v1"'):
+        log.append(observed_exchange())
+    assert log.path.read_bytes() == edited
+
+
+def test_an_edit_that_keeps_the_size_and_the_time_is_not_noticed_until_the_file_is_read(tmp_path: Path) -> None:
+    log = ExchangeLog(tmp_path / "log.jsonl")
+    log.append(observed_exchange())
+    before = log.path.stat()
+    edit_in_place(log.path, b"midojo.judge-exchange.v1", b"midojo.judge-exchange.v2")
+    os.utime(log.path, ns=(before.st_atime_ns, before.st_mtime_ns))
+
+    assert log.append(observed_exchange()).sequence == 1
+    with pytest.raises(ExchangeFormatError, match="line 1"):
+        record.read_exchanges(log.path)
+
+
+def test_an_integer_the_file_cannot_hold_is_dropped_from_usage_and_refused_in_a_row(tmp_path: Path) -> None:
+    for value in (10**5000, record.MAX_INTEGER + 1, record.MIN_INTEGER - 1):
+        usage = {"a": value}
+        exchange = observed_exchange(
+            observed=Observed(started_at="2026-11-11T09:30:00.123+00:00", duration_ms=1, content="x", usage=usage)
+        )
+        forced = dataclasses.replace(exchange, usage=usage)
+        log = ExchangeLog(tmp_path / f"{abs(value) % 1000}.jsonl")
+
+        assert exchange.usage is None
+        assert record.exchange_problem({**forced.to_json(), "sequence": 0}) == "usage is not valid"
+        with pytest.raises(ExchangeFormatError, match="usage is not valid"):
+            log.append(forced)
+        assert not log.path.exists()
+
+
+def test_integers_at_the_edge_of_sixty_four_bits_are_kept_and_read_back(tmp_path: Path) -> None:
+    usage = {"high": record.MAX_INTEGER, "low": record.MIN_INTEGER}
+    log = ExchangeLog(tmp_path / "log.jsonl")
+    log.append(
+        observed_exchange(
+            observed=Observed(started_at="2026-11-11T09:30:00.123+00:00", duration_ms=1, content="x", usage=usage)
+        )
+    )
+
+    assert record.read_exchanges(log.path)[0].usage == usage
+
+
+@pytest.mark.parametrize("field", ["sequence", "ask", "duration_ms", "http_status"])
+def test_an_index_the_file_cannot_hold_is_refused_whole(field: str, tmp_path: Path) -> None:
+    row = {**copy.deepcopy(VALID[0]["row"]), field: 10**5000}
+
+    assert record.exchange_problem(row) == f"{field} is not valid"
+    with pytest.raises(ExchangeFormatError, match=f"{field} is not valid"):
+        Exchange.from_json(row)
+    path = tmp_path / "log.jsonl"
+    path.write_text(json.dumps({**VALID[0]["row"], field: 2**63}) + "\n", encoding="utf-8")
+    with pytest.raises(ExchangeFormatError, match=rf"line 1: {field} is not valid"):
+        record.read_exchanges(path)

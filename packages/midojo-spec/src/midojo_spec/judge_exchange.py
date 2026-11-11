@@ -66,6 +66,11 @@ FILENAME = "judge-record.jsonl"
 REDACTED = "[redacted]"
 # ``usage`` is the model service's own object; one nested deeper than this is dropped, not stored.
 MAX_USAGE_DEPTH = 8
+# Every integer in a row fits a signed 64-bit integer: one that does not is dropped from ``usage`` and
+# refused elsewhere, because Python writes only integers of up to 4300 digits as JSON and another
+# language's reader may hold no more than 64 bits.
+MAX_INTEGER = 2**63 - 1
+MIN_INTEGER = -(2**63)
 
 FIELDS = (
     "schema",
@@ -301,10 +306,11 @@ def redact(exchange: Exchange, secrets: Iterable[str]) -> Exchange:
     marker, so no tail of a secret that contains or overlaps another stays, and a marker is never
     scanned again. ``redacted`` is set when a replacement happened.
 
-    Raises :class:`ExchangeFormatError`, naming no secret, when a secret occurs in the ``model``
-    or the ``prompt_version`` (the identity a replay checks, which is never rewritten), in the
-    marker itself, or would be spelled by the marker and the text beside it. A secret that two
-    messages hold in halves is in neither and is not found.
+    Raises :class:`ExchangeFormatError` when a secret occurs in the ``model`` or the
+    ``prompt_version`` (the identity a replay checks, which is never rewritten), in the marker
+    itself, or would be spelled by the marker and the text beside it. The message is fixed text
+    and quotes no secret (a secret short enough to be a word of it, such as ``redacted``, is
+    still a word of it). A secret that two messages hold in halves is in neither and is not found.
     """
     found = sorted({secret for secret in secrets if secret}, key=len, reverse=True)
     if not found:
@@ -355,13 +361,16 @@ class _Shared:
 
     def __init__(self) -> None:
         self.lock = threading.Lock()
-        # The file's size after this process's last append, and the sequence its next row takes;
-        # a size that differs says someone else wrote, and the file is read again.
-        self.size: int | None = None
+        # The file's (size, modification time) after this process's last append, and the sequence its
+        # next row takes. A file that is not as this process left it was written by someone else, and
+        # it is read again before the next row.
+        self.stamp: tuple[int, int] | None = None
         self.next = 0
 
 
-_SHARED: dict[str, _Shared] = {}
+# Keyed by the file itself (device and inode), never by a path: a relative path, a symlink or a
+# renamed directory names the same file or another one, and only the open file knows which.
+_SHARED: dict[tuple[int, int], _Shared] = {}
 _SHARED_LOCK = threading.Lock()
 
 
@@ -369,17 +378,19 @@ class ExchangeLog:
     """An append-only JSONL file of exchanges: thread-safe, one row in one ``write``.
 
     One process appends to a file at a time. Every ``ExchangeLog`` on the same file in a process
-    shares one lock and one count, so two of them number the rows as one. ``sequence`` continues
-    from the rows already in the file, read strictly the first time and again whenever the file's
-    size is not what this process left. A file that ends in a partial row is refused, and a write
-    that fails is cut back to where it began, so no partial row stays. The file is created with
-    mode 0600, as it holds prompts and replies.
+    shares one lock and one count, so two of them number the rows as one, whatever path each names.
+    The path is made absolute when the log is made, so a later change of directory does not move it.
+
+    ``sequence`` continues from the rows already in the file, which are read strictly the first time
+    and again whenever the file's size or modification time is not what this process left: a file
+    that does not read as a log is refused, and so is one that ends in a partial row. An edit that
+    keeps both the size and the modification time is not noticed until the file is read. A write that
+    fails is cut back to where it began, so no partial row stays. The file is created with mode 0600,
+    as it holds prompts and replies.
     """
 
     def __init__(self, path: str | os.PathLike[str]) -> None:
-        self.path = Path(path)
-        with _SHARED_LOCK:
-            self._shared = _SHARED.setdefault(os.path.realpath(self.path), _Shared())
+        self.path = Path(os.path.abspath(path))
 
     def append(self, exchange: Exchange) -> Exchange:
         """Write ``exchange`` as the next row and return it with its ``sequence``.
@@ -389,46 +400,55 @@ class ExchangeLog:
         """
         if (problem := exchange_problem(dataclasses.replace(exchange, sequence=0).to_json())) is not None:
             raise ExchangeFormatError(problem)
-        shared = self._shared
-        with shared.lock:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            descriptor = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
-            try:
-                size = os.fstat(descriptor).st_size
-                if shared.size != size:
-                    shared.next, shared.size = self._continued(size), size
-                row = dataclasses.replace(exchange, sequence=shared.next)
-                line = json.dumps(row.to_json(), ensure_ascii=True, separators=(",", ":")).encode("ascii") + b"\n"
-                try:
-                    view = memoryview(line)
-                    while view:
-                        view = view[os.write(descriptor, view) :]
-                except BaseException:
-                    # Cut the write back: a torn row left here would be glued to the next one.
-                    cut = False
-                    with suppress(OSError):
-                        os.ftruncate(descriptor, size)
-                        cut = True
-                    if not cut:
-                        shared.size = None
-                    raise
-                shared.size, shared.next = size + len(line), shared.next + 1
-                return row
-            finally:
-                os.close(descriptor)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(self.path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            identity = os.fstat(descriptor)
+            with _SHARED_LOCK:
+                shared = _SHARED.setdefault((identity.st_dev, identity.st_ino), _Shared())
+            with shared.lock:
+                return self._append(descriptor, shared, exchange)
+        finally:
+            os.close(descriptor)
 
-    def _continued(self, size: int) -> int:
-        """The sequence the next row takes in a file of ``size`` bytes: after the last row, read strictly."""
-        if size == 0:
-            return 0
-        with self.path.open("rb") as existing:
-            existing.seek(-1, os.SEEK_END)
-            if existing.read(1) != b"\n":
-                raise ExchangeFormatError("the file ends in a partial row; nothing was written")
-        rows = read_exchanges(self.path)
-        last = rows[-1].sequence if rows else -1
-        assert last is not None  # a row read from a file has its sequence
-        return last + 1
+    @staticmethod
+    def _append(descriptor: int, shared: _Shared, exchange: Exchange) -> Exchange:
+        status = os.fstat(descriptor)
+        size = status.st_size
+        if size == 0 or shared.stamp != (size, status.st_mtime_ns):
+            shared.next = _continued(descriptor, size)
+        row = dataclasses.replace(exchange, sequence=shared.next)
+        line = json.dumps(row.to_json(), ensure_ascii=True, separators=(",", ":")).encode("ascii") + b"\n"
+        try:
+            view = memoryview(line)
+            while view:
+                view = view[os.write(descriptor, view) :]
+        except BaseException:
+            # Cut the write back: a torn row left here would be glued to the next one. Whether or not
+            # the cut works, the file is read again before the next row.
+            shared.stamp = None
+            with suppress(OSError):
+                os.ftruncate(descriptor, size)
+            raise
+        after = os.fstat(descriptor)
+        shared.stamp = (after.st_size, after.st_mtime_ns)
+        shared.next += 1
+        return row
+
+
+def _continued(descriptor: int, size: int) -> int:
+    """The sequence the next row takes in the open file of ``size`` bytes: after the last row, read strictly."""
+    if size == 0:
+        return 0
+    with os.fdopen(os.dup(descriptor), "rb") as existing:
+        existing.seek(-1, os.SEEK_END)
+        if existing.read(1) != b"\n":
+            raise ExchangeFormatError("the file ends in a partial row; nothing was written")
+        existing.seek(0)
+        rows = _read(existing)
+    last = rows[-1].sequence if rows else -1
+    assert last is not None  # a row read from a file has its sequence
+    return last + 1
 
 
 def read_exchanges(path: str | os.PathLike[str]) -> list[Exchange]:
@@ -437,21 +457,25 @@ def read_exchanges(path: str | os.PathLike[str]) -> list[Exchange]:
     A blank line, a repeated JSON key, ``NaN`` and a sequence that does not rise are all
     refused, with the line's number and the rule.
     """
+    with Path(path).open("rb") as lines:
+        return _read(lines)
+
+
+def _read(lines: Iterable[bytes]) -> list[Exchange]:
     exchanges: list[Exchange] = []
     last = -1
-    with Path(path).open("rb") as lines:
-        for number, line in enumerate(lines, start=1):
-            try:
-                row = json.loads(line.decode("utf-8"), object_pairs_hook=_no_repeats, parse_constant=_no_constants)
-                exchange = Exchange.from_json(row)
-            except (ValueError, RecursionError) as problem:
-                reason = problem if isinstance(problem, ExchangeFormatError) else "it is not JSON"
-                raise ExchangeFormatError(f"line {number}: {reason}") from None
-            assert exchange.sequence is not None
-            if exchange.sequence <= last:
-                raise ExchangeFormatError(f"line {number}: sequence does not rise")
-            last = exchange.sequence
-            exchanges.append(exchange)
+    for number, line in enumerate(lines, start=1):
+        try:
+            row = json.loads(line.decode("utf-8"), object_pairs_hook=_no_repeats, parse_constant=_no_constants)
+            exchange = Exchange.from_json(row)
+        except (ValueError, RecursionError) as problem:
+            reason = problem if isinstance(problem, ExchangeFormatError) else "it is not JSON"
+            raise ExchangeFormatError(f"line {number}: {reason}") from None
+        assert exchange.sequence is not None
+        if exchange.sequence <= last:
+            raise ExchangeFormatError(f"line {number}: sequence does not rise")
+        last = exchange.sequence
+        exchanges.append(exchange)
     return exchanges
 
 
@@ -532,13 +556,16 @@ def _usage_fits(usage: Any) -> bool:
         elif kind is float:
             if not math.isfinite(value):
                 return False
-        elif kind not in (str, int, bool, type(None)):
+        elif kind is int:
+            if not MIN_INTEGER <= value <= MAX_INTEGER:
+                return False
+        elif kind not in (str, bool, type(None)):
             return False
     return True
 
 
 def _index(value: Any) -> bool:
-    return type(value) is int and value >= 0
+    return type(value) is int and 0 <= value <= MAX_INTEGER
 
 
 def _matches(pattern: re.Pattern[str], value: Any) -> bool:

@@ -522,9 +522,12 @@ def http_judge(
     ``observer(messages, observed)`` is called once for each request sent, after the
     outcome is known and before the call returns or raises: with the reply's text and usage
     when the model answered, and with the failed call's label when it did not (the exception's
-    class name for a failure this module does not name, which is raised as it was). The call's
+    class name for a failure this module does not name, an interrupt included, which is raised as
+    it was). The call's
     own result is unchanged. An observer that raises stops the call with that exception, so
-    a request that cannot be recorded is never taken for one that was.
+    a request that cannot be recorded is never taken for one that was; the exception is the
+    caller's own interrupt, exit or cancellation when that is what ended the call (the
+    observer's failure is then a note on it).
     """
 
     url = judge_url.rstrip("/") + "/chat/completions"
@@ -543,6 +546,15 @@ def http_judge(
                 elapsed = round((time.monotonic() - started) * 1000)
                 observer(messages, Observed(started_at=started_at, duration_ms=elapsed, **seen))
 
+        def observe_ending(exc: BaseException, **seen: Any) -> None:
+            try:
+                observe(error=type(exc).__name__, **seen)
+            except Exception as failure:
+                if isinstance(exc, Exception):
+                    raise
+                # An interrupt, an exit or a cancellation is what the caller must see, not the observer's failure.
+                exc.add_note(f"the observer failed too: {type(failure).__name__}")
+
         try:
             answer = _exchange(request, timeout, deadline)
         except _Rejected:
@@ -551,17 +563,17 @@ def http_judge(
         except JudgeCallError as exc:
             observe(http_status=exc.status, error=exc.label)
             raise
-        except Exception as exc:
-            # A request that was sent leaves a record whatever went wrong after it.
-            observe(error=type(exc).__name__)
+        except BaseException as exc:
+            # A request that was sent leaves a record whatever ended it, an interrupt included.
+            observe_ending(exc)
             raise
         try:
             reply = _reply(answer)
         except JudgeCallError as exc:
             observe(http_status=exc.status, error=exc.label)
             raise
-        except Exception as exc:
-            observe(http_status=answer.status, error=type(exc).__name__)
+        except BaseException as exc:
+            observe_ending(exc, http_status=answer.status)
             raise
         text = reply.content if isinstance(reply.content, str) else None
         observe(
