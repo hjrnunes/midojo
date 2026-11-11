@@ -56,7 +56,7 @@ import threading
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -597,6 +597,7 @@ def _timestamp(value: Any) -> bool:
     if type(value) is not str:
         return False
     try:
-        return datetime.fromisoformat(value).tzinfo is not None
+        # UTC is part of the format: a reader that took any zone would accept a time its writers never produce.
+        return datetime.fromisoformat(value).utcoffset() == timedelta(0)
     except ValueError:
         return False
