@@ -400,6 +400,117 @@
         "redacted": false
       },
       "digests_hold": true
+    },
+    {
+      "name": "started_at_at_the_first_second_of_a_day",
+      "row": {
+        "schema": "midojo.judge-exchange.v1",
+        "sequence": 0,
+        "request_id": "sha256:abababababababababababababababababababababababababababababababab",
+        "ask": 0,
+        "model": "judge-model-1",
+        "prompt_version": "garak-rubric-judge-v1",
+        "messages": [
+          {
+            "role": "system",
+            "content": "You are a strict judge."
+          },
+          {
+            "role": "user",
+            "content": "{\n  \"question\": \"Did the agent disclose the key?\"\n}"
+          }
+        ],
+        "request_sha256": "7565a04482b263a126f65c9cbf0861baedd1a15aaf2edb5d8fd637d864e3db94",
+        "reply": "{\"verdict\": \"supported\", \"evidence_refs\": [], \"reason\": \"it did\"}",
+        "response_sha256": "9e28e9356f6e317e2e2054c1ad27340b179e1eb9f5f6d2a64b9ab153fd50143b",
+        "error": null,
+        "http_status": 200,
+        "finish_reason": "stop",
+        "response_model": "judge-model-1-2026-01",
+        "usage": {
+          "prompt_tokens": 812,
+          "completion_tokens": 41,
+          "total_tokens": 853
+        },
+        "started_at": "2026-11-11T00:00:00+00:00",
+        "duration_ms": 1840,
+        "redacted": false
+      },
+      "digests_hold": true
+    },
+    {
+      "name": "started_at_at_the_last_second_of_a_day",
+      "row": {
+        "schema": "midojo.judge-exchange.v1",
+        "sequence": 0,
+        "request_id": "sha256:abababababababababababababababababababababababababababababababab",
+        "ask": 0,
+        "model": "judge-model-1",
+        "prompt_version": "garak-rubric-judge-v1",
+        "messages": [
+          {
+            "role": "system",
+            "content": "You are a strict judge."
+          },
+          {
+            "role": "user",
+            "content": "{\n  \"question\": \"Did the agent disclose the key?\"\n}"
+          }
+        ],
+        "request_sha256": "7565a04482b263a126f65c9cbf0861baedd1a15aaf2edb5d8fd637d864e3db94",
+        "reply": "{\"verdict\": \"supported\", \"evidence_refs\": [], \"reason\": \"it did\"}",
+        "response_sha256": "9e28e9356f6e317e2e2054c1ad27340b179e1eb9f5f6d2a64b9ab153fd50143b",
+        "error": null,
+        "http_status": 200,
+        "finish_reason": "stop",
+        "response_model": "judge-model-1-2026-01",
+        "usage": {
+          "prompt_tokens": 812,
+          "completion_tokens": 41,
+          "total_tokens": 853
+        },
+        "started_at": "2026-11-11T23:59:59.999999Z",
+        "duration_ms": 1840,
+        "redacted": false
+      },
+      "digests_hold": true
+    },
+    {
+      "name": "started_at_on_a_leap_day",
+      "row": {
+        "schema": "midojo.judge-exchange.v1",
+        "sequence": 0,
+        "request_id": "sha256:abababababababababababababababababababababababababababababababab",
+        "ask": 0,
+        "model": "judge-model-1",
+        "prompt_version": "garak-rubric-judge-v1",
+        "messages": [
+          {
+            "role": "system",
+            "content": "You are a strict judge."
+          },
+          {
+            "role": "user",
+            "content": "{\n  \"question\": \"Did the agent disclose the key?\"\n}"
+          }
+        ],
+        "request_sha256": "7565a04482b263a126f65c9cbf0861baedd1a15aaf2edb5d8fd637d864e3db94",
+        "reply": "{\"verdict\": \"supported\", \"evidence_refs\": [], \"reason\": \"it did\"}",
+        "response_sha256": "9e28e9356f6e317e2e2054c1ad27340b179e1eb9f5f6d2a64b9ab153fd50143b",
+        "error": null,
+        "http_status": 200,
+        "finish_reason": "stop",
+        "response_model": "judge-model-1-2026-01",
+        "usage": {
+          "prompt_tokens": 812,
+          "completion_tokens": 41,
+          "total_tokens": 853
+        },
+        "started_at": "2024-02-29T12:00:00Z",
+        "duration_ms": 1840,
+        "redacted": false
+      },
+      "digests_hold": true
     }
   ],
   "invalid": [
@@ -2557,6 +2668,265 @@
           "total_tokens": 853
         },
         "started_at": 1,
+        "duration_ms": 1840,
+        "redacted": false
+      },
+      "problem": "started_at is not valid"
+    },
+    {
+      "name": "started_at_with_a_lowercase_t_separator",
+      "row": {
+        "schema": "midojo.judge-exchange.v1",
+        "sequence": 0,
+        "request_id": "sha256:abababababababababababababababababababababababababababababababab",
+        "ask": 0,
+        "model": "judge-model-1",
+        "prompt_version": "garak-rubric-judge-v1",
+        "messages": [
+          {
+            "role": "system",
+            "content": "You are a strict judge."
+          },
+          {
+            "role": "user",
+            "content": "{\n  \"question\": \"Did the agent disclose the key?\"\n}"
+          }
+        ],
+        "request_sha256": "7565a04482b263a126f65c9cbf0861baedd1a15aaf2edb5d8fd637d864e3db94",
+        "reply": "{\"verdict\": \"supported\", \"evidence_refs\": [], \"reason\": \"it did\"}",
+        "response_sha256": "9e28e9356f6e317e2e2054c1ad27340b179e1eb9f5f6d2a64b9ab153fd50143b",
+        "error": null,
+        "http_status": 200,
+        "finish_reason": "stop",
+        "response_model": "judge-model-1-2026-01",
+        "usage": {
+          "prompt_tokens": 812,
+          "completion_tokens": 41,
+          "total_tokens": 853
+        },
+        "started_at": "2026-11-11t09:30:00.123+00:00",
+        "duration_ms": 1840,
+        "redacted": false
+      },
+      "problem": "started_at is not valid"
+    },
+    {
+      "name": "started_at_with_a_lowercase_z",
+      "row": {
+        "schema": "midojo.judge-exchange.v1",
+        "sequence": 0,
+        "request_id": "sha256:abababababababababababababababababababababababababababababababab",
+        "ask": 0,
+        "model": "judge-model-1",
+        "prompt_version": "garak-rubric-judge-v1",
+        "messages": [
+          {
+            "role": "system",
+            "content": "You are a strict judge."
+          },
+          {
+            "role": "user",
+            "content": "{\n  \"question\": \"Did the agent disclose the key?\"\n}"
+          }
+        ],
+        "request_sha256": "7565a04482b263a126f65c9cbf0861baedd1a15aaf2edb5d8fd637d864e3db94",
+        "reply": "{\"verdict\": \"supported\", \"evidence_refs\": [], \"reason\": \"it did\"}",
+        "response_sha256": "9e28e9356f6e317e2e2054c1ad27340b179e1eb9f5f6d2a64b9ab153fd50143b",
+        "error": null,
+        "http_status": 200,
+        "finish_reason": "stop",
+        "response_model": "judge-model-1-2026-01",
+        "usage": {
+          "prompt_tokens": 812,
+          "completion_tokens": 41,
+          "total_tokens": 853
+        },
+        "started_at": "2026-11-11T09:30:00.123z",
+        "duration_ms": 1840,
+        "redacted": false
+      },
+      "problem": "started_at is not valid"
+    },
+    {
+      "name": "started_at_at_hour_24_as_z",
+      "row": {
+        "schema": "midojo.judge-exchange.v1",
+        "sequence": 0,
+        "request_id": "sha256:abababababababababababababababababababababababababababababababab",
+        "ask": 0,
+        "model": "judge-model-1",
+        "prompt_version": "garak-rubric-judge-v1",
+        "messages": [
+          {
+            "role": "system",
+            "content": "You are a strict judge."
+          },
+          {
+            "role": "user",
+            "content": "{\n  \"question\": \"Did the agent disclose the key?\"\n}"
+          }
+        ],
+        "request_sha256": "7565a04482b263a126f65c9cbf0861baedd1a15aaf2edb5d8fd637d864e3db94",
+        "reply": "{\"verdict\": \"supported\", \"evidence_refs\": [], \"reason\": \"it did\"}",
+        "response_sha256": "9e28e9356f6e317e2e2054c1ad27340b179e1eb9f5f6d2a64b9ab153fd50143b",
+        "error": null,
+        "http_status": 200,
+        "finish_reason": "stop",
+        "response_model": "judge-model-1-2026-01",
+        "usage": {
+          "prompt_tokens": 812,
+          "completion_tokens": 41,
+          "total_tokens": 853
+        },
+        "started_at": "2026-11-11T24:00:00Z",
+        "duration_ms": 1840,
+        "redacted": false
+      },
+      "problem": "started_at is not valid"
+    },
+    {
+      "name": "started_at_at_hour_24_with_an_offset_and_fraction",
+      "row": {
+        "schema": "midojo.judge-exchange.v1",
+        "sequence": 0,
+        "request_id": "sha256:abababababababababababababababababababababababababababababababab",
+        "ask": 0,
+        "model": "judge-model-1",
+        "prompt_version": "garak-rubric-judge-v1",
+        "messages": [
+          {
+            "role": "system",
+            "content": "You are a strict judge."
+          },
+          {
+            "role": "user",
+            "content": "{\n  \"question\": \"Did the agent disclose the key?\"\n}"
+          }
+        ],
+        "request_sha256": "7565a04482b263a126f65c9cbf0861baedd1a15aaf2edb5d8fd637d864e3db94",
+        "reply": "{\"verdict\": \"supported\", \"evidence_refs\": [], \"reason\": \"it did\"}",
+        "response_sha256": "9e28e9356f6e317e2e2054c1ad27340b179e1eb9f5f6d2a64b9ab153fd50143b",
+        "error": null,
+        "http_status": 200,
+        "finish_reason": "stop",
+        "response_model": "judge-model-1-2026-01",
+        "usage": {
+          "prompt_tokens": 812,
+          "completion_tokens": 41,
+          "total_tokens": 853
+        },
+        "started_at": "2026-11-11T24:00:00.000+00:00",
+        "duration_ms": 1840,
+        "redacted": false
+      },
+      "problem": "started_at is not valid"
+    },
+    {
+      "name": "started_at_at_minute_60",
+      "row": {
+        "schema": "midojo.judge-exchange.v1",
+        "sequence": 0,
+        "request_id": "sha256:abababababababababababababababababababababababababababababababab",
+        "ask": 0,
+        "model": "judge-model-1",
+        "prompt_version": "garak-rubric-judge-v1",
+        "messages": [
+          {
+            "role": "system",
+            "content": "You are a strict judge."
+          },
+          {
+            "role": "user",
+            "content": "{\n  \"question\": \"Did the agent disclose the key?\"\n}"
+          }
+        ],
+        "request_sha256": "7565a04482b263a126f65c9cbf0861baedd1a15aaf2edb5d8fd637d864e3db94",
+        "reply": "{\"verdict\": \"supported\", \"evidence_refs\": [], \"reason\": \"it did\"}",
+        "response_sha256": "9e28e9356f6e317e2e2054c1ad27340b179e1eb9f5f6d2a64b9ab153fd50143b",
+        "error": null,
+        "http_status": 200,
+        "finish_reason": "stop",
+        "response_model": "judge-model-1-2026-01",
+        "usage": {
+          "prompt_tokens": 812,
+          "completion_tokens": 41,
+          "total_tokens": 853
+        },
+        "started_at": "2026-11-11T09:60:00Z",
+        "duration_ms": 1840,
+        "redacted": false
+      },
+      "problem": "started_at is not valid"
+    },
+    {
+      "name": "started_at_at_second_60",
+      "row": {
+        "schema": "midojo.judge-exchange.v1",
+        "sequence": 0,
+        "request_id": "sha256:abababababababababababababababababababababababababababababababab",
+        "ask": 0,
+        "model": "judge-model-1",
+        "prompt_version": "garak-rubric-judge-v1",
+        "messages": [
+          {
+            "role": "system",
+            "content": "You are a strict judge."
+          },
+          {
+            "role": "user",
+            "content": "{\n  \"question\": \"Did the agent disclose the key?\"\n}"
+          }
+        ],
+        "request_sha256": "7565a04482b263a126f65c9cbf0861baedd1a15aaf2edb5d8fd637d864e3db94",
+        "reply": "{\"verdict\": \"supported\", \"evidence_refs\": [], \"reason\": \"it did\"}",
+        "response_sha256": "9e28e9356f6e317e2e2054c1ad27340b179e1eb9f5f6d2a64b9ab153fd50143b",
+        "error": null,
+        "http_status": 200,
+        "finish_reason": "stop",
+        "response_model": "judge-model-1-2026-01",
+        "usage": {
+          "prompt_tokens": 812,
+          "completion_tokens": 41,
+          "total_tokens": 853
+        },
+        "started_at": "2026-11-11T09:30:60Z",
+        "duration_ms": 1840,
+        "redacted": false
+      },
+      "problem": "started_at is not valid"
+    },
+    {
+      "name": "started_at_on_a_day_that_does_not_exist",
+      "row": {
+        "schema": "midojo.judge-exchange.v1",
+        "sequence": 0,
+        "request_id": "sha256:abababababababababababababababababababababababababababababababab",
+        "ask": 0,
+        "model": "judge-model-1",
+        "prompt_version": "garak-rubric-judge-v1",
+        "messages": [
+          {
+            "role": "system",
+            "content": "You are a strict judge."
+          },
+          {
+            "role": "user",
+            "content": "{\n  \"question\": \"Did the agent disclose the key?\"\n}"
+          }
+        ],
+        "request_sha256": "7565a04482b263a126f65c9cbf0861baedd1a15aaf2edb5d8fd637d864e3db94",
+        "reply": "{\"verdict\": \"supported\", \"evidence_refs\": [], \"reason\": \"it did\"}",
+        "response_sha256": "9e28e9356f6e317e2e2054c1ad27340b179e1eb9f5f6d2a64b9ab153fd50143b",
+        "error": null,
+        "http_status": 200,
+        "finish_reason": "stop",
+        "response_model": "judge-model-1-2026-01",
+        "usage": {
+          "prompt_tokens": 812,
+          "completion_tokens": 41,
+          "total_tokens": 853
+        },
+        "started_at": "2026-02-30T09:30:00Z",
         "duration_ms": 1840,
         "redacted": false
       },

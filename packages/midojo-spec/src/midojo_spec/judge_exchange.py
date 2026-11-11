@@ -593,16 +593,20 @@ def _messages(value: Any) -> bool:
     )
 
 
-_UTC_TIME = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?(?:\+00:00|Z)")
-"""The shape of ``started_at``: an extended-format date and time, seconds with an optional fraction, and UTC spelled
-``+00:00`` (what the writer emits) or ``Z`` (the ISO 8601 designator)."""
+_UTC_TIME = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\.[0-9]{1,6})?(?:\+00:00|Z)"
+)
+"""The shape of ``started_at``: an extended-format date and a time of day (hour 00 to 23, minute and second 00 to 59),
+seconds with an optional fraction, and UTC spelled ``+00:00`` (what the writer emits) or ``Z`` (the ISO 8601
+designator). The separator and the ``Z`` are upper case."""
 
 
 def _timestamp(value: Any) -> bool:
     if type(value) is not str:
         return False
     # The shape is fixed, not whatever ``fromisoformat`` takes: it reads ``+0000``, ``-00:00`` and ``+00:00:00.1`` as a
-    # zero offset, any one character as the separator and a week date as a date. The parse then checks the values.
+    # zero offset, any one character as the separator and a week date as a date, and Python 3.14 reads hour 24 as the
+    # next day's midnight. The parse then checks the date, which the shape leaves to it.
     if _UTC_TIME.fullmatch(value) is None:
         return False
     try:

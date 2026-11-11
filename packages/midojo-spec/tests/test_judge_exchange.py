@@ -9,6 +9,7 @@ import os
 import stat
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -59,6 +60,23 @@ def test_an_invalid_row_has_its_problem(case: dict[str, Any]) -> None:
     assert record.exchange_problem(case["row"]) == case["problem"]
     with pytest.raises(ExchangeFormatError, match=case["problem"]):
         Exchange.from_json(case["row"])
+
+
+CALENDAR_ONLY = {"started_at_with_a_month_that_does_not_exist", "started_at_on_a_day_that_does_not_exist"}
+"""The refused timestamps that only a date check refuses: their shape is right and the date is not."""
+SHAPE_REFUSED = [
+    case for case in INVALID if case["name"].startswith("started_at") and case["name"] not in CALENDAR_ONLY
+]
+
+
+@pytest.mark.parametrize("case", SHAPE_REFUSED, ids=[case["name"] for case in SHAPE_REFUSED])
+def test_the_shape_of_started_at_refuses_a_row_whatever_the_interpreters_parser_reads(
+    case: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``fromisoformat`` reads more on each Python release (3.14 reads hour 24), so the shape refuses these alone."""
+    monkeypatch.setattr(record, "datetime", SimpleNamespace(fromisoformat=lambda value: None))
+
+    assert record.exchange_problem(case["row"]) == case["problem"]
 
 
 @pytest.mark.parametrize("case", REDACTION, ids=[case["name"] for case in REDACTION])
