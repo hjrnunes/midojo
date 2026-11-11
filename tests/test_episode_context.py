@@ -30,7 +30,7 @@ import pydantic
 import pytest
 from fastapi.testclient import TestClient
 from fastmcp import Client
-from midojo_sdk.mcp import MidojoMCP
+from midojo_mim.mcp import MidojoMCP
 from midojo_spec.injection import Channel, InjectionInstruction, InjectionPlan, InjectionTarget
 from midojo_spec.policy import ToolPolicy
 from midojo_spec.recorder import ControlPlaneRejectedError, RejectionKind

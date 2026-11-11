@@ -2,7 +2,7 @@
 
 One :class:`LinkSession` is one binding: an anyio memory-stream pair carries
 the frames, a :class:`LinkDispatcher` applies them to the control plane's
-session on this side, and the :class:`~midojo_sdk.link.Link` plus its
+session on this side, and the :class:`~midojo_mim.link.Link` plus its
 recorder and world are the service side. Nothing here opens a socket.
 
 A test injects a loss where it wants it. :meth:`LinkSession.drop_frame` loses
@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import anyio
-from midojo_sdk.link import Link, LinkRecorder, LinkWorld
+from midojo_mim.link import Link, LinkRecorder, LinkWorld
 from midojo_spec.link import encode_frame
 from midojo_spec.recorder import EnvironmentRevision
 

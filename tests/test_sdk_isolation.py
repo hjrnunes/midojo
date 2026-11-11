@@ -1,8 +1,8 @@
 """The SDK is a client of MiDojo's wire contract, never of MiDojo's runtime.
 
-The SDK imports ``midojo_spec`` (the contract's codecs, rules and records) and nothing from ``midojo``.
-Its modules that need no third-party package (the placement engine and the link) import with ``midojo`` and
-every other package unavailable.
+The SDK imports ``midojo_spec`` (the contract's codecs, rules and records), ``midojo_mim`` (the MCP face its agent
+mode extends) and nothing from ``midojo``. The package itself needs no third-party package: it imports with
+``midojo`` and every other package unavailable.
 """
 
 from __future__ import annotations
@@ -44,8 +44,8 @@ def outside_the_standard_library():
 """
 
 IMPORT_THE_SDK = """
-import midojo_sdk.link
-import midojo_sdk.placement
+import midojo_sdk
+import midojo_sdk.session
 print(outside_the_standard_library())
 """
 
@@ -71,7 +71,7 @@ def test_the_sdk_never_imports_midojo():
             elif isinstance(node, ast.ImportFrom) and node.module is not None and _is_midojo(node.module):
                 offenders.append(f"{path.name}: from {node.module} import")
     assert offenders == [], offenders
-    assert len(files) >= 8, files
+    assert len(files) >= 6, files
 
 
 def _is_midojo(name: str) -> bool:

@@ -70,6 +70,15 @@ rather than keeping it open.
 BIND_PATH = "/v1/bindings"
 """Where a driver upgrades its binding stream on the service: ``GET`` with the bind credential and the subprotocol."""
 
+URL_ENV = "MIDOJO_INTERCEPTOR_URL"
+"""Where a driver finds the interceptor service when it is given none: the service's base URL."""
+
+CREDENTIAL_ENV = "MIDOJO_INTERCEPTOR_CREDENTIAL"
+"""The service's bind credential: the service reads it at start and a driver sends it, so both name one variable.
+
+It comes with ``URL_ENV`` on the driver's side, and neither name alone selects a service.
+"""
+
 LINK_LOST_REASON = "link-lost"
 """Why a handle ends when its binding stream is lost: ``HandleError.reason`` on the driver side."""
 
@@ -323,6 +332,7 @@ __all__ = [
     "BIND_FIELDS",
     "BIND_PATH",
     "BOUND_FIELDS",
+    "CREDENTIAL_ENV",
     "HEARTBEAT_EXPIRY_SECONDS",
     "HEARTBEAT_INTERVAL_SECONDS",
     "INVALID_REQUEST",
@@ -331,6 +341,7 @@ __all__ = [
     "OPS",
     "SUBPROTOCOL",
     "UNBOUND_FIELDS",
+    "URL_ENV",
     "Answer",
     "Duplex",
     "Frame",

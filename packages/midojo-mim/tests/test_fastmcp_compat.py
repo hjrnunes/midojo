@@ -12,7 +12,8 @@ import inspect
 
 from fastmcp import FastMCP
 from mcp.types import CallToolRequest
-from midojo_sdk.mcp import MidojoMCP
+
+from midojo_mim.mcp import MidojoMCP
 
 
 def test_fastmcp_keeps_the_low_level_server_hooks_midojo_wraps():
@@ -27,7 +28,7 @@ def test_fastmcp_keeps_the_low_level_server_hooks_midojo_wraps():
 
 
 def test_midojo_installs_its_call_tool_handler():
-    mcp = MidojoMCP("compat", control_plane_url="http://control.invalid")
+    mcp = MidojoMCP("compat", recorder=object())  # type: ignore[arg-type]
     handlers = mcp._fastmcp._mcp_server.request_handlers
     assert CallToolRequest in handlers, "FastMCP registers no handler under CallToolRequest"
     assert handlers[CallToolRequest].__qualname__.endswith("_pass_protocol_errors.<locals>.call_tool")

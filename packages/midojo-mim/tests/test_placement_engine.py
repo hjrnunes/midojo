@@ -22,8 +22,6 @@ from typing import Any, cast
 
 import pytest
 from mcp.types import CallToolResult, TextContent
-from midojo_sdk import placement
-from midojo_sdk.mcp import MidojoMCP
 from midojo_spec.injection import (
     Channel,
     InjectionInstruction,
@@ -36,7 +34,10 @@ from midojo_spec.injection import (
     payload_digest,
 )
 
-ROOT = Path(__file__).resolve().parent.parent
+from midojo_mim import placement
+from midojo_mim.mcp import MidojoMCP
+
+PACKAGE = Path(__file__).resolve().parent.parent
 
 CONFORMS: placement.PlacementEngine = placement.PlanPlacementEngine()
 """The plan's own engine satisfies the protocol: pyright checks this assignment, and a test checks it at run time."""
@@ -305,7 +306,7 @@ PLACEMENT_LOGIC = (
 
 
 def test_the_placement_code_lives_in_the_placement_module():
-    import midojo_sdk.mcp as interceptor
+    import midojo_mim.mcp as interceptor
 
     placed = inspect.getsource(placement)
     forwards = inspect.getsource(interceptor)
@@ -318,7 +319,7 @@ def test_the_placement_code_lives_in_the_placement_module():
 
 
 def test_the_interceptor_keeps_forwarding_applying_recording_and_dispositions():
-    import midojo_sdk.mcp as interceptor
+    import midojo_mim.mcp as interceptor
 
     forwards = inspect.getsource(interceptor)
     for kept in (
@@ -326,11 +327,13 @@ def test_the_interceptor_keeps_forwarding_applying_recording_and_dispositions():
         "result = _applied(result, decision)",
         "await _finish_forwarded(recorder, call_id, name, arguments",
         "async def mirror_upstream",
-        "session_token(",
         "def block(",
         "def deny(",
     ):
         assert kept in forwards, kept
+    # The face is the interceptor's, which never holds a session: that is the SDK's agent mode.
+    assert "session_token" not in forwards
+    assert "SESSION_HEADER" not in forwards
 
 
 BLOCKED_MODULES = ("anyio", "fastmcp", "httpx", "mcp", "midojo", "pydantic")
@@ -351,9 +354,9 @@ class Blocker(importlib.abc.MetaPathFinder):
 
 
 sys.meta_path.insert(0, Blocker())
-import midojo_sdk.placement
+import midojo_mim.placement
 
-assert "midojo_sdk.placement" in sys.modules
+assert "midojo_mim.placement" in sys.modules
 assert "fastmcp" not in sys.modules
 assert [name for name in sys.modules if name.split(".")[0] in BLOCKED] == []
 print("ok")
@@ -361,12 +364,8 @@ print("ok")
 
 
 def test_the_placement_module_loads_without_the_interceptors_dependencies():
-    completed = subprocess.run([sys.executable, "-c", BLOCKER], cwd=ROOT, capture_output=True, text=True, timeout=120)
+    completed = subprocess.run(
+        [sys.executable, "-c", BLOCKER], cwd=PACKAGE, capture_output=True, text=True, timeout=120
+    )
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout.strip() == "ok"
-
-
-def test_the_placement_module_is_light():
-    from tests.test_import_boundaries import LIGHT_MODULES
-
-    assert placement.__name__ in LIGHT_MODULES

@@ -40,15 +40,7 @@ import pytest
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 from mcp.types import TextContent
-from midojo_spec.injection import Channel, InjectionInstruction, InjectionPlan, InjectionTarget, payload_digest
-from midojo_spec.link import BIND_PATH, LinkFault, decode_message
-
-from midojo.control_plane.config import AppConfig
-from midojo.control_plane.link_dispatch import LinkDispatcher
-from midojo.control_plane.service import ById, ControlPlane
-from midojo.injection_spec import InjectionSpec
-from midojo.interception_service import (
-    CREDENTIAL_ENV,
+from midojo_mim.service import (
     LOSS_CLOSE_CODE,
     READY_PREFIX,
     RELEASE_CLOSE_CODE,
@@ -56,6 +48,13 @@ from midojo.interception_service import (
     _BindingStream,
     main,
 )
+from midojo_spec.injection import Channel, InjectionInstruction, InjectionPlan, InjectionTarget, payload_digest
+from midojo_spec.link import BIND_PATH, CREDENTIAL_ENV, LinkFault, decode_message
+
+from midojo.control_plane.config import AppConfig
+from midojo.control_plane.link_dispatch import LinkDispatcher
+from midojo.control_plane.service import ById, ControlPlane
+from midojo.injection_spec import InjectionSpec
 from tests.binding_driver import (
     BindingDriver,
     Bound,
@@ -579,9 +578,12 @@ def test_the_console_script_and_the_credential_environment_are_the_service_s():
     from pathlib import Path
 
     root = Path(__file__).resolve().parent.parent
-    project = tomllib.loads((root / "pyproject.toml").read_text())
-    scripts = project["project"]["scripts"]
-    assert scripts["midojo-intercept-serve"] == "midojo.interception_service:main"
+    mim = tomllib.loads((root / "packages" / "midojo-mim" / "pyproject.toml").read_text())
+    assert mim["project"]["scripts"]["midojo-intercept-serve"] == "midojo_mim.service:main"
+    harness = tomllib.loads((root / "pyproject.toml").read_text())
+    scripts = harness["project"]["scripts"]
+    # The harness no longer declares the service's script: its package does.
+    assert "midojo-intercept-serve" not in scripts
     # Distinct from the control plane's own script: one process serves one of them.
     assert scripts["midojo-serve"] == "midojo.serve:main"
     assert CREDENTIAL_ENV == "MIDOJO_INTERCEPTOR_CREDENTIAL"

@@ -1,7 +1,8 @@
 """The in-process implementations of the SDK's seams and the control client make no HTTP request."""
 
 import pytest
-from midojo_sdk.mcp import MidojoMCP, ToolContext
+from midojo_mim.mcp import MidojoMCP
+from midojo_spec.context import ToolContext
 
 from midojo.control_plane.inprocess import InProcessAgentClient
 from midojo.control_plane.inprocess_control import InProcessControlClient

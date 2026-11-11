@@ -32,37 +32,26 @@ reach the host's loopback: bind an address the sandbox reaches, give a fixed
 port, advertise ``host.openshell.internal``, and allow that host and port in
 the suite's network policy.
 
-This module needs ``midojo-sdk[mcp]`` (the ``dev`` and ``suites`` extras).
+The interceptor itself (the MCP face, the placement of injections and the listener
+plumbing) is ``midojo-mim``'s; this module is the host's setup around it.
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import secrets
-import socket
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
 import uvicorn
-from midojo_sdk.mcp import MidojoMCP
+from midojo_mim.endpoint import TOOL_PATH, bare_host, tool_url
+from midojo_mim.listener import SHUTDOWN_SECONDS, WILDCARD_HOSTS, Server, listen, respond
+from midojo_mim.mcp import MidojoMCP
 from midojo_spec.injection import InjectionOutcome, InjectionPlan
 from midojo_spec.recorder import Recorder, WorldState
 
-from midojo.tool_endpoint import TOOL_PATH, ToolEndpoint, bare_host, tool_url
-
-# Hosts that mean every interface: a listener can bind them, but a target can't connect to them.
-_WILDCARD_HOSTS = {"0.0.0.0", "::", ""}
-
-# How long stopping waits for the target's open connections before closing them.
-_SHUTDOWN_SECONDS = 2
-
-URL_ENV = "MIDOJO_INTERCEPTOR_URL"
-"""Where a handle finds the interceptor service when it is opened without ``interception=``: its base URL."""
-
-CREDENTIAL_ENV = "MIDOJO_INTERCEPTOR_CREDENTIAL"
-"""The service's bind credential: it comes with :data:`URL_ENV`, and neither name alone selects a service."""
+from midojo.tool_endpoint import ToolEndpoint
 
 HostTools = Callable[[MidojoMCP], None]
 """Registers a suite's simulated tools, blocks and denials on one evaluation's interceptor (its ``MidojoMCP``)."""
@@ -79,21 +68,6 @@ class ObservedRequest:
     status: int | None = None
     body: bytes = b""
     chunks: list[bytes] = field(default_factory=list, repr=False)
-
-
-class _Server(uvicorn.Server):
-    """A uvicorn server that leaves the process's signal handlers to the host.
-
-    uvicorn's own handlers would take the orchestrator's Ctrl-C. And once a
-    stopped server's handler is left installed (two interceptors served at
-    once restore each other's), sse_starlette reads that server's
-    ``should_exit`` and ends every event stream in the process, the next
-    interceptors' included.
-    """
-
-    @contextlib.contextmanager
-    def capture_signals(self) -> Iterator[None]:
-        yield
 
 
 class HostInterceptor:
@@ -151,13 +125,13 @@ class HostInterceptor:
         # A host is kept without URL brackets, and bracketed once when the endpoint's URL is made.
         self._bind_host = bind_host = bare_host(bind_host)
         self._port = port
-        default_advertise = bind_host if bind_host not in _WILDCARD_HOSTS else "127.0.0.1"
+        default_advertise = bind_host if bind_host not in WILDCARD_HOSTS else "127.0.0.1"
         self._advertise_host = bare_host(advertise_host) if advertise_host else default_advertise
         # With observe_requests, every request the interceptor received, in full (credentials included): what
         # the target sent, for checking it. Off by default, so a long run keeps none of it.
         self._observe_requests = observe_requests
         self.requests: list[ObservedRequest] = []
-        self._server: _Server | None = None
+        self._server: Server | None = None
         self._serving: asyncio.Task[None] | None = None
 
     @property
@@ -204,7 +178,7 @@ class HostInterceptor:
                 if self._observe_requests:
                     while (await receive_and_keep()).get("more_body", False):
                         pass
-                await _respond(send_and_note, status, body)
+                await respond(send_and_note, status, body)
 
             if scope["path"].rstrip("/") != TOOL_PATH:
                 await refuse(404, b"Not found")
@@ -221,11 +195,11 @@ class HostInterceptor:
         """Mirror the upstream's tools and serve them. Returns the endpoint to give the target."""
         await self.mcp.mirror_upstream(allowed=self._allowed)
         # Bound here, so a taken port raises OSError now rather than ending the server's task.
-        listener = _listen(self._bind_host, self._port)
+        listener = listen(self._bind_host, self._port)
         config = uvicorn.Config(
-            self.app(), log_level="warning", lifespan="on", ws="none", timeout_graceful_shutdown=_SHUTDOWN_SECONDS
+            self.app(), log_level="warning", lifespan="on", ws="none", timeout_graceful_shutdown=SHUTDOWN_SECONDS
         )
-        server = self._server = _Server(config)
+        server = self._server = Server(config)
         serving = self._serving = asyncio.create_task(server.serve(sockets=[listener]))
         while not server.started:
             if serving.done():
@@ -241,29 +215,6 @@ class HostInterceptor:
             self._server.should_exit = True
             await self._serving
             self._server = self._serving = None
-
-
-def _listen(host: str, port: int) -> socket.socket:
-    family, kind, proto, _, address = socket.getaddrinfo(
-        host or None, port, type=socket.SOCK_STREAM, flags=socket.AI_PASSIVE
-    )[0]
-    listener = socket.socket(family, kind, proto)
-    try:
-        # Each evaluation of a run may listen on the same fixed port as the last one did.
-        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        listener.bind(address)
-    except OSError:
-        listener.close()
-        raise
-    return listener
-
-
-async def _respond(send, status: int, body: bytes) -> None:
-    headers = [(b"content-type", b"text/plain; charset=utf-8")]
-    if status == 401:
-        headers.append((b"www-authenticate", b"Bearer"))
-    await send({"type": "http.response.start", "status": status, "headers": headers})
-    await send({"type": "http.response.body", "body": body})
 
 
 @dataclass(frozen=True)

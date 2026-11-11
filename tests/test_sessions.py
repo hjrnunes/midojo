@@ -11,8 +11,8 @@ import pytest
 from fastapi.dependencies.models import Dependant
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
-from midojo_sdk.context import ToolContext
 from midojo_sdk.session import MidojoSessionMiddleware, MissingSessionError, session_context, session_token
+from midojo_spec.context import ToolContext
 from midojo_spec.recorder import ControlPlaneRejectedError, InvalidRequestError, RejectionKind
 from pydantic import ValidationError
 
@@ -330,7 +330,7 @@ def test_suite_name_constraint_applies_to_app_requests_and_paths(client, suite):
 
 @pytest.mark.asyncio
 async def test_remote_mcp_server_reads_session_from_each_request(app, client):
-    from midojo_sdk.mcp import MidojoMCP, ToolContext
+    from midojo_sdk.mcp import MidojoMCP
 
     run_a, a = new_evaluation(client)
     run_b, b = new_evaluation(client)

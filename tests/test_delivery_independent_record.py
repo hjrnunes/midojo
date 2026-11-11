@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import pytest
-from midojo_sdk.mcp import MidojoMCP
+from midojo_mim.mcp import MidojoMCP
 from midojo_spec.injection import (
     Channel,
     InjectionInstruction,

@@ -16,6 +16,7 @@ resolution-markers = [
 [manifest]
 members = [
     "midojo",
+    "midojo-mim",
     "midojo-sdk",
     "midojo-spec",
 ]
@@ -2155,6 +2156,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "grpcio" },
     { name = "httpx" },
+    { name = "midojo-mim" },
     { name = "midojo-sdk", extra = ["mcp"] },
     { name = "midojo-spec" },
     { name = "openshell" },
@@ -2199,6 +2201,7 @@ requires-dist = [
     { name = "grpcio", specifier = ">=1.60" },
     { name = "httpx", specifier = ">=0.28" },
     { name = "jsonschema", marker = "extra == 'dev'", specifier = ">=4.23" },
+    { name = "midojo-mim", editable = "packages/midojo-mim" },
     { name = "midojo-sdk", extras = ["mcp"], editable = "interception/python-sdk" },
     { name = "midojo-sdk", extras = ["mcp", "langchain"], marker = "extra == 'dev'", editable = "interception/python-sdk" },
     { name = "midojo-spec", editable = "packages/midojo-spec" },
@@ -2222,6 +2225,33 @@ requires-dist = [
 provides-extras = ["suites", "pyrit", "dev"]
 
 [[package]]
+name = "midojo-mim"
+version = "0.1.0"
+source = { editable = "packages/midojo-mim" }
+dependencies = [
+    { name = "anyio" },
+    { name = "fastmcp" },
+    { name = "mcp" },
+    { name = "midojo-spec" },
+    { name = "pydantic" },
+    { name = "starlette" },
+    { name = "uvicorn" },
+    { name = "websockets" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "anyio" },
+    { name = "fastmcp", specifier = ">=3.2.4,<3.3" },
+    { name = "mcp" },
+    { name = "midojo-spec", editable = "packages/midojo-spec" },
+    { name = "pydantic", specifier = ">=2.7.1" },
+    { name = "starlette" },
+    { name = "uvicorn", specifier = ">=0.34" },
+    { name = "websockets", specifier = ">=16,<18" },
+]
+
+[[package]]
 name = "midojo-sdk"
 version = "0.1.0"
 source = { editable = "interception/python-sdk" }
@@ -2235,15 +2265,15 @@ langchain = [
     { name = "langchain" },
 ]
 mcp = [
-    { name = "fastmcp" },
+    { name = "midojo-mim" },
     { name = "websockets" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "fastmcp", marker = "extra == 'mcp'", specifier = ">=3.2.4,<3.3" },
     { name = "httpx", specifier = ">=0.28" },
     { name = "langchain", marker = "extra == 'langchain'", specifier = ">=1.4" },
+    { name = "midojo-mim", marker = "extra == 'mcp'", editable = "packages/midojo-mim" },
     { name = "midojo-spec", editable = "packages/midojo-spec" },
     { name = "websockets", marker = "extra == 'mcp'", specifier = ">=16,<18" },
 ]

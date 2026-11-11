@@ -16,10 +16,13 @@ classifiers = [
 ]
 requires-python = ">= 3.12"
 dependencies = [
-    # The host interceptor's MCP client and the link to a driver live in the
-    # SDK, so MiDojo depends on it as a base package. The mcp extra pins
-    # FastMCP, which the interceptor needs.
+    # The driver's end of the link to a remote interceptor lives in the SDK
+    # (midojo_sdk.binding, which needs websockets), so MiDojo depends on it
+    # as a base package.
     "midojo-sdk[mcp]",
+    # The host interceptor: the MCP face, injection placement and the service
+    # a remote evaluation binds. It pins FastMCP.
+    "midojo-mim",
     # The contracts every reader shares, on the standard library alone.
     "midojo-spec",
     "pydantic>=2.7.1",
@@ -72,7 +75,6 @@ dev = [
 [project.scripts]
 midojo-serve = "midojo.serve:main"
 midojo-run = "midojo.orchestrator:main"
-midojo-intercept-serve = "midojo.interception_service:main"
 weather-tools-serve = "suites.weather.tools_server:main"
 minibank-real-mcp-serve = "suites.minibank.a2a_agent.real_mcp:main"
 minibank-a2a-agent = "suites.minibank.a2a_agent.agent:main"
@@ -91,11 +93,12 @@ include = ["/src/midojo", "/suites", "/tests", "/examples", "/pyproject.toml", "
 managed = true
 
 [tool.uv.workspace]
-members = ["interception/python-sdk", "packages/midojo-spec"]
+members = ["interception/python-sdk", "packages/midojo-spec", "packages/midojo-mim"]
 
 [tool.uv.sources]
 midojo-sdk = { workspace = true }
 midojo-spec = { workspace = true }
+midojo-mim = { workspace = true }
 
 [tool.ruff]
 line-length = 120

@@ -23,11 +23,9 @@ dependencies = [
 
 [project.optional-dependencies]
 mcp = [
-    # 4.0 removed fastmcp.tools.tool, which mcp.py imports ToolResult from.
-    # MidojoMCP also wraps FastMCP's private low-level server (_mcp_server:
-    # request_handlers and run), which a minor release may change, so a new
-    # minor is a deliberate upgrade; tests/test_fastmcp_compat.py names the hooks.
-    "fastmcp>=3.2.4,<3.3",
+    # The MCP face (midojo_sdk.mcp subclasses it) lives in midojo-mim, which
+    # pins FastMCP.
+    "midojo-mim",
     # binding.py, the driver's WebSocket adapter, imports websockets.asyncio
     # directly: before this it arrived only as a fastmcp dependency, and the
     # adapter must outlive that arrangement. The API it uses is in 16 and 17.

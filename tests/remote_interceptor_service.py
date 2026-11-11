@@ -13,7 +13,8 @@ import asyncio
 import json
 import signal
 
-from midojo.interception_service import InterceptorService
+from midojo_mim.service import InterceptorService
+
 from tests.binding_driver import serve_app
 from tests.fixtures.scripted_target.upstream import scripted_upstream
 

@@ -36,6 +36,12 @@ from typing import Any
 import pytest
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
+from midojo_mim.service import (
+    DEFAULT_ANSWER_DEADLINE_SECONDS,
+    DEFAULT_HEARTBEAT_EXPIRY_SECONDS,
+    LOSS_CLOSE_CODE,
+    RELEASE_CLOSE_CODE,
+)
 from midojo_sdk.binding import (
     MAX_FRAME_BYTES,
     WEBSOCKETS_LOGGER,
@@ -56,12 +62,6 @@ from midojo.control_plane.inprocess_control import InProcessControlClient
 from midojo.delivery import delivery_facts, exposure
 from midojo.evaluation_handle import LinkLostError
 from midojo.interception_host import HostInterceptor
-from midojo.interception_service import (
-    DEFAULT_ANSWER_DEADLINE_SECONDS,
-    DEFAULT_HEARTBEAT_EXPIRY_SECONDS,
-    LOSS_CLOSE_CODE,
-    RELEASE_CLOSE_CODE,
-)
 from tests.test_interception_service import (
     CREDENTIAL,
     PLAN,

@@ -32,7 +32,8 @@ import uuid
 from collections.abc import Callable
 from typing import Any
 
-from midojo_sdk.mcp import MidojoMCP, ToolContext
+from midojo_mim.mcp import MidojoMCP
+from midojo_spec.context import ToolContext
 
 # ---------------------------------------------------------------------------
 # READ tools — forward to upstream, inject from environment

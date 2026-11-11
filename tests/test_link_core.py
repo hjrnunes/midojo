@@ -26,8 +26,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from midojo_sdk.link import Link, LinkRecorder, LinkWorld
-from midojo_sdk.mcp import MidojoMCP
+from midojo_mim.link import Link
+from midojo_mim.mcp import MidojoMCP
 from midojo_spec.injection import (
     InjectionMode,
     InjectionOutcome,
@@ -66,8 +66,8 @@ from tests.link_transport import LinkAgent, LinkSession
 from tests.logging_mcp import LoggingMCP
 from tests.scripted_mcp import wire_session
 
-SDK = Path(__file__).resolve().parents[1] / "interception" / "python-sdk" / "src"
-LINK_MODULE = SDK / "midojo_sdk" / "link.py"
+MIM = Path(__file__).resolve().parents[1] / "packages" / "midojo-mim" / "src"
+LINK_MODULE = MIM / "midojo_mim" / "link.py"
 SPEC_LINK_MODULE = Path(__file__).resolve().parents[1] / "packages" / "midojo-spec" / "src" / "midojo_spec" / "link.py"
 THIRD_PARTY = ("anyio", "websockets", "fastmcp", "pydantic", "midojo", "starlette")
 
@@ -286,40 +286,40 @@ def _imported_roots(path: Path, package: str) -> set[str]:
 
 
 def test_the_link_modules_import_only_the_standard_library_and_the_spec():
-    sdk_roots = _imported_roots(LINK_MODULE, "midojo_sdk")
+    mim_roots = _imported_roots(LINK_MODULE, "midojo_mim")
     spec_roots = _imported_roots(SPEC_LINK_MODULE, "midojo_spec")
 
-    assert sdk_roots - sys.stdlib_module_names - {"midojo_sdk", "midojo_spec"} == set()
+    assert mim_roots - sys.stdlib_module_names - {"midojo_mim", "midojo_spec"} == set()
     assert spec_roots - sys.stdlib_module_names - {"midojo_spec"} == set()
-    assert not ((sdk_roots | spec_roots) & set(THIRD_PARTY))
+    assert not ((mim_roots | spec_roots) & set(THIRD_PARTY))
 
 
-def test_the_sdk_link_holds_the_link_the_recorder_and_the_world_and_the_spec_the_codec():
+def test_the_mim_link_holds_the_link_the_recorder_and_the_world_and_the_spec_the_codec():
     def declared(path: Path) -> set[str]:
         tree = ast.parse(path.read_text(encoding="utf-8"))
         return {node.name for node in tree.body if isinstance(node, ast.ClassDef | ast.FunctionDef)}
 
-    sdk, spec = declared(LINK_MODULE), declared(SPEC_LINK_MODULE)
+    mim, spec = declared(LINK_MODULE), declared(SPEC_LINK_MODULE)
     classes = {"LinkRecorder", "LinkWorld", "Link"}
     codec = {"Frame", "Answer", "Message", "LinkLost", "LinkFault"}
     functions = {"encode_frame", "decode_frame", "encode_answer", "decode_answer", "encode_message", "decode_message"}
 
-    assert classes <= sdk
+    assert classes <= mim
     assert not classes & spec
     assert (codec | functions) <= spec
-    assert not (codec | functions) & sdk
+    assert not (codec | functions) & mim
 
 
 def test_the_link_module_imports_with_no_third_party_package_available():
     script = "\n".join(
         [
             "import sys",
-            f"sys.path.insert(0, {str(SDK)!r})",
+            f"sys.path.insert(0, {str(MIM)!r})",
             f"for name in {list(THIRD_PARTY)!r}:",
             "    sys.modules[name] = None",  # an import of a blocked name fails at once
-            "import midojo_sdk.link",
+            "import midojo_mim.link",
             "import midojo_spec.link as link",
-            "from midojo_sdk import Frame, LinkRecorder, LinkWorld",
+            "from midojo_mim.link import Frame, LinkRecorder, LinkWorld",
             "assert link.API == 'midojo-binding-v1'",
             "assert link.SUBPROTOCOL == 'midojo-binding.v1'",
             "print('ok')",
@@ -332,10 +332,11 @@ def test_the_link_module_imports_with_no_third_party_package_available():
     assert done.stdout.strip() == "ok"
 
 
-def test_the_three_names_are_importable_from_the_sdk():
+def test_the_sdk_keeps_the_spec_s_names_and_no_longer_holds_the_service_s_link():
     import midojo_sdk
 
-    assert (midojo_sdk.LinkRecorder, midojo_sdk.LinkWorld, midojo_sdk.Frame) == (LinkRecorder, LinkWorld, Frame)
+    assert midojo_sdk.Frame is Frame
+    assert not any(hasattr(midojo_sdk, name) for name in ("Link", "LinkRecorder", "LinkWorld"))
 
 
 # --- one binding, end to end over the test transport ---

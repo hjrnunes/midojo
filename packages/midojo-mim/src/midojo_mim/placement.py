@@ -30,7 +30,7 @@ import dataclasses
 import json
 import threading
 from collections.abc import Mapping, Sequence
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
 
 from midojo_spec.injection import (
     PLACED,
@@ -695,14 +695,14 @@ def _outcome(
     )
 
 
-type _AdmittedInstruction = tuple[str, int, InjectionInstruction, int, int]
+_AdmittedInstruction: TypeAlias = tuple[str, int, InjectionInstruction, int, int]
 # Scope, index, instruction and admission order of an instruction whose target's result_record decides, once the
 # result is in, whether the call is an occurrence of it.
-type _PendingInstruction = tuple[str, int, InjectionInstruction, int]
+_PendingInstruction: TypeAlias = tuple[str, int, InjectionInstruction, int]
 
 # One instruction's splice: the admission it belongs to, what it placed, and where its text is (see _track and
 # _track_field).
-type _PlacementRecord = tuple[_AdmittedInstruction, _Placement, _Written | None, _FieldWritten | None]
+_PlacementRecord: TypeAlias = tuple[_AdmittedInstruction, _Placement, _Written | None, _FieldWritten | None]
 
 
 @dataclasses.dataclass

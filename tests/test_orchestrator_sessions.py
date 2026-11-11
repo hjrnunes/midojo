@@ -14,7 +14,7 @@ import pytest
 import pytest_asyncio
 from fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult, TextContent
-from midojo_sdk.mcp import MidojoMCP
+from midojo_mim.mcp import MidojoMCP
 from midojo_spec.injection import (
     Channel,
     InjectionInstruction,

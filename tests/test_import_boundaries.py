@@ -81,8 +81,8 @@ LIGHT_MODULES = (
     "midojo_spec.recorder",
     # The spec package's binding frame codec: stdlib only.
     "midojo_spec.link",
-    # The SDK's placement engine: decides a plan's placements, and the plan codec it names, stdlib only.
-    "midojo_sdk.placement",
+    # The interceptor's placement engine: decides a plan's placements, and the plan codec it names, stdlib only.
+    "midojo_mim.placement",
     # The spec package's judge modules: stdlib only, and they import nothing from Asago.
     "midojo_spec.judge",
     "midojo_spec.judge_exchange",

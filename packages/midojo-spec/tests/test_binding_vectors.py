@@ -39,6 +39,8 @@ def test_the_constants_are_the_ones_the_vectors_name() -> None:
     assert link.HEARTBEAT_EXPIRY_SECONDS == constants["heartbeat_expiry_seconds"]
     assert link.ANSWER_DEADLINE_SECONDS == constants["answer_deadline_seconds"]
     assert link.BIND_PATH == constants["bind_path"]
+    assert link.URL_ENV == constants["url_env"]
+    assert link.CREDENTIAL_ENV == constants["credential_env"]
     assert link.LINK_LOST_REASON == constants["link_lost_reason"]
     assert link.INVALID_REQUEST == constants["invalid_request"]
     assert list(link.OPS) == constants["ops"]

@@ -9,8 +9,8 @@ record: each call, delivery fact and environment read crosses one WebSocket
 per binding as a ``midojo-binding-v1`` frame, and the service never holds the
 session token.
 
-In-process host interception (:mod:`midojo.interception_host`) stays the
-default. This service is for an agent that can't share the driver's process.
+A driver that can share its process with the agent's interceptor serves one of its own and
+needs none of this. This service is for an agent that can't share the driver's process.
 
 The stream, per design section 2.6:
 
@@ -37,8 +37,8 @@ The stream, per design section 2.6:
 The service runs no host tools in v1: ``host_tools`` is ``[]``, and a driver
 that names any gets ``rejected``. ``faces`` is ``["mcp"]``, the only face.
 
-This module needs ``midojo-sdk[mcp]`` and ``uvicorn``: it is the remote
-interceptor's image, not the driver.
+This module is the remote interceptor's image, not the driver, and needs nothing
+from MiDojo's harness: ``midojo-mim`` and ``midojo-spec`` are its whole install.
 """
 
 from __future__ import annotations
@@ -54,14 +54,13 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 import uvicorn
-from midojo_sdk.link import Link, LinkRecorder, LinkWorld
-from midojo_sdk.mcp import MidojoMCP
 from midojo_spec.injection import CapabilityError, Channel, InjectionPlan
 from midojo_spec.link import (
     ANSWER_DEADLINE_SECONDS,
     API,
     BIND_FIELDS,
     BIND_PATH,
+    CREDENTIAL_ENV,
     HEARTBEAT_EXPIRY_SECONDS,
     SUBPROTOCOL,
     LinkFault,
@@ -76,8 +75,10 @@ from starlette.routing import Mount, WebSocketRoute
 from starlette.types import ASGIApp, Receive, Scope, Send
 from starlette.websockets import WebSocket
 
-from midojo.interception_host import _WILDCARD_HOSTS, CREDENTIAL_ENV, _Server
-from midojo.tool_endpoint import TOOL_PATH, bare_host
+from midojo_mim.endpoint import TOOL_PATH, bare_host
+from midojo_mim.link import Link, LinkRecorder, LinkWorld
+from midojo_mim.listener import SHUTDOWN_SECONDS, WILDCARD_HOSTS, Server, listen, respond
+from midojo_mim.mcp import MidojoMCP
 
 FACES_PATH = "/b"
 """Where every binding's faces live: ``/b/<binding id>/mcp`` while that binding exists."""
@@ -102,9 +103,6 @@ RELEASE_CLOSE_CODE = 1000
 
 READY_PREFIX = "midojo-intercept-serve listening on"
 """The line the service prints once it is listening: what a launcher waits for, then parses."""
-
-_SHUTDOWN_SECONDS = 2
-"""How long stopping waits for open connections before closing them, as the host interceptor does."""
 
 _REASON_LIMIT = 120
 """A close reason's byte-ish budget: the WebSocket reason never exceeds 123 bytes."""
@@ -220,13 +218,13 @@ class _Faces:
         binding_id, _, rest = route.lstrip("/").partition("/")
         face = self._faces.get(binding_id)
         if face is None or not rest:
-            await _refuse(send, 401, b"This binding's bearer token is required")
+            await respond(send, 401, b"This binding's bearer token is required")
             return
         await _named(face)
         # A binding that ended takes precedence over the answer it sent: the answer can go out to a
         # driver that already went, and its app is on its way out with it. An ended binding is a 401.
         if face.gone.is_set() or not face.bound.is_set():
-            await _refuse(send, 401, b"This binding's bearer token is required")
+            await respond(send, 401, b"This binding's bearer token is required")
             return
         child_scope = dict(scope, path="/" + rest, root_path=root + "/" + binding_id)
         await _authorized(face.app, face.token)(child_scope, receive, send)
@@ -261,19 +259,11 @@ def _authorized(app: ASGIApp, token: str) -> ASGIApp:
             return
         authorization = next((value for name, value in scope["headers"] if name.lower() == b"authorization"), b"")
         if not secrets.compare_digest(authorization, expected):
-            await _refuse(send, 401, b"This binding's bearer token is required")
+            await respond(send, 401, b"This binding's bearer token is required")
             return
         await app(scope, receive, send)
 
     return check
-
-
-async def _refuse(send: Send, status: int, body: bytes) -> None:
-    headers = [(b"content-type", b"text/plain; charset=utf-8")]
-    if status == 401:
-        headers.append((b"www-authenticate", b"Bearer"))
-    await send({"type": "http.response.start", "status": status, "headers": headers})
-    await send({"type": "http.response.body", "body": body})
 
 
 class _BindingStream:
@@ -471,7 +461,7 @@ class InterceptorService:
         self._name = name
         self._faces = _Faces()
         self._listener: socket.socket | None = None
-        self._server: _Server | None = None
+        self._server: Server | None = None
         self._serving: asyncio.Task[None] | None = None
         self._base_url: str | None = None
 
@@ -497,8 +487,8 @@ class InterceptorService:
     async def start(self, *, host: str = "127.0.0.1", port: int = 0) -> str:
         """Listen on ``host`` and ``port`` (0 picks a free one) and return the driver's base URL."""
         bind_host = bare_host(host)
-        advertised = self._advertise_host or ("127.0.0.1" if bind_host in _WILDCARD_HOSTS else bind_host)
-        listener = _listen(host, port)
+        advertised = self._advertise_host or ("127.0.0.1" if bind_host in WILDCARD_HOSTS else bind_host)
+        listener = listen(host, port)
         self._listener = listener
         self._base_url = f"http://{advertised}:{listener.getsockname()[1]}"
         config = uvicorn.Config(
@@ -506,9 +496,9 @@ class InterceptorService:
             log_level="warning",
             lifespan="on",
             ws="websockets-sansio",
-            timeout_graceful_shutdown=_SHUTDOWN_SECONDS,
+            timeout_graceful_shutdown=SHUTDOWN_SECONDS,
         )
-        server = self._server = _Server(config)
+        server = self._server = Server(config)
         serving = self._serving = asyncio.create_task(server.serve(sockets=[listener]), name="midojo-intercept-serve")
         while not server.started:
             if serving.done():
@@ -725,20 +715,6 @@ async def _close(websocket: WebSocket, code: int, reason: str) -> None:
         await websocket.close(code=code, reason=reason[:_REASON_LIMIT])
 
 
-def _listen(host: str, port: int) -> socket.socket:
-    family, kind, proto, _, address = socket.getaddrinfo(
-        host or None, port, type=socket.SOCK_STREAM, flags=socket.AI_PASSIVE
-    )[0]
-    listener = socket.socket(family, kind, proto)
-    try:
-        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        listener.bind(address)
-    except OSError:
-        listener.close()
-        raise
-    return listener
-
-
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="midojo-intercept-serve",
@@ -773,14 +749,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 __all__ = [
-    "CREDENTIAL_ENV",
     "DEFAULT_ANSWER_DEADLINE_SECONDS",
     "DEFAULT_HEARTBEAT_EXPIRY_SECONDS",
     "DEFAULT_PORT",
     "FACES_PATH",
     "LOSS_CLOSE_CODE",
     "READY_PREFIX",
-    "SUBPROTOCOL",
     "InterceptorService",
     "Outcome",
     "main",

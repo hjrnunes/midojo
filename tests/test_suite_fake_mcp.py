@@ -3,7 +3,7 @@
 from typing import Any
 
 import pytest
-from midojo_sdk.context import ToolContext
+from midojo_spec.context import ToolContext
 
 from midojo.control_plane.inprocess import InProcessAgentClient
 from midojo.control_plane.main import create_app

@@ -7,6 +7,8 @@
     "heartbeat_expiry_seconds": 15.0,
     "answer_deadline_seconds": 10.0,
     "bind_path": "/v1/bindings",
+    "url_env": "MIDOJO_INTERCEPTOR_URL",
+    "credential_env": "MIDOJO_INTERCEPTOR_CREDENTIAL",
     "link_lost_reason": "link-lost",
     "invalid_request": "invalid_request",
     "ops": [

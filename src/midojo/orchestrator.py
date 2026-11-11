@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 import click
 import httpx
+from midojo_mim.endpoint import bare_host, tool_url
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -49,7 +50,6 @@ from midojo.injection_spec import InjectionSpec
 from midojo.runtimes import AgentRuntime, attempt_isolation, is_disposable
 from midojo.suite_tools import host_tools_reference, import_suite_module
 from midojo.suites import get_suite, list_suites
-from midojo.tool_endpoint import bare_host, tool_url
 from midojo.yaml_task_suite import YAMLTaskSuite
 
 if TYPE_CHECKING:
@@ -1476,7 +1476,7 @@ def _host_interception(
     tools: HostTools | None = None,
 ) -> HostInterception:
     """The run's host-mode settings, from the CLI options, refusing what a target couldn't reach."""
-    from midojo.interception_host import HostInterception  # needs midojo-sdk[mcp]
+    from midojo.interception_host import HostInterception  # imports FastMCP, through midojo-mim
 
     if not upstream_mcp_url:
         raise click.UsageError("--interception host requires --upstream-mcp-url or UPSTREAM_MCP_URL.")

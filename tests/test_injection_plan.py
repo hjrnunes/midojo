@@ -11,8 +11,9 @@ from typing import Any
 import pytest
 from fastmcp.exceptions import ToolError
 from mcp.types import CallToolResult, TextContent
-from midojo_sdk import placement
-from midojo_sdk.mcp import MidojoMCP, ToolContext
+from midojo_mim import placement
+from midojo_mim.mcp import MidojoMCP
+from midojo_spec.context import ToolContext
 from midojo_spec.injection import (
     MIDOJO_MCP_CAPABILITY,
     CapabilityError,

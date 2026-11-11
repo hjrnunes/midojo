@@ -56,7 +56,8 @@ import pydantic
 import pytest
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
-from midojo_sdk.mcp import BLOCKED_REASON, MidojoMCP, ToolContext
+from midojo_mim.mcp import BLOCKED_REASON, MidojoMCP
+from midojo_spec.context import ToolContext
 
 from midojo import grade
 from midojo.control_plane.client import ControlPlaneClient

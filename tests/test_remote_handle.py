@@ -49,8 +49,10 @@ import httpx
 import pytest
 from fastmcp import Client
 from mcp.types import TextContent
-from midojo_sdk.link import LinkRecorder, LinkWorld
+from midojo_mim.link import LinkRecorder, LinkWorld
+from midojo_mim.service import InterceptorService, Outcome
 from midojo_spec.injection import Channel, InjectionInstruction, InjectionPlan, InjectionTarget
+from midojo_spec.link import CREDENTIAL_ENV, URL_ENV
 from midojo_spec.recorder import RetryingRecorder
 
 import midojo.evaluation_handle as handles
@@ -58,8 +60,7 @@ from midojo.control_plane.client import ControlPlaneClient
 from midojo.evaluation_context import EvaluationContext
 from midojo.evaluation_handle import HANDLE_API_VERSION, LinkLostError
 from midojo.injection_spec import InjectionSpec
-from midojo.interception_host import CREDENTIAL_ENV, URL_ENV, RemoteInterception
-from midojo.interception_service import InterceptorService, Outcome
+from midojo.interception_host import RemoteInterception
 from midojo.tool_endpoint import ToolEndpoint
 from tests.binding_driver import serve_app
 from tests.fixtures.scripted_target.upstream import scripted_upstream

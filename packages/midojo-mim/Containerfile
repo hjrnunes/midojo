@@ -1,0 +1,29 @@
+# The interceptor service's image: midojo-mim and midojo-spec, and nothing of
+# MiDojo's harness (no verifier, runtime, control plane or suite).
+#
+# Build from the repository root, which holds both packages:
+#   docker build -f packages/midojo-mim/Containerfile -t midojo-intercept-serve .
+#   docker run --rm -e MIDOJO_INTERCEPTOR_CREDENTIAL=... -p 8767:8767 midojo-intercept-serve
+FROM python:3.12-slim
+
+# Copy the two packages and nothing else: the rest of the repository is the
+# harness's, and the image must not hold it. Both install from their folders,
+# because neither is on an index.
+WORKDIR /build
+COPY packages/midojo-spec ./midojo-spec
+COPY packages/midojo-mim ./midojo-mim
+RUN pip install --no-cache-dir ./midojo-spec ./midojo-mim \
+    && rm -rf /build
+WORKDIR /
+
+# Default to a non-root UID for vanilla K8s. The service writes nothing to disk,
+# so a random UID that an orchestrator assigns (OpenShift's restricted SCC) runs
+# it as well.
+USER 1001
+
+# The service listens on 127.0.0.1 unless told otherwise: an image runs it for
+# other containers, so it listens on every address, and the bind credential
+# (MIDOJO_INTERCEPTOR_CREDENTIAL) is what admits a driver.
+EXPOSE 8767
+ENTRYPOINT ["midojo-intercept-serve"]
+CMD ["--host", "0.0.0.0", "--port", "8767"]

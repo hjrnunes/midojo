@@ -20,8 +20,8 @@ from typing import Any
 import httpx
 import pytest
 from mcp.types import CallToolResult, TextContent
+from midojo_mim.mcp import MidojoMCP
 from midojo_sdk.client import AgentControlPlaneClient
-from midojo_sdk.mcp import MidojoMCP
 from midojo_spec.injection import (
     PLACED,
     Channel,

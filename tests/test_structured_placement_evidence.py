@@ -14,8 +14,8 @@ from typing import Any
 
 import pytest
 from mcp.types import CallToolResult, TextContent
+from midojo_mim.mcp import MidojoMCP
 from midojo_sdk.client import transient
-from midojo_sdk.mcp import MidojoMCP
 from midojo_spec.injection import (
     Channel,
     InjectionInstruction,
@@ -235,7 +235,7 @@ async def test_a_too_large_payload_seals_both_parts_unchanged(control):
 
 @pytest.mark.asyncio
 async def test_a_recorder_without_details_seals_the_text_and_says_the_details_are_missing(control, caplog):
-    with caplog.at_level(logging.WARNING, logger="midojo_sdk.mcp"):
+    with caplog.at_level(logging.WARNING, logger="midojo_mim.mcp"):
         result, outcomes, record = await sealed(control, notes_result(), placement(), legacy=True)
 
     # The agent still gets the injected result; the record keeps the text and doesn't claim the rest.
@@ -320,7 +320,7 @@ async def test_a_text_only_fallback_with_nothing_matched_still_warns(wrap, plann
     )
     instructions = (placement(target=other_tool),) if planned else ()
 
-    with caplog.at_level(logging.WARNING, logger="midojo_sdk.mcp"):
+    with caplog.at_level(logging.WARNING, logger="midojo_mim.mcp"):
         result, mcp = await forward(wrap(legacy), upstream, *instructions)
 
     assert (agent_text(result), result.structuredContent) == ("plain", None)
@@ -335,7 +335,7 @@ async def test_a_text_only_fallback_with_nothing_matched_still_warns(wrap, plann
 async def test_a_sealed_text_only_fallback_reports_no_details(control, caplog):
     upstream = CallToolResult(content=[TextContent(type="text", text="plain")])
 
-    with caplog.at_level(logging.WARNING, logger="midojo_sdk.mcp"):
+    with caplog.at_level(logging.WARNING, logger="midojo_mim.mcp"):
         result, _, record = await sealed(control, upstream, legacy=True)
 
     assert record.result == agent_text(result) == "plain"

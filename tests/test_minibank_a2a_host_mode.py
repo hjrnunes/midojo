@@ -21,11 +21,12 @@ import pytest
 import pytest_asyncio
 import uvicorn
 from a2a.utils.errors import A2AError
+from midojo_mim.listener import Server
 
 from midojo.agent_client import SESSION_HEADER, TOOL_TOKEN_HEADER, TOOL_URL_HEADER, A2AAgentClient
 from midojo.control_plane.config import AppConfig
 from midojo.control_plane.main import create_app
-from midojo.interception_host import HostInterception, _Server
+from midojo.interception_host import HostInterception
 from midojo.orchestrator import run_benchmark
 from midojo.suites import get_suite
 from midojo.tool_endpoint import ToolEndpoint
@@ -117,8 +118,8 @@ async def agent():
     model = ScriptedModel()
     app = KeepRequests(minibank_agent.create_app(model, "scripted", url))
     # The interceptor's server: it leaves the process's signal handlers alone, which a stopped server's left
-    # installed would end every later event stream in the process with (see interception_host._Server).
-    server = _Server(uvicorn.Config(app, log_level="warning", lifespan="off"))
+    # installed would end every later event stream in the process with (see midojo_mim.listener.Server).
+    server = Server(uvicorn.Config(app, log_level="warning", lifespan="off"))
     serving = asyncio.create_task(server.serve(sockets=[listener]))
     while not server.started:
         assert not serving.done()

@@ -21,7 +21,8 @@ URL and its bearer token.
 
 from typing import Annotated
 
-from midojo_sdk.mcp import MidojoMCP, ToolContext
+from midojo_mim.mcp import MidojoMCP
+from midojo_spec.context import ToolContext
 from pydantic import Field
 
 from suites.weather.tools_server import ALERT_SENT_RESPONSE
