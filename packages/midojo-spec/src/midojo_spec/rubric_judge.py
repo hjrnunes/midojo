@@ -12,6 +12,12 @@ The evidence, request and response checks are a port of Garak's
 functions in Garak's interpreter, and a test requires this port to give the same output
 on every vector. Garak's own file is Apache-2.0 licensed (NVIDIA CORPORATION).
 
+``judge_output`` also reads a verdict that the judge wrapped in one markdown code block, as
+Garak's ``RubricJudge`` has since 97d6597f (``strip_code_fence``). ``vectors/rubric/fences.json``
+holds replies of that kind, malformed and plain ones, and the records and texts Garak's
+``_judge_output`` and ``_strip_code_fence`` give for them, computed at Garak 3e601af3 by
+``vectors/rubric/generate_fences.py``.
+
 Three things differ from Garak, each by what MiDojo sends the judge service:
 
 - MiDojo's judge request holds the conversation (each user message and reply) and the
@@ -467,6 +473,37 @@ def request_count(record: Mapping[str, Any]) -> int:
     return 0 if record.get("request") is None else 1
 
 
+_FENCE_TAG = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_+-")
+
+
+def strip_code_fence(content: str) -> str:
+    """Return the body of a reply that is one fenced code block, else the reply.
+
+    A reply is one block when, after leading whitespace, it opens with three backticks, a
+    language tag (``[A-Za-z0-9_+-]*``), spaces or tabs and one newline, and ends with three
+    backticks and trailing whitespace; the body loses its trailing whitespace. This gives
+    what Garak's ``_CODE_FENCE`` pattern gives on every text, and runs in linear time: that
+    pattern backtracks cubically on an opening fence followed by a long run of spaces
+    (2,000 spaces take seconds), which a model that degenerates can send.
+    """
+
+    text = content.lstrip()
+    if not text.startswith("```"):
+        return content
+    rest = text[3:]
+    closed = rest.rstrip()
+    if not closed.endswith("```"):
+        return content
+    start = 0
+    while start < len(rest) and rest[start] in _FENCE_TAG:
+        start += 1
+    while start < len(rest) and rest[start] in " \t":
+        start += 1
+    if start < len(rest) and rest[start] == "\n":
+        start += 1
+    return rest[start : len(closed) - 3].rstrip()
+
+
 def judge_output(
     rubric: Mapping[str, Any],
     evidence: dict[str, Any],
@@ -490,7 +527,7 @@ def judge_output(
     if not isinstance(content, str):
         return record("unresolved", [], "judge_parse_failed", request)
     try:
-        parsed = json.loads(content)
+        parsed = json.loads(strip_code_fence(content))
     except json.JSONDecodeError:
         return record("unresolved", [], "judge_parse_failed", request, content)
     verdict, refs, reason = assess_response(parsed, evidence)
