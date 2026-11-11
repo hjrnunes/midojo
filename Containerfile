@@ -13,10 +13,12 @@ COPY . /app
 
 # Install midojo plus the suites' agent dependencies (openai, ogx, ...). The
 # host-side interceptor midojo-run starts (--interception host) and the suites'
-# host tools use midojo-sdk, installed from its folder with midojo-spec, the
-# package it and midojo depend on: neither is on an index, so pip takes them in
-# one command and finds midojo-spec among the requirements it was given.
-RUN pip install --no-cache-dir ./packages/midojo-spec "./interception/python-sdk[mcp]" ".[suites]" \
+# host tools use midojo-mim, and the driver's end of a remote binding uses
+# midojo-sdk; both depend on midojo-spec. None of the three is on an index,
+# so pip takes them from their folders in one command and finds each among the
+# requirements it was given. The interceptor service's own image is
+# packages/midojo-mim/Containerfile.
+RUN pip install --no-cache-dir ./packages/midojo-spec ./packages/midojo-mim "./interception/python-sdk[mcp]" ".[suites]" \
     # Make the tree arbitrary-UID friendly (OpenShift restricted SCC runs the
     # container as a random non-root UID with GID 0).
     && chgrp -R 0 /app && chmod -R g=u /app
