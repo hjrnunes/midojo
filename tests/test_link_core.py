@@ -319,7 +319,8 @@ def test_the_link_module_imports_with_no_third_party_package_available():
             "    sys.modules[name] = None",  # an import of a blocked name fails at once
             "import midojo_mim.link",
             "import midojo_spec.link as link",
-            "from midojo_mim.link import Frame, LinkRecorder, LinkWorld",
+            "from midojo_mim.link import LinkRecorder, LinkWorld",
+            "assert link.Frame is not None",
             "assert link.API == 'midojo-binding-v1'",
             "assert link.SUBPROTOCOL == 'midojo-binding.v1'",
             "print('ok')",
