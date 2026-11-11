@@ -240,7 +240,12 @@ TYPESCRIPT_IMPORT = re.compile(r"""(?:\bfrom|\bimport|\brequire\s*\()\s*\(?\s*["
 
 
 def typescript_imports(source: str) -> set[str]:
-    """Every module specifier a TypeScript or JavaScript file names in an import, an export-from, a require or an import()."""
+    """Every module specifier a TypeScript or JavaScript file names in an import, an export-from, a require or an import().
+
+    This reads text, not syntax: a comment or a string that quotes an import counts too. The scan errs toward
+    refusing, and a parser that skipped them would have to be right about every quote and slash in the source
+    to avoid hiding a real import on the same line.
+    """
     return set(TYPESCRIPT_IMPORT.findall(source))
 
 
@@ -271,6 +276,7 @@ def test_the_typescript_sdks_source_imports_no_package_of_asagos_driver():
         ('const x = await import("asago-dynamic");', {"asago-dynamic"}),
         ('import { createHash } from "node:crypto";', {"node:crypto"}),
         ("// no import here", set()),
+        ('// import "asago-in-a-comment"', {"asago-in-a-comment"}),
     ],
 )
 def test_the_typescript_scan_names_what_a_file_imports(source: str, found: set[str]):
