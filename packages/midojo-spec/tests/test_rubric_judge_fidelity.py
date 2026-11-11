@@ -3,7 +3,7 @@
 MiDojo's control plane stores the string the orchestrator's sink makes of each MCP tool
 result (``call_body``: the text blocks joined by a newline, the error text for a failed
 call). Garak's evidence holds ``normalise_tool_call(call)["result"]``, the JSON the model's
-captured ``output`` decodes to. ``fixtures/rubric/fidelity.json`` pairs the two, with the
+captured ``output`` decodes to. ``vectors/rubric/fidelity.json`` pairs the two, with the
 sink and Garak functions run on each case by the consumer's ``generate_fidelity.py``.
 
 Where the sink string and Garak's evidence can differ, from the cases below:
@@ -26,9 +26,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from midojo_sdk import rubric_judge as port
 
-FIDELITY = json.loads((Path(__file__).parent / "fixtures/rubric/fidelity.json").read_text(encoding="utf-8"))
+from midojo_spec import rubric_judge as port
+
+FIDELITY = json.loads((Path(__file__).parents[1] / "vectors" / "rubric" / "fidelity.json").read_text(encoding="utf-8"))
 
 
 def ids(group: str) -> list[Any]:

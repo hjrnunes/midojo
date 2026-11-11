@@ -20,6 +20,8 @@ dependencies = [
     # interceptor's MCP client all live in the SDK, so MiDojo depends on it as
     # a base package. The mcp extra pins FastMCP, which the interceptor needs.
     "midojo-sdk[mcp]",
+    # The contracts every reader shares, on the standard library alone.
+    "midojo-spec",
     "pydantic>=2.7.1",
     "pyyaml>=6.0.1",
     "click>=8.1.7",
@@ -89,10 +91,11 @@ include = ["/src/midojo", "/suites", "/tests", "/examples", "/pyproject.toml", "
 managed = true
 
 [tool.uv.workspace]
-members = ["interception/python-sdk"]
+members = ["interception/python-sdk", "packages/midojo-spec"]
 
 [tool.uv.sources]
 midojo-sdk = { workspace = true }
+midojo-spec = { workspace = true }
 
 [tool.ruff]
 line-length = 120

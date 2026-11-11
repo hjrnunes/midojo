@@ -1,13 +1,14 @@
 """The rubric judge: a strict yes/no semantic judge that evaluates a reply oracle.
 
-The Asago consumer's judge service (``asago_bundle_midojo.judge_service``) imports it to
-answer the ``reply_judge`` check of a reply evaluation. It imports the standard library
-only, takes the rubric and the evidence as plain data, and imports nothing from Asago.
+A judge service imports it to answer the ``reply_judge`` check of a reply evaluation
+(``judge.py`` holds the ``midojo.judge.v1`` format around it). It imports the standard
+library only, takes the rubric and the evidence as plain data, and imports nothing from
+Asago.
 
 The evidence, request and response checks are a port of Garak's
 ``garak/detectors/rubric_judge.py`` at revision 968cc22 (``build_evidence``,
 ``build_request``, ``request_text``, ``assess_response`` and the helpers they call).
-``tests/fixtures/rubric/vectors.json`` holds inputs and outputs computed by the Garak
+``vectors/rubric/vectors.json`` holds inputs and outputs computed by the Garak
 functions in Garak's interpreter, and a test requires this port to give the same output
 on every vector. Garak's own file is Apache-2.0 licensed (NVIDIA CORPORATION).
 
@@ -31,6 +32,10 @@ Three things differ from Garak, each by what MiDojo sends the judge service:
   goes only to that URL. A failed call gives ``judge_failed:<label>`` with the label of
   the OpenAI SDK error Garak would name; a 400 answer gives no content
   (``judge_parse_failed``), as in Garak.
+
+``http_judge`` can also report each model request to an observer (``judge_exchange.Observed``:
+status, reply text, usage, timing, or the failed call's label), which is how a judge
+service keeps the exchange record.
 """
 
 from __future__ import annotations
@@ -46,7 +51,10 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
+
+from .judge_exchange import Observed, now_iso
 
 RUBRIC_NAME = "asago_rubric_judge"
 PROMPT_VERSION = "garak-rubric-judge-v1"
@@ -110,11 +118,15 @@ SYSTEM_PROMPT = "\n\n".join(
 
 
 class JudgeCallError(Exception):
-    """The judge call failed; ``label`` names the error type Garak would report."""
+    """The judge call failed; ``label`` names the error type Garak would report.
 
-    def __init__(self, label: str) -> None:
+    ``status`` is the HTTP status the failure came with, None when none did.
+    """
+
+    def __init__(self, label: str, status: int | None = None) -> None:
         super().__init__(label)
         self.label = label
+        self.status = status
 
 
 # --- evidence ---------------------------------------------------------------------------
@@ -488,11 +500,15 @@ def judge_output(
 # --- the judge call ---------------------------------------------------------------------
 
 
+Observer = Callable[[list[dict[str, str]], Observed], None]
+
+
 def http_judge(
     judge_url: str,
     model: str,
     timeout: float = TIMEOUT_SECONDS,
     deadline: float | None = None,
+    observer: Observer | None = None,
 ) -> Callable[..., Any]:
     """Return the call that posts the judge request to ``<judge_url>/chat/completions``.
 
@@ -502,6 +518,12 @@ def http_judge(
     ``time.monotonic`` value) the connection's socket is shut down when it passes, so no
     wait outlasts it (the status line and headers, the body, a chunk's framing and the
     trailers alike), and an exchange cut off there is a timeout (``APITimeoutError``).
+
+    ``observer(messages, observed)`` is called once for each request sent, after the
+    outcome is known and before the call returns or raises: with the reply's text and usage
+    when the model answered, and with the failed call's label when it did not. The call's
+    own result is unchanged. An observer that raises stops the call with that exception, so
+    a request that cannot be recorded is never taken for one that was.
     """
 
     url = judge_url.rstrip("/") + "/chat/completions"
@@ -513,10 +535,31 @@ def http_judge(
         if key:
             headers["Authorization"] = f"Bearer {key}"
         request = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        started_at, started = now_iso(), time.monotonic()
+
+        def observe(**seen: Any) -> None:
+            if observer is not None:
+                elapsed = round((time.monotonic() - started) * 1000)
+                observer(messages, Observed(started_at=started_at, duration_ms=elapsed, **seen))
+
         try:
-            return _reply_content(_exchange(request, timeout, deadline))
+            answer = _exchange(request, timeout, deadline)
+            reply = _reply(answer)
         except _Rejected:
+            observe(http_status=400)
             return None
+        except JudgeCallError as exc:
+            observe(http_status=exc.status, error=exc.label)
+            raise
+        text = reply.content if isinstance(reply.content, str) else None
+        observe(
+            http_status=answer.status,
+            content=text,
+            finish_reason=reply.finish_reason,
+            response_model=reply.model,
+            usage=reply.usage,
+        )
+        return reply.content
 
     return call
 
@@ -642,12 +685,30 @@ class _WatchedHTTPSHandler(urllib.request.HTTPSHandler):
         )
 
 
-def _exchange(request: urllib.request.Request, timeout: float, deadline: float | None = None) -> bytes:
+@dataclass(frozen=True)
+class _Answer:
+    """A 2xx answer: its status and its body."""
+
+    status: int
+    body: bytes
+
+
+@dataclass(frozen=True)
+class _Reply:
+    """What a chat completion's body holds: the first choice's content and the fields kept with it."""
+
+    content: Any
+    finish_reason: str | None
+    model: str | None
+    usage: dict[str, Any] | None
+
+
+def _exchange(request: urllib.request.Request, timeout: float, deadline: float | None = None) -> _Answer:
     if deadline is None:
         return _send(_OPENER, request, timeout)
     watchdog = _Watchdog(deadline)
     try:
-        body = _send(watchdog.opener, request, timeout)
+        answer = _send(watchdog.opener, request, timeout)
     except (JudgeCallError, _Rejected) as exc:
         # A shut-down socket can end the headers early, so even a 400 is then a timeout.
         if watchdog.fired:
@@ -657,17 +718,17 @@ def _exchange(request: urllib.request.Request, timeout: float, deadline: float |
         watchdog.cancel()
     if watchdog.fired:  # the answer may have ended where the socket was shut down
         raise JudgeCallError("APITimeoutError")
-    return body
+    return answer
 
 
-def _send(opener: urllib.request.OpenerDirector, request: urllib.request.Request, timeout: float) -> bytes:
+def _send(opener: urllib.request.OpenerDirector, request: urllib.request.Request, timeout: float) -> _Answer:
     try:
         with opener.open(request, timeout=timeout) as response:
-            return response.read()
+            return _Answer(response.status, response.read())
     except urllib.error.HTTPError as exc:
         if exc.code == 400:
             raise _Rejected from exc
-        raise JudgeCallError(status_label(exc.code)) from exc
+        raise JudgeCallError(status_label(exc.code), exc.code) from exc
     except TimeoutError as exc:
         raise JudgeCallError("APITimeoutError") from exc
     except urllib.error.URLError as exc:
@@ -678,12 +739,24 @@ def _send(opener: urllib.request.OpenerDirector, request: urllib.request.Request
         raise JudgeCallError("APIConnectionError") from exc
 
 
-def _reply_content(body: bytes) -> Any:
+def _reply(answer: _Answer) -> _Reply:
     try:
-        reply = json.loads(body)
+        reply = json.loads(answer.body)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise JudgeCallError("JSONDecodeError") from exc
+        raise JudgeCallError("JSONDecodeError", answer.status) from exc
     try:
-        return reply["choices"][0]["message"]["content"]
+        choice = reply["choices"][0]
+        content = choice["message"]["content"]
     except (KeyError, IndexError, TypeError):
-        return None
+        return _Reply(None, None, _text_or_none(reply, "model"), _usage_of(reply))
+    return _Reply(content, _text_or_none(choice, "finish_reason"), _text_or_none(reply, "model"), _usage_of(reply))
+
+
+def _text_or_none(container: Any, name: str) -> str | None:
+    value = container.get(name) if isinstance(container, dict) else None
+    return value if isinstance(value, str) else None
+
+
+def _usage_of(reply: Any) -> dict[str, Any] | None:
+    usage = reply.get("usage") if isinstance(reply, dict) else None
+    return usage if isinstance(usage, dict) else None

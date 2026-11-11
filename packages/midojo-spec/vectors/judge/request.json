@@ -1,0 +1,598 @@
+{
+  "about": "request_problem(request): why a value is not a midojo.judge.v1 request (shape only), or null",
+  "cases": [
+    {
+      "name": "minimal",
+      "request": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "claim": "c",
+        "rubric": null,
+        "message": "m",
+        "reply": "r"
+      },
+      "problem": null
+    },
+    {
+      "name": "rubric_text",
+      "request": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "claim": "c",
+        "rubric": "strict",
+        "message": "m",
+        "reply": "r"
+      },
+      "problem": null
+    },
+    {
+      "name": "rubric_object",
+      "request": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "claim": "c",
+        "rubric": {
+          "criteria": []
+        },
+        "message": "m",
+        "reply": "r"
+      },
+      "problem": null
+    },
+    {
+      "name": "null_message_and_reply",
+      "request": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "claim": "c",
+        "rubric": null,
+        "message": null,
+        "reply": null
+      },
+      "problem": null
+    },
+    {
+      "name": "prior_turns",
+      "request": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "claim": "c",
+        "rubric": null,
+        "message": "m",
+        "reply": "r",
+        "prior_turns": [
+          {
+            "message": "a",
+            "reply": null
+          }
+        ]
+      },
+      "problem": null
+    },
+    {
+      "name": "tool_calls",
+      "request": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "claim": "c",
+        "rubric": null,
+        "message": "m",
+        "reply": "r",
+        "tool_calls": [
+          {
+            "function": "send",
+            "args": {},
+            "result": null,
+            "error": null,
+            "complete": true,
+            "blocked": false,
+            "turn": null
+          }
+        ],
+        "tool_calls_complete": false
+      },
+      "problem": null
+    },
+    {
+      "name": "tool_call_turn",
+      "request": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "claim": "c",
+        "rubric": null,
+        "message": "m",
+        "reply": "r",
+        "tool_calls": [
+          {
+            "function": "send",
+            "args": {},
+            "result": null,
+            "error": null,
+            "complete": true,
+            "blocked": false,
+            "turn": 1
+          }
+        ],
+        "tool_calls_complete": true
+      },
+      "problem": null
+    },
+    {
+      "name": "not_an_object",
+      "request": [
+        {
+          "schema": "midojo.judge.v1",
+          "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "claim": "c",
+          "rubric": null,
+          "message": "m",
+          "reply": "r"
+        }
+      ],
+      "problem": "the request is not a JSON object"
+    },
+    {
+      "name": "a_string",
+      "request": "request",
+      "problem": "the request is not a JSON object"
+    },
+    {
+      "name": "null",
+      "request": null,
+      "problem": "the request is not a JSON object"
+    },
+    {
+      "name": "wrong_schema",
+      "request": {
+        "schema": "midojo.judge.v2",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "claim": "c",
+        "rubric": null,
+        "message": "m",
+        "reply": "r"
+      },
+      "problem": "schema is not midojo.judge.v1"
+    },
+    {
+      "name": "no_schema",
+      "request": {
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "claim": "c",
+        "rubric": null,
+        "message": "m",
+        "reply": "r"
+      },
+      "problem": "schema is not midojo.judge.v1"
+    },
+    {
+      "name": "one_outside_field",
+      "request": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "claim": "c",
+        "rubric": null,
+        "message": "m",
+        "reply": "r",
+        "extra": 1
+      },
+      "problem": "the request has 1 fields outside the schema"
+    },
+    {
+      "name": "two_outside_fields",
+      "request": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "claim": "c",
+        "rubric": null,
+        "message": "m",
+        "reply": "r",
+        "extra": 1,
+        "more": 2
+      },
+      "problem": "the request has 2 fields outside the schema"
+    },
+    {
+      "name": "no_id",
+      "request": {
+        "schema": "midojo.judge.v1",
+        "claim": "c",
+        "rubric": null,
+        "message": "m",
+        "reply": "r"
+      },
+      "problem": "the request has no id"
+    },
+    {
+      "name": "no_claim_or_rubric",
+      "request": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "message": "m",
+        "reply": "r"
+      },
+      "problem": "the request has no claim, rubric"
+    },
+    {
+      "name": "id_not_a_string",
+      "request": {
+        "schema": "midojo.judge.v1",
+        "id": 7,
+        "claim": "c",
+        "rubric": null,
+        "message": "m",
+        "reply": "r"
+      },
+      "problem": "id is not a string"
+    },
+    {
+      "name": "claim_not_a_string",
+      "request": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "claim": 7,
+        "rubric": null,
+        "message": "m",
+        "reply": "r"
+      },
+      "problem": "claim is not a non-empty string"
+    },
+    {
+      "name": "claim_blank",
+      "request": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "claim": "  \n",
+        "rubric": null,
+        "message": "m",
+        "reply": "r"
+      },
+      "problem": "claim is not a non-empty string"
+    },
+    {
+      "name": "rubric_a_list",
+      "request": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "claim": "c",
+        "rubric": [],
+        "message": "m",
+        "reply": "r"
+      },
+      "problem": "rubric is not a string, an object or null"
+    },
+    {
+      "name": "rubric_a_number",
+      "request": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "claim": "c",
+        "rubric": 3,
+        "message": "m",
+        "reply": "r"
+      },
+      "problem": "rubric is not a string, an object or null"
+    },
+    {
+      "name": "message_a_number",
+      "request": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "claim": "c",
+        "rubric": null,
+        "message": 3,
+        "reply": "r"
+      },
+      "problem": "message is not a string or null"
+    },
+    {
+      "name": "reply_an_object",
+      "request": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "claim": "c",
+        "rubric": null,
+        "message": "m",
+        "reply": {}
+      },
+      "problem": "reply is not a string or null"
+    },
+    {
+      "name": "prior_turns_not_a_list",
+      "request": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "claim": "c",
+        "rubric": null,
+        "message": "m",
+        "reply": "r",
+        "prior_turns": {}
+      },
+      "problem": "prior_turns is not a list of turns"
+    },
+    {
+      "name": "prior_turn_has_extra_field",
+      "request": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "claim": "c",
+        "rubric": null,
+        "message": "m",
+        "reply": "r",
+        "prior_turns": [
+          {
+            "message": "a",
+            "reply": "b",
+            "x": 1
+          }
+        ]
+      },
+      "problem": "prior_turns is not a list of turns"
+    },
+    {
+      "name": "prior_turn_missing_reply",
+      "request": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "claim": "c",
+        "rubric": null,
+        "message": "m",
+        "reply": "r",
+        "prior_turns": [
+          {
+            "message": "a"
+          }
+        ]
+      },
+      "problem": "prior_turns is not a list of turns"
+    },
+    {
+      "name": "prior_turn_reply_a_number",
+      "request": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "claim": "c",
+        "rubric": null,
+        "message": "m",
+        "reply": "r",
+        "prior_turns": [
+          {
+            "message": "a",
+            "reply": 1
+          }
+        ]
+      },
+      "problem": "prior_turns is not a list of turns"
+    },
+    {
+      "name": "tool_calls_alone",
+      "request": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "claim": "c",
+        "rubric": null,
+        "message": "m",
+        "reply": "r",
+        "tool_calls": []
+      },
+      "problem": "tool_calls and tool_calls_complete come together"
+    },
+    {
+      "name": "tool_calls_complete_alone",
+      "request": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "claim": "c",
+        "rubric": null,
+        "message": "m",
+        "reply": "r",
+        "tool_calls_complete": true
+      },
+      "problem": "tool_calls and tool_calls_complete come together"
+    },
+    {
+      "name": "tool_calls_not_a_list",
+      "request": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "claim": "c",
+        "rubric": null,
+        "message": "m",
+        "reply": "r",
+        "tool_calls": {},
+        "tool_calls_complete": true
+      },
+      "problem": "tool_calls is not a list of calls"
+    },
+    {
+      "name": "tool_call_missing_field",
+      "request": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "claim": "c",
+        "rubric": null,
+        "message": "m",
+        "reply": "r",
+        "tool_calls": [
+          {
+            "function": "send",
+            "args": {},
+            "result": null,
+            "error": null,
+            "complete": true,
+            "turn": null
+          }
+        ],
+        "tool_calls_complete": true
+      },
+      "problem": "tool_calls is not a list of calls"
+    },
+    {
+      "name": "tool_call_function_not_text",
+      "request": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "claim": "c",
+        "rubric": null,
+        "message": "m",
+        "reply": "r",
+        "tool_calls": [
+          {
+            "function": 1,
+            "args": {},
+            "result": null,
+            "error": null,
+            "complete": true,
+            "blocked": false,
+            "turn": null
+          }
+        ],
+        "tool_calls_complete": true
+      },
+      "problem": "tool_calls is not a list of calls"
+    },
+    {
+      "name": "tool_call_error_a_number",
+      "request": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "claim": "c",
+        "rubric": null,
+        "message": "m",
+        "reply": "r",
+        "tool_calls": [
+          {
+            "function": "send",
+            "args": {},
+            "result": null,
+            "error": 1,
+            "complete": true,
+            "blocked": false,
+            "turn": null
+          }
+        ],
+        "tool_calls_complete": true
+      },
+      "problem": "tool_calls is not a list of calls"
+    },
+    {
+      "name": "tool_call_complete_an_int",
+      "request": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "claim": "c",
+        "rubric": null,
+        "message": "m",
+        "reply": "r",
+        "tool_calls": [
+          {
+            "function": "send",
+            "args": {},
+            "result": null,
+            "error": null,
+            "complete": 1,
+            "blocked": false,
+            "turn": null
+          }
+        ],
+        "tool_calls_complete": true
+      },
+      "problem": "tool_calls is not a list of calls"
+    },
+    {
+      "name": "tool_call_blocked_a_string",
+      "request": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "claim": "c",
+        "rubric": null,
+        "message": "m",
+        "reply": "r",
+        "tool_calls": [
+          {
+            "function": "send",
+            "args": {},
+            "result": null,
+            "error": null,
+            "complete": true,
+            "blocked": "no",
+            "turn": null
+          }
+        ],
+        "tool_calls_complete": true
+      },
+      "problem": "tool_calls is not a list of calls"
+    },
+    {
+      "name": "tool_call_turn_a_bool",
+      "request": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "claim": "c",
+        "rubric": null,
+        "message": "m",
+        "reply": "r",
+        "tool_calls": [
+          {
+            "function": "send",
+            "args": {},
+            "result": null,
+            "error": null,
+            "complete": true,
+            "blocked": false,
+            "turn": true
+          }
+        ],
+        "tool_calls_complete": true
+      },
+      "problem": "tool_calls is not a list of calls"
+    },
+    {
+      "name": "tool_call_turn_a_string",
+      "request": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "claim": "c",
+        "rubric": null,
+        "message": "m",
+        "reply": "r",
+        "tool_calls": [
+          {
+            "function": "send",
+            "args": {},
+            "result": null,
+            "error": null,
+            "complete": true,
+            "blocked": false,
+            "turn": "0"
+          }
+        ],
+        "tool_calls_complete": true
+      },
+      "problem": "tool_calls is not a list of calls"
+    },
+    {
+      "name": "tool_calls_complete_an_int",
+      "request": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "claim": "c",
+        "rubric": null,
+        "message": "m",
+        "reply": "r",
+        "tool_calls": [
+          {
+            "function": "send",
+            "args": {},
+            "result": null,
+            "error": null,
+            "complete": true,
+            "blocked": false,
+            "turn": null
+          }
+        ],
+        "tool_calls_complete": 1
+      },
+      "problem": "tool_calls_complete is not a boolean"
+    }
+  ]
+}

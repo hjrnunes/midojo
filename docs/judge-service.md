@@ -212,6 +212,10 @@ Compare the judge's model with the target's model before you rely on a `reply_ju
 
 Record a same-model judgement as an independence limit: the judge shares the target's training and its blind spots, so `supported` or `contradicted` says what one model made of another's reply, not what an independent judge would. A replay keeps the limit: it reproduces the recorded, same-model judgement, it doesn't add an independent one. To lift it, run the judge service on a model other than the target's; the grade's `judgements[].model` then shows that model.
 
+## The shared rules and the exchange record
+
+The request id, the request check and the response check are in `midojo_spec.judge`, on the standard library alone, so the grading code, a judge service and a replay read one implementation. A judge service that asks a model keeps one row for each model request in the `midojo.judge-exchange.v1` format (`midojo_spec.judge_exchange`): the request id and the ask's index, the model and prompt version, the messages, the reply or the failed call's label, the status, usage and timing, and the SHA-256 of the judge request and of the reply. Those digests equal the ones the sealed grade's judgements hold, so a row ties to its grade. `packages/midojo-spec/vectors/judge/` holds the conformance vectors.
+
 ## A reference service
 
 `examples/judge_service/server.py` implements the schema in front of an OpenAI-compatible chat completions endpoint, using the standard library only:

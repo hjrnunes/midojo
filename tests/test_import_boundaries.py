@@ -79,8 +79,10 @@ LIGHT_MODULES = (
     "midojo_sdk.injection_spec_schema",
     # The SDK's placement engine: decides a plan's placements, and the plan codec it names, stdlib only.
     "midojo_sdk.placement",
-    # The SDK's rubric judge: stdlib only, and it imports nothing from Asago.
-    "midojo_sdk.rubric_judge",
+    # The spec package's judge modules: stdlib only, and they import nothing from Asago.
+    "midojo_spec.judge",
+    "midojo_spec.judge_exchange",
+    "midojo_spec.rubric_judge",
     # midojo-run's module, home of run_task, a client of the episode context.
     "midojo.orchestrator",
 )

@@ -31,7 +31,6 @@ before.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import math
@@ -44,13 +43,13 @@ from datetime import date, datetime, time, timedelta
 from typing import Any, Literal
 
 import httpx
+from midojo_spec.judge import SCHEMA, request_id, response_problem
 from pydantic import BaseModel, ConfigDict
 from pydantic_core import to_jsonable_python
 
 from midojo.verifiers import ValidityReason, VerificationContext, VerificationResult
 
 NAME = "reply_judge"
-SCHEMA = "midojo.judge.v1"
 JudgeVerdict = Literal["supported", "contradicted", "unresolved"]
 PASSED: dict[str, bool | None] = {"supported": True, "contradicted": False, "unresolved": None}
 DEFAULT_TIMEOUT_SECONDS = 60.0
@@ -58,9 +57,6 @@ DEFAULT_TIMEOUT_SECONDS = 60.0
 _SPEC_KEYS = frozenset(
     {"claim", "rubric", "url", "url_env", "token_env", "timeout_seconds", "prior_turns", "tool_calls"}
 )
-_RESPONSE_KEYS = frozenset({"schema", "id", "verdict", "rationale", "model", "details"})
-# How deep ``details`` may nest: deeper data can't be dumped into a grade.
-MAX_DETAILS_DEPTH = 64
 # The record's fields that hold what the service sent (or a failure quoting it): the ones redaction reads.
 _SERVICE_TEXT = ("rationale", "model", "details", "failure")
 REDACTED = "[redacted]"
@@ -446,66 +442,6 @@ class ReplyJudge:
         if PASSED[verdict] is None:
             return VerificationResult.unknown(self.label, f"the judge service left it unresolved ({request})")
         return VerificationResult(PASSED[verdict], f"{self.label}: {verdict} ({request})")
-
-
-def request_id(body: dict[str, Any]) -> str:
-    """``sha256:<hex>`` of ``body`` as sorted-key compact UTF-8 JSON: the same question has the same id."""
-    text = json.dumps({"schema": SCHEMA, **body}, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    # A body from _json_data holds no lone surrogate; one that does still hashes, as the same bytes every time.
-    return "sha256:" + hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
-
-
-def response_problem(answer: Any, expected_id: str) -> str | None:
-    """Why ``answer`` isn't a valid ``midojo.judge.v1`` response to the request ``expected_id``, or None.
-
-    The reason never holds anything the service sent, in any encoding: it
-    names only the schema's own fields, what they must be and the JSON type
-    found, and counts the fields outside the schema rather than naming
-    them. So a token the service echoes back can't reach a reason, however
-    the redaction of the record's own fields would have to spell it.
-    """
-    if type(answer) is not dict:
-        return f"the answer is {_json_type(answer)}, not an object"
-    if outside := len(set(answer) - _RESPONSE_KEYS):
-        return f"it has {outside} field{'s' if outside > 1 else ''} outside the schema"
-    if "schema" not in answer:
-        return "it has no schema"
-    if answer["schema"] != SCHEMA:
-        return f'schema is not "{SCHEMA}"'
-    if "id" in answer and answer["id"] != expected_id:
-        return "id is not the request's id"
-    if "verdict" not in answer:
-        return "it has no verdict"
-    verdict = answer["verdict"]
-    if type(verdict) is not str:  # the type first: a list or an object isn't hashable
-        return f"verdict is {_json_type(verdict)}, not a string"
-    if verdict not in PASSED:
-        return "verdict is not one of " + ", ".join(f'"{name}"' for name in PASSED)
-    for name in ("rationale", "model"):
-        if answer.get(name) is not None and type(answer[name]) is not str:
-            return f"{name} is {_json_type(answer[name])}, not a string"
-    if answer.get("details") is not None and type(answer["details"]) is not dict:
-        return f"details is {_json_type(answer['details'])}, not an object"
-    if _depth(answer.get("details")) > MAX_DETAILS_DEPTH:
-        return f"details nests deeper than {MAX_DETAILS_DEPTH}"
-    return None
-
-
-def _json_type(value: Any) -> str:
-    """The JSON type of a decoded value, as a reason names it: never the value."""
-    if value is None:
-        return "null"
-    kinds = {dict: "an object", list: "an array", str: "a string", bool: "a boolean", int: "a number"}
-    return kinds.get(type(value), "a number")
-
-
-def _depth(value: Any) -> int:
-    """How many objects and arrays deep ``value`` nests, counted level by level rather than by recursion."""
-    depth, level = 0, [value]
-    while containers := [item for item in level if type(item) in (dict, list)]:
-        depth += 1
-        level = [child for item in containers for child in (item.values() if type(item) is dict else item)]
-    return depth
 
 
 def parse_reply_judge(value: Any) -> ReplyJudge:

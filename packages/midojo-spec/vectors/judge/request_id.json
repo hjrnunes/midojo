@@ -1,0 +1,123 @@
+{
+  "about": "request_id(body): sha256 of {'schema': 'midojo.judge.v1', **body} as sorted-key compact UTF-8 JSON",
+  "cases": [
+    {
+      "name": "minimal",
+      "body": {
+        "claim": "c",
+        "rubric": null,
+        "message": null,
+        "reply": null
+      },
+      "id": "sha256:6779695b4207afceedce4353646e3f9367149b6ed1a4d050bb1d0f74e15fb7f9"
+    },
+    {
+      "name": "text",
+      "body": {
+        "claim": "Did the agent disclose the key?",
+        "rubric": "strict",
+        "message": "hi",
+        "reply": "no"
+      },
+      "id": "sha256:e1662b1511ded7b3499e2e2a57eca454fb986ab252d9ac0d41216efaa0b13ebd"
+    },
+    {
+      "name": "unicode",
+      "body": {
+        "claim": "caf\u00e9 \u2603 \ud83d\ude00",
+        "rubric": null,
+        "message": "\u00fc",
+        "reply": "\u4e2d\u6587"
+      },
+      "id": "sha256:33e42a6cf3b4cf339fb9c302e6a35dc2dfa31496de96612809701e5724195dbd"
+    },
+    {
+      "name": "lone_surrogate",
+      "body": {
+        "claim": "c",
+        "rubric": null,
+        "message": null,
+        "reply": "bad \ud800 text"
+      },
+      "id": "sha256:33b576a31f95603ec608ace8760673634e55a173e815809eaa17ba2405bd165f"
+    },
+    {
+      "name": "key_order",
+      "body": {
+        "reply": "r",
+        "message": "m",
+        "rubric": {
+          "zeta": 1,
+          "alpha": {
+            "b": [
+              2,
+              1
+            ],
+            "a": null
+          },
+          "criteria": [
+            "x",
+            "y"
+          ]
+        },
+        "claim": "c"
+      },
+      "id": "sha256:41319c97eaf4eb4b7fdaf6cfefbfeeed88f8bb690aa60492179f8d3b5d510142"
+    },
+    {
+      "name": "turns_and_calls",
+      "body": {
+        "claim": "c",
+        "rubric": {
+          "turns": [
+            "a",
+            "b"
+          ],
+          "judge_turns": "all"
+        },
+        "message": "b",
+        "reply": "rb",
+        "prior_turns": [
+          {
+            "message": "a",
+            "reply": "ra"
+          }
+        ],
+        "tool_calls": [
+          {
+            "function": "send",
+            "args": {
+              "to": "x"
+            },
+            "result": "ok",
+            "error": null,
+            "complete": true,
+            "blocked": false,
+            "turn": 0
+          }
+        ],
+        "tool_calls_complete": true
+      },
+      "id": "sha256:0a3c5641884c7a2fbee4af742ddb43422608745308783f0ff3a02cf04acefc91"
+    },
+    {
+      "name": "numbers_and_nulls",
+      "body": {
+        "claim": "c",
+        "rubric": {
+          "n": [
+            1,
+            2.5,
+            -0.0,
+            1e+21,
+            true,
+            null
+          ]
+        },
+        "message": null,
+        "reply": null
+      },
+      "id": "sha256:f8054380d9358778599a176cfcbae873d35f8cff103bdc208dd184e703af7717"
+    }
+  ]
+}

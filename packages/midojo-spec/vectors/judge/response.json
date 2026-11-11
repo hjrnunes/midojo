@@ -1,0 +1,802 @@
+{
+  "about": "response_problem(answer, expected_id): why an answer is not a valid midojo.judge.v1 response, or null",
+  "expected_id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "cases": [
+    {
+      "name": "supported",
+      "answer": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "verdict": "supported"
+      },
+      "problem": null
+    },
+    {
+      "name": "contradicted_with_everything",
+      "answer": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "verdict": "contradicted",
+        "rationale": "because",
+        "model": "m",
+        "details": {
+          "records": [
+            {
+              "verdict": "contradicted"
+            }
+          ]
+        }
+      },
+      "problem": null
+    },
+    {
+      "name": "unresolved_without_id",
+      "answer": {
+        "schema": "midojo.judge.v1",
+        "verdict": "unresolved"
+      },
+      "problem": null
+    },
+    {
+      "name": "null_optional_fields",
+      "answer": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "verdict": "supported",
+        "rationale": null,
+        "model": null,
+        "details": null
+      },
+      "problem": null
+    },
+    {
+      "name": "a_list",
+      "answer": [
+        {
+          "schema": "midojo.judge.v1",
+          "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "verdict": "supported"
+        }
+      ],
+      "problem": "the answer is an array, not an object"
+    },
+    {
+      "name": "a_string",
+      "answer": "supported",
+      "problem": "the answer is a string, not an object"
+    },
+    {
+      "name": "null",
+      "answer": null,
+      "problem": "the answer is null, not an object"
+    },
+    {
+      "name": "a_number",
+      "answer": 1.5,
+      "problem": "the answer is a number, not an object"
+    },
+    {
+      "name": "a_boolean",
+      "answer": true,
+      "problem": "the answer is a boolean, not an object"
+    },
+    {
+      "name": "one_outside_field",
+      "answer": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "verdict": "supported",
+        "extra": 1
+      },
+      "problem": "it has 1 field outside the schema"
+    },
+    {
+      "name": "two_outside_fields",
+      "answer": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "verdict": "supported",
+        "extra": 1,
+        "more": 2
+      },
+      "problem": "it has 2 fields outside the schema"
+    },
+    {
+      "name": "no_schema",
+      "answer": {
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "verdict": "supported"
+      },
+      "problem": "it has no schema"
+    },
+    {
+      "name": "wrong_schema",
+      "answer": {
+        "schema": "midojo.judge.v0",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "verdict": "supported"
+      },
+      "problem": "schema is not \"midojo.judge.v1\""
+    },
+    {
+      "name": "another_id",
+      "answer": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "verdict": "supported"
+      },
+      "problem": "id is not the request's id"
+    },
+    {
+      "name": "no_verdict",
+      "answer": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "problem": "it has no verdict"
+    },
+    {
+      "name": "verdict_a_list",
+      "answer": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "verdict": [
+          "supported"
+        ]
+      },
+      "problem": "verdict is an array, not a string"
+    },
+    {
+      "name": "verdict_an_object",
+      "answer": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "verdict": {}
+      },
+      "problem": "verdict is an object, not a string"
+    },
+    {
+      "name": "verdict_a_number",
+      "answer": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "verdict": 1
+      },
+      "problem": "verdict is a number, not a string"
+    },
+    {
+      "name": "verdict_a_boolean",
+      "answer": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "verdict": true
+      },
+      "problem": "verdict is a boolean, not a string"
+    },
+    {
+      "name": "verdict_null",
+      "answer": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "verdict": null
+      },
+      "problem": "verdict is null, not a string"
+    },
+    {
+      "name": "verdict_unknown",
+      "answer": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "verdict": "maybe"
+      },
+      "problem": "verdict is not one of \"supported\", \"contradicted\", \"unresolved\""
+    },
+    {
+      "name": "verdict_wrong_case",
+      "answer": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "verdict": "Supported"
+      },
+      "problem": "verdict is not one of \"supported\", \"contradicted\", \"unresolved\""
+    },
+    {
+      "name": "rationale_a_number",
+      "answer": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "verdict": "supported",
+        "rationale": 1
+      },
+      "problem": "rationale is a number, not a string"
+    },
+    {
+      "name": "rationale_a_list",
+      "answer": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "verdict": "supported",
+        "rationale": []
+      },
+      "problem": "rationale is an array, not a string"
+    },
+    {
+      "name": "model_an_object",
+      "answer": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "verdict": "supported",
+        "model": {}
+      },
+      "problem": "model is an object, not a string"
+    },
+    {
+      "name": "details_a_list",
+      "answer": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "verdict": "supported",
+        "details": []
+      },
+      "problem": "details is an array, not an object"
+    },
+    {
+      "name": "details_a_string",
+      "answer": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "verdict": "supported",
+        "details": "x"
+      },
+      "problem": "details is a string, not an object"
+    },
+    {
+      "name": "details_64_deep",
+      "answer": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "verdict": "supported",
+        "details": {
+          "k": {
+            "k": {
+              "k": {
+                "k": {
+                  "k": {
+                    "k": {
+                      "k": {
+                        "k": {
+                          "k": {
+                            "k": {
+                              "k": {
+                                "k": {
+                                  "k": {
+                                    "k": {
+                                      "k": {
+                                        "k": {
+                                          "k": {
+                                            "k": {
+                                              "k": {
+                                                "k": {
+                                                  "k": {
+                                                    "k": {
+                                                      "k": {
+                                                        "k": {
+                                                          "k": {
+                                                            "k": {
+                                                              "k": {
+                                                                "k": {
+                                                                  "k": {
+                                                                    "k": {
+                                                                      "k": {
+                                                                        "k": {
+                                                                          "k": {
+                                                                            "k": {
+                                                                              "k": {
+                                                                                "k": {
+                                                                                  "k": {
+                                                                                    "k": {
+                                                                                      "k": {
+                                                                                        "k": {
+                                                                                          "k": {
+                                                                                            "k": {
+                                                                                              "k": {
+                                                                                                "k": {
+                                                                                                  "k": {
+                                                                                                    "k": {
+                                                                                                      "k": {
+                                                                                                        "k": {
+                                                                                                          "k": {
+                                                                                                            "k": {
+                                                                                                              "k": {
+                                                                                                                "k": {
+                                                                                                                  "k": {
+                                                                                                                    "k": {
+                                                                                                                      "k": {
+                                                                                                                        "k": {
+                                                                                                                          "k": {
+                                                                                                                            "k": {
+                                                                                                                              "k": {
+                                                                                                                                "k": {
+                                                                                                                                  "k": {
+                                                                                                                                    "k": {
+                                                                                                                                      "k": {}
+                                                                                                                                    }
+                                                                                                                                  }
+                                                                                                                                }
+                                                                                                                              }
+                                                                                                                            }
+                                                                                                                          }
+                                                                                                                        }
+                                                                                                                      }
+                                                                                                                    }
+                                                                                                                  }
+                                                                                                                }
+                                                                                                              }
+                                                                                                            }
+                                                                                                          }
+                                                                                                        }
+                                                                                                      }
+                                                                                                    }
+                                                                                                  }
+                                                                                                }
+                                                                                              }
+                                                                                            }
+                                                                                          }
+                                                                                        }
+                                                                                      }
+                                                                                    }
+                                                                                  }
+                                                                                }
+                                                                              }
+                                                                            }
+                                                                          }
+                                                                        }
+                                                                      }
+                                                                    }
+                                                                  }
+                                                                }
+                                                              }
+                                                            }
+                                                          }
+                                                        }
+                                                      }
+                                                    }
+                                                  }
+                                                }
+                                              }
+                                            }
+                                          }
+                                        }
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "problem": null
+    },
+    {
+      "name": "details_65_deep",
+      "answer": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "verdict": "supported",
+        "details": {
+          "k": {
+            "k": {
+              "k": {
+                "k": {
+                  "k": {
+                    "k": {
+                      "k": {
+                        "k": {
+                          "k": {
+                            "k": {
+                              "k": {
+                                "k": {
+                                  "k": {
+                                    "k": {
+                                      "k": {
+                                        "k": {
+                                          "k": {
+                                            "k": {
+                                              "k": {
+                                                "k": {
+                                                  "k": {
+                                                    "k": {
+                                                      "k": {
+                                                        "k": {
+                                                          "k": {
+                                                            "k": {
+                                                              "k": {
+                                                                "k": {
+                                                                  "k": {
+                                                                    "k": {
+                                                                      "k": {
+                                                                        "k": {
+                                                                          "k": {
+                                                                            "k": {
+                                                                              "k": {
+                                                                                "k": {
+                                                                                  "k": {
+                                                                                    "k": {
+                                                                                      "k": {
+                                                                                        "k": {
+                                                                                          "k": {
+                                                                                            "k": {
+                                                                                              "k": {
+                                                                                                "k": {
+                                                                                                  "k": {
+                                                                                                    "k": {
+                                                                                                      "k": {
+                                                                                                        "k": {
+                                                                                                          "k": {
+                                                                                                            "k": {
+                                                                                                              "k": {
+                                                                                                                "k": {
+                                                                                                                  "k": {
+                                                                                                                    "k": {
+                                                                                                                      "k": {
+                                                                                                                        "k": {
+                                                                                                                          "k": {
+                                                                                                                            "k": {
+                                                                                                                              "k": {
+                                                                                                                                "k": {
+                                                                                                                                  "k": {
+                                                                                                                                    "k": {
+                                                                                                                                      "k": {
+                                                                                                                                        "k": {}
+                                                                                                                                      }
+                                                                                                                                    }
+                                                                                                                                  }
+                                                                                                                                }
+                                                                                                                              }
+                                                                                                                            }
+                                                                                                                          }
+                                                                                                                        }
+                                                                                                                      }
+                                                                                                                    }
+                                                                                                                  }
+                                                                                                                }
+                                                                                                              }
+                                                                                                            }
+                                                                                                          }
+                                                                                                        }
+                                                                                                      }
+                                                                                                    }
+                                                                                                  }
+                                                                                                }
+                                                                                              }
+                                                                                            }
+                                                                                          }
+                                                                                        }
+                                                                                      }
+                                                                                    }
+                                                                                  }
+                                                                                }
+                                                                              }
+                                                                            }
+                                                                          }
+                                                                        }
+                                                                      }
+                                                                    }
+                                                                  }
+                                                                }
+                                                              }
+                                                            }
+                                                          }
+                                                        }
+                                                      }
+                                                    }
+                                                  }
+                                                }
+                                              }
+                                            }
+                                          }
+                                        }
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "problem": "details nests deeper than 64"
+    },
+    {
+      "name": "details_65_deep_through_lists",
+      "answer": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "verdict": "supported",
+        "details": {
+          "a": [
+            [
+              [
+                [
+                  [
+                    [
+                      [
+                        [
+                          [
+                            [
+                              [
+                                [
+                                  [
+                                    [
+                                      [
+                                        [
+                                          [
+                                            [
+                                              [
+                                                [
+                                                  [
+                                                    [
+                                                      [
+                                                        [
+                                                          [
+                                                            [
+                                                              [
+                                                                [
+                                                                  [
+                                                                    [
+                                                                      [
+                                                                        [
+                                                                          [
+                                                                            [
+                                                                              [
+                                                                                [
+                                                                                  [
+                                                                                    [
+                                                                                      [
+                                                                                        [
+                                                                                          [
+                                                                                            [
+                                                                                              [
+                                                                                                [
+                                                                                                  [
+                                                                                                    [
+                                                                                                      [
+                                                                                                        [
+                                                                                                          [
+                                                                                                            [
+                                                                                                              [
+                                                                                                                [
+                                                                                                                  [
+                                                                                                                    [
+                                                                                                                      [
+                                                                                                                        [
+                                                                                                                          [
+                                                                                                                            [
+                                                                                                                              [
+                                                                                                                                [
+                                                                                                                                  [
+                                                                                                                                    [
+                                                                                                                                      [
+                                                                                                                                        []
+                                                                                                                                      ]
+                                                                                                                                    ]
+                                                                                                                                  ]
+                                                                                                                                ]
+                                                                                                                              ]
+                                                                                                                            ]
+                                                                                                                          ]
+                                                                                                                        ]
+                                                                                                                      ]
+                                                                                                                    ]
+                                                                                                                  ]
+                                                                                                                ]
+                                                                                                              ]
+                                                                                                            ]
+                                                                                                          ]
+                                                                                                        ]
+                                                                                                      ]
+                                                                                                    ]
+                                                                                                  ]
+                                                                                                ]
+                                                                                              ]
+                                                                                            ]
+                                                                                          ]
+                                                                                        ]
+                                                                                      ]
+                                                                                    ]
+                                                                                  ]
+                                                                                ]
+                                                                              ]
+                                                                            ]
+                                                                          ]
+                                                                        ]
+                                                                      ]
+                                                                    ]
+                                                                  ]
+                                                                ]
+                                                              ]
+                                                            ]
+                                                          ]
+                                                        ]
+                                                      ]
+                                                    ]
+                                                  ]
+                                                ]
+                                              ]
+                                            ]
+                                          ]
+                                        ]
+                                      ]
+                                    ]
+                                  ]
+                                ]
+                              ]
+                            ]
+                          ]
+                        ]
+                      ]
+                    ]
+                  ]
+                ]
+              ]
+            ]
+          ]
+        }
+      },
+      "problem": "details nests deeper than 64"
+    },
+    {
+      "name": "details_64_deep_through_lists",
+      "answer": {
+        "schema": "midojo.judge.v1",
+        "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "verdict": "supported",
+        "details": {
+          "a": [
+            [
+              [
+                [
+                  [
+                    [
+                      [
+                        [
+                          [
+                            [
+                              [
+                                [
+                                  [
+                                    [
+                                      [
+                                        [
+                                          [
+                                            [
+                                              [
+                                                [
+                                                  [
+                                                    [
+                                                      [
+                                                        [
+                                                          [
+                                                            [
+                                                              [
+                                                                [
+                                                                  [
+                                                                    [
+                                                                      [
+                                                                        [
+                                                                          [
+                                                                            [
+                                                                              [
+                                                                                [
+                                                                                  [
+                                                                                    [
+                                                                                      [
+                                                                                        [
+                                                                                          [
+                                                                                            [
+                                                                                              [
+                                                                                                [
+                                                                                                  [
+                                                                                                    [
+                                                                                                      [
+                                                                                                        [
+                                                                                                          [
+                                                                                                            [
+                                                                                                              [
+                                                                                                                [
+                                                                                                                  [
+                                                                                                                    [
+                                                                                                                      [
+                                                                                                                        [
+                                                                                                                          [
+                                                                                                                            [
+                                                                                                                              [
+                                                                                                                                [
+                                                                                                                                  [
+                                                                                                                                    [
+                                                                                                                                      []
+                                                                                                                                    ]
+                                                                                                                                  ]
+                                                                                                                                ]
+                                                                                                                              ]
+                                                                                                                            ]
+                                                                                                                          ]
+                                                                                                                        ]
+                                                                                                                      ]
+                                                                                                                    ]
+                                                                                                                  ]
+                                                                                                                ]
+                                                                                                              ]
+                                                                                                            ]
+                                                                                                          ]
+                                                                                                        ]
+                                                                                                      ]
+                                                                                                    ]
+                                                                                                  ]
+                                                                                                ]
+                                                                                              ]
+                                                                                            ]
+                                                                                          ]
+                                                                                        ]
+                                                                                      ]
+                                                                                    ]
+                                                                                  ]
+                                                                                ]
+                                                                              ]
+                                                                            ]
+                                                                          ]
+                                                                        ]
+                                                                      ]
+                                                                    ]
+                                                                  ]
+                                                                ]
+                                                              ]
+                                                            ]
+                                                          ]
+                                                        ]
+                                                      ]
+                                                    ]
+                                                  ]
+                                                ]
+                                              ]
+                                            ]
+                                          ]
+                                        ]
+                                      ]
+                                    ]
+                                  ]
+                                ]
+                              ]
+                            ]
+                          ]
+                        ]
+                      ]
+                    ]
+                  ]
+                ]
+              ]
+            ]
+          ]
+        }
+      },
+      "problem": null
+    }
+  ]
+}

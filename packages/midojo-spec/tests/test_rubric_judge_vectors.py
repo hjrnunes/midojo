@@ -1,6 +1,6 @@
 """The rubric judge gives Garak's outputs on every vector computed from Garak's functions.
 
-``fixtures/rubric/vectors.json`` holds each case's inputs and the output of the
+``vectors/rubric/vectors.json`` holds each case's inputs and the output of the
 Garak function (``generate_vectors.py``, run in Garak's interpreter at 968cc22).
 """
 
@@ -11,9 +11,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from midojo_sdk import rubric_judge as port
 
-VECTORS = json.loads((Path(__file__).parent / "fixtures/rubric/vectors.json").read_text(encoding="utf-8"))
+from midojo_spec import rubric_judge as port
+
+VECTORS = json.loads((Path(__file__).parents[1] / "vectors" / "rubric" / "vectors.json").read_text(encoding="utf-8"))
 EVIDENCES = VECTORS["evidences"]
 GROUPS = VECTORS["vectors"]
 

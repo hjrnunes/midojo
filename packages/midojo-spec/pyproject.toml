@@ -1,0 +1,46 @@
+[project]
+name = "midojo-spec"
+version = "0.1.0"
+description = "The MiDojo contracts: injection spec schema, plan codec, snapshot digest, rubric judge and judge records"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Security",
+    "Typing :: Typed",
+]
+# The standard library only, so a Garak or consumer environment installs it
+# without MiDojo's runtime. Adding a dependency here is a contract change.
+requires-python = ">= 3.11"
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/asago-ai/midojo"
+Repository = "https://github.com/asago-ai/midojo"
+Issues = "https://github.com/asago-ai/midojo/issues"
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/midojo_spec"]
+
+[tool.hatch.build.targets.sdist]
+include = ["/src/midojo_spec", "/tests", "/vectors", "/pyproject.toml", "/README.md", "/LICENSE"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+# The repository's rules, at this package's floor: ruff would otherwise rewrite code
+# to the repository's Python 3.12.
+[tool.ruff]
+extend = "../../pyproject.toml"
+target-version = "py311"

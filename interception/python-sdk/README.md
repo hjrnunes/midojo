@@ -95,7 +95,7 @@ Three modules support a remote interceptor and a judge service; most interceptio
 
 - `midojo_sdk.link` holds the `midojo-binding-v1` frame codec and the service side of a remote interception link: `LinkRecorder` and `LinkWorld` record and read the environment through frames instead of HTTP. It imports only the standard library and `midojo_sdk`.
 - `midojo_sdk.binding` is the driver's end of that link: `Binding` dials out to the interceptor service over one WebSocket per evaluation, with the subprotocol `midojo-binding.v1`. It needs the `mcp` extra (`websockets`).
-- `midojo_sdk.rubric_judge` is a strict yes/no semantic judge for a reply oracle. It builds the evidence and the request from a rubric and the recorded calls, and checks the response. It imports only the standard library.
+- `midojo_spec.rubric_judge` (the `midojo-spec` package, which has moved out of the SDK) is a strict yes/no semantic judge for a reply oracle. It builds the evidence and the request from a rubric and the recorded calls, and checks the response. It imports only the standard library.
 
 The [MiDojo README](https://github.com/asago-ai/midojo#run-the-interceptor-as-a-separate-service) describes how to run the interceptor service.
 

@@ -1,6 +1,6 @@
 """The judge reproduces Garak's requests and records for multi-turn conversations.
 
-``fixtures/rubric/turns.json`` holds two- and three-turn conversations as MiDojo
+``vectors/rubric/turns.json`` holds two- and three-turn conversations as MiDojo
 records them and every judge request and record Garak's ``SequentialInjection``
 and ``RubricJudge`` made for them (the consumer's ``generate_turns.py``, Garak at
 968cc22). ``judge_turns`` ``final`` grades the last turn and ``all`` every turn;
@@ -16,9 +16,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from midojo_sdk import rubric_judge as port
 
-TURNS = json.loads((Path(__file__).parent / "fixtures/rubric/turns.json").read_text(encoding="utf-8"))
+from midojo_spec import rubric_judge as port
+
+TURNS = json.loads((Path(__file__).parents[1] / "vectors" / "rubric" / "turns.json").read_text(encoding="utf-8"))
 MODES = ("final", "all")
 RUBRIC_KEYS = ("question", "criteria", "facts", "runtime_facts")
 
