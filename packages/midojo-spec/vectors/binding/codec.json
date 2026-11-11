@@ -1,0 +1,622 @@
+{
+  "about": "midojo-binding-v1 frames, answers and control messages: the texts a writer must produce (canonical) or a reader must accept, the texts a reader must refuse, and the rejection kinds",
+  "constants": {
+    "api": "midojo-binding-v1",
+    "subprotocol": "midojo-binding.v1",
+    "heartbeat_interval_seconds": 5.0,
+    "link_lost_reason": "link-lost",
+    "invalid_request": "invalid_request",
+    "ops": [
+      "start_call",
+      "finish_call_detailed",
+      "report_capture_failure",
+      "env_read",
+      "env_change"
+    ],
+    "message_ops": [
+      "bind",
+      "bound",
+      "unbind",
+      "unbound",
+      "ping",
+      "rejected"
+    ],
+    "bind_fields": [
+      "api",
+      "plan",
+      "policy",
+      "upstream_url",
+      "host_tools",
+      "faces"
+    ],
+    "bound_fields": [
+      "tool_url",
+      "tool_token",
+      "tools"
+    ],
+    "unbound_fields": [
+      "injection_outcomes"
+    ]
+  },
+  "frames": [
+    {
+      "name": "start_call",
+      "text": "{\"args\":{\"call_id\":\"c1\"},\"id\":0,\"op\":\"start_call\"}",
+      "frame": {
+        "id": 0,
+        "op": "start_call",
+        "args": {
+          "call_id": "c1"
+        }
+      },
+      "canonical": true
+    },
+    {
+      "name": "finish_call_detailed",
+      "text": "{\"args\":{\"call_id\":\"c1\",\"n\":2},\"id\":1,\"op\":\"finish_call_detailed\"}",
+      "frame": {
+        "id": 1,
+        "op": "finish_call_detailed",
+        "args": {
+          "call_id": "c1",
+          "n": 2
+        }
+      },
+      "canonical": true
+    },
+    {
+      "name": "report_capture_failure",
+      "text": "{\"args\":{},\"id\":7,\"op\":\"report_capture_failure\"}",
+      "frame": {
+        "id": 7,
+        "op": "report_capture_failure",
+        "args": {}
+      },
+      "canonical": true
+    },
+    {
+      "name": "env_read",
+      "text": "{\"args\":{\"keys\":[\"a\",\"b\"]},\"id\":12,\"op\":\"env_read\"}",
+      "frame": {
+        "id": 12,
+        "op": "env_read",
+        "args": {
+          "keys": [
+            "a",
+            "b"
+          ]
+        }
+      },
+      "canonical": true
+    },
+    {
+      "name": "env_change",
+      "text": "{\"args\":{\"expected\":3,\"set\":{\"x\":null}},\"id\":9007199254740993,\"op\":\"env_change\"}",
+      "frame": {
+        "id": 9007199254740993,
+        "op": "env_change",
+        "args": {
+          "expected": 3,
+          "set": {
+            "x": null
+          }
+        }
+      },
+      "canonical": true,
+      "note": "an id past 2**53 stays an exact integer"
+    },
+    {
+      "name": "non_ascii_is_escaped_by_the_writer",
+      "text": "{\"args\":{\"note\":\"caf\\u00e9 \\ud83d\\ude00\"},\"id\":3,\"op\":\"env_change\"}",
+      "frame": {
+        "id": 3,
+        "op": "env_change",
+        "args": {
+          "note": "caf\u00e9 \ud83d\ude00"
+        }
+      },
+      "canonical": true
+    },
+    {
+      "name": "spaces_and_key_order_are_read",
+      "text": " { \"op\" : \"env_read\" , \"id\" : 4 , \"args\" : { } } ",
+      "frame": {
+        "id": 4,
+        "op": "env_read",
+        "args": {}
+      },
+      "canonical": false
+    },
+    {
+      "name": "unescaped_non_ascii_is_read",
+      "text": "{\"args\":{\"note\":\"caf\u00e9\"},\"id\":5,\"op\":\"env_change\"}",
+      "frame": {
+        "id": 5,
+        "op": "env_change",
+        "args": {
+          "note": "caf\u00e9"
+        }
+      },
+      "canonical": false
+    }
+  ],
+  "frames_refused": [
+    {
+      "name": "empty",
+      "text": "",
+      "error": "the frame is not JSON"
+    },
+    {
+      "name": "not_json",
+      "text": "not json",
+      "error": "the frame is not JSON"
+    },
+    {
+      "name": "a_list",
+      "text": "[]",
+      "error": "a frame is a JSON object"
+    },
+    {
+      "name": "null",
+      "text": "null",
+      "error": "a frame is a JSON object"
+    },
+    {
+      "name": "a_string",
+      "text": "\"frame\"",
+      "error": "a frame is a JSON object"
+    },
+    {
+      "name": "no_args",
+      "text": "{\"id\":0,\"op\":\"start_call\"}",
+      "error": "a frame holds exactly id, op and args"
+    },
+    {
+      "name": "no_id",
+      "text": "{\"args\":{},\"op\":\"start_call\"}",
+      "error": "a frame holds exactly id, op and args"
+    },
+    {
+      "name": "an_extra_key",
+      "text": "{\"args\":{},\"extra\":1,\"id\":0,\"op\":\"start_call\"}",
+      "error": "a frame holds exactly id, op and args"
+    },
+    {
+      "name": "id_negative",
+      "text": "{\"args\":{},\"id\":-1,\"op\":\"start_call\"}",
+      "error": "a frame id is a non-negative int"
+    },
+    {
+      "name": "id_a_boolean",
+      "text": "{\"args\":{},\"id\":true,\"op\":\"start_call\"}",
+      "error": "a frame id is a non-negative int"
+    },
+    {
+      "name": "id_a_string",
+      "text": "{\"args\":{},\"id\":\"0\",\"op\":\"start_call\"}",
+      "error": "a frame id is a non-negative int"
+    },
+    {
+      "name": "id_a_float",
+      "text": "{\"args\":{},\"id\":1.0,\"op\":\"start_call\"}",
+      "error": "a frame id is a non-negative int"
+    },
+    {
+      "name": "id_null",
+      "text": "{\"args\":{},\"id\":null,\"op\":\"start_call\"}",
+      "error": "a frame id is a non-negative int"
+    },
+    {
+      "name": "unknown_op",
+      "text": "{\"args\":{},\"id\":0,\"op\":\"reset\"}",
+      "error": "unknown op 'reset'"
+    },
+    {
+      "name": "a_control_message_op",
+      "text": "{\"args\":{},\"id\":0,\"op\":\"bind\"}",
+      "error": "unknown op 'bind'"
+    },
+    {
+      "name": "op_a_number",
+      "text": "{\"args\":{},\"id\":0,\"op\":1}",
+      "error": "unknown op 1"
+    },
+    {
+      "name": "op_null",
+      "text": "{\"args\":{},\"id\":0,\"op\":null}",
+      "error": "unknown op None"
+    },
+    {
+      "name": "args_a_list",
+      "text": "{\"args\":[],\"id\":0,\"op\":\"env_read\"}",
+      "error": "a frame's args are an object"
+    },
+    {
+      "name": "args_null",
+      "text": "{\"args\":null,\"id\":0,\"op\":\"env_read\"}",
+      "error": "a frame's args are an object"
+    }
+  ],
+  "answers": [
+    {
+      "name": "applied_record",
+      "text": "{\"ok\":null,\"re\":0}",
+      "answer": {
+        "re": 0,
+        "ok": null,
+        "rejected": null
+      },
+      "canonical": true
+    },
+    {
+      "name": "a_result",
+      "text": "{\"ok\":{\"revision\":3,\"values\":[1,2]},\"re\":4}",
+      "answer": {
+        "re": 4,
+        "ok": {
+          "revision": 3,
+          "values": [
+            1,
+            2
+          ]
+        },
+        "rejected": null
+      },
+      "canonical": true
+    },
+    {
+      "name": "a_scalar_result",
+      "text": "{\"ok\":false,\"re\":5}",
+      "answer": {
+        "re": 5,
+        "ok": false,
+        "rejected": null
+      },
+      "canonical": true
+    },
+    {
+      "name": "a_rejection",
+      "text": "{\"re\":6,\"rejected\":{\"detail\":\"closed\",\"kind\":\"sealed\",\"late_fact\":true}}",
+      "answer": {
+        "re": 6,
+        "ok": null,
+        "rejected": {
+          "kind": "sealed",
+          "detail": "closed",
+          "late_fact": true
+        }
+      },
+      "canonical": true
+    },
+    {
+      "name": "a_rejection_that_is_not_a_late_fact",
+      "text": "{\"re\":7,\"rejected\":{\"detail\":\"\",\"kind\":\"invalid_request\",\"late_fact\":false}}",
+      "answer": {
+        "re": 7,
+        "ok": null,
+        "rejected": {
+          "kind": "invalid_request",
+          "detail": "",
+          "late_fact": false
+        }
+      },
+      "canonical": true
+    },
+    {
+      "name": "key_order_and_spaces_are_read",
+      "text": "{ \"rejected\" : {\"late_fact\":false,\"kind\":\"forbidden\",\"detail\":\"d\"}, \"re\" : 8 }",
+      "answer": {
+        "re": 8,
+        "ok": null,
+        "rejected": {
+          "kind": "forbidden",
+          "detail": "d",
+          "late_fact": false
+        }
+      },
+      "canonical": false
+    }
+  ],
+  "answers_refused": [
+    {
+      "name": "not_json",
+      "text": "{",
+      "error": "the answer is not JSON"
+    },
+    {
+      "name": "a_list",
+      "text": "[]",
+      "error": "an answer names the frame it answers in re"
+    },
+    {
+      "name": "null",
+      "text": "null",
+      "error": "an answer names the frame it answers in re"
+    },
+    {
+      "name": "no_re",
+      "text": "{\"ok\":1}",
+      "error": "an answer names the frame it answers in re"
+    },
+    {
+      "name": "neither_ok_nor_rejected",
+      "text": "{\"re\":0}",
+      "error": "an answer is ok or rejected, not both or neither"
+    },
+    {
+      "name": "both_ok_and_rejected",
+      "text": "{\"ok\":1,\"re\":0,\"rejected\":{\"detail\":\"d\",\"kind\":\"sealed\",\"late_fact\":false}}",
+      "error": "an answer is ok or rejected, not both or neither"
+    },
+    {
+      "name": "an_extra_key",
+      "text": "{\"extra\":1,\"ok\":1,\"re\":0}",
+      "error": "an answer is ok or rejected, not both or neither"
+    },
+    {
+      "name": "re_negative",
+      "text": "{\"ok\":1,\"re\":-1}",
+      "error": "an answer's re is a non-negative int"
+    },
+    {
+      "name": "re_a_boolean",
+      "text": "{\"ok\":1,\"re\":false}",
+      "error": "an answer's re is a non-negative int"
+    },
+    {
+      "name": "re_a_string",
+      "text": "{\"ok\":1,\"re\":\"0\"}",
+      "error": "an answer's re is a non-negative int"
+    },
+    {
+      "name": "re_a_float",
+      "text": "{\"ok\":1,\"re\":0.0}",
+      "error": "an answer's re is a non-negative int"
+    },
+    {
+      "name": "rejection_missing_a_field",
+      "text": "{\"re\":0,\"rejected\":{\"detail\":\"d\",\"kind\":\"sealed\"}}",
+      "error": "a rejection holds exactly kind, detail and late_fact"
+    },
+    {
+      "name": "rejection_with_an_extra_field",
+      "text": "{\"re\":0,\"rejected\":{\"detail\":\"d\",\"extra\":1,\"kind\":\"sealed\",\"late_fact\":false}}",
+      "error": "a rejection holds exactly kind, detail and late_fact"
+    },
+    {
+      "name": "rejection_an_empty_object",
+      "text": "{\"re\":0,\"rejected\":{}}",
+      "error": "a rejection holds exactly kind, detail and late_fact"
+    },
+    {
+      "name": "rejection_an_empty_list",
+      "text": "{\"re\":0,\"rejected\":[]}",
+      "error": "a rejection is an object"
+    },
+    {
+      "name": "rejection_a_number",
+      "text": "{\"re\":0,\"rejected\":5}",
+      "error": "a rejection is an object"
+    },
+    {
+      "name": "rejection_null",
+      "text": "{\"re\":0,\"rejected\":null}",
+      "error": "a rejection is an object"
+    },
+    {
+      "name": "rejection_a_boolean",
+      "text": "{\"re\":0,\"rejected\":true}",
+      "error": "a rejection is an object"
+    },
+    {
+      "name": "rejection_a_string",
+      "text": "{\"re\":0,\"rejected\":\"sealed\"}",
+      "error": "a rejection is an object"
+    },
+    {
+      "name": "rejection_a_mixed_list",
+      "text": "{\"re\":0,\"rejected\":[3,\"a\"]}",
+      "error": "a rejection is an object"
+    },
+    {
+      "name": "kind_a_number",
+      "text": "{\"re\":0,\"rejected\":{\"detail\":\"d\",\"kind\":1,\"late_fact\":false}}",
+      "error": "a rejection's kind and detail are strings"
+    },
+    {
+      "name": "detail_null",
+      "text": "{\"re\":0,\"rejected\":{\"detail\":null,\"kind\":\"sealed\",\"late_fact\":false}}",
+      "error": "a rejection's kind and detail are strings"
+    },
+    {
+      "name": "late_fact_a_string",
+      "text": "{\"re\":0,\"rejected\":{\"detail\":\"d\",\"kind\":\"sealed\",\"late_fact\":\"no\"}}",
+      "error": "a rejection's late_fact is a bool"
+    },
+    {
+      "name": "late_fact_a_number",
+      "text": "{\"re\":0,\"rejected\":{\"detail\":\"d\",\"kind\":\"sealed\",\"late_fact\":0}}",
+      "error": "a rejection's late_fact is a bool"
+    }
+  ],
+  "rejection_kinds": [
+    "unknown_run",
+    "unknown_evaluation",
+    "unknown_task",
+    "idempotency_conflict",
+    "control_token_required",
+    "invalid_session",
+    "session_closed",
+    "forbidden",
+    "closing",
+    "sealed",
+    "closure_pending",
+    "not_sealed",
+    "call_conflict",
+    "invalid_disposition",
+    "turn_pending",
+    "turn_not_started",
+    "turn_answered",
+    "revision_conflict",
+    "invalid_environment",
+    "unsupported_value"
+  ],
+  "unknown_rejection_kinds": [
+    "",
+    "Sealed",
+    "sealed ",
+    "teapot",
+    "invalid-request"
+  ],
+  "messages": [
+    {
+      "name": "ping",
+      "text": "{\"op\":\"ping\"}",
+      "op": "ping",
+      "fields": {},
+      "canonical": true
+    },
+    {
+      "name": "unbind",
+      "text": "{\"op\":\"unbind\"}",
+      "op": "unbind",
+      "fields": {},
+      "canonical": true
+    },
+    {
+      "name": "bind",
+      "text": "{\"api\":\"midojo-binding-v1\",\"faces\":[\"mcp\"],\"host_tools\":null,\"op\":\"bind\",\"plan\":{\"instructions\":[]},\"policy\":null,\"upstream_url\":\"http://127.0.0.1:8770/mcp\"}",
+      "op": "bind",
+      "fields": {
+        "api": "midojo-binding-v1",
+        "faces": [
+          "mcp"
+        ],
+        "host_tools": null,
+        "plan": {
+          "instructions": []
+        },
+        "policy": null,
+        "upstream_url": "http://127.0.0.1:8770/mcp"
+      },
+      "canonical": true
+    },
+    {
+      "name": "bound",
+      "text": "{\"op\":\"bound\",\"tool_token\":\"t\",\"tool_url\":\"http://127.0.0.1:1/b/x/mcp\",\"tools\":[\"a\",\"b\"]}",
+      "op": "bound",
+      "fields": {
+        "tool_url": "http://127.0.0.1:1/b/x/mcp",
+        "tool_token": "t",
+        "tools": [
+          "a",
+          "b"
+        ]
+      },
+      "canonical": true
+    },
+    {
+      "name": "unbound",
+      "text": "{\"injection_outcomes\":[],\"op\":\"unbound\"}",
+      "op": "unbound",
+      "fields": {
+        "injection_outcomes": []
+      },
+      "canonical": true
+    },
+    {
+      "name": "rejected",
+      "text": "{\"detail\":\"no such binding\",\"op\":\"rejected\"}",
+      "op": "rejected",
+      "fields": {
+        "detail": "no such binding"
+      },
+      "canonical": true,
+      "note": "the codec checks the envelope; the body of each op is read by the side that knows it"
+    },
+    {
+      "name": "a_body_the_codec_does_not_check",
+      "text": "{\"anything\":[1,{\"a\":null}],\"op\":\"bound\"}",
+      "op": "bound",
+      "fields": {
+        "anything": [
+          1,
+          {
+            "a": null
+          }
+        ]
+      },
+      "canonical": true
+    },
+    {
+      "name": "spaces_and_key_order_are_read",
+      "text": " { \"x\" : 1 , \"op\" : \"ping\" } ",
+      "op": "ping",
+      "fields": {
+        "x": 1
+      },
+      "canonical": false
+    }
+  ],
+  "messages_refused": [
+    {
+      "name": "not_json",
+      "text": "ping",
+      "error": "the control message is not JSON"
+    },
+    {
+      "name": "a_list",
+      "text": "[]",
+      "error": "a control message is a JSON object"
+    },
+    {
+      "name": "null",
+      "text": "null",
+      "error": "a control message is a JSON object"
+    },
+    {
+      "name": "no_op",
+      "text": "{\"tool_url\":\"u\"}",
+      "error": "unknown control message op None"
+    },
+    {
+      "name": "op_a_number",
+      "text": "{\"op\":1}",
+      "error": "unknown control message op 1"
+    },
+    {
+      "name": "op_null",
+      "text": "{\"op\":null}",
+      "error": "unknown control message op None"
+    },
+    {
+      "name": "unknown_op",
+      "text": "{\"op\":\"hello\"}",
+      "error": "unknown control message op 'hello'"
+    },
+    {
+      "name": "a_frame_op",
+      "text": "{\"op\":\"start_call\"}",
+      "error": "unknown control message op 'start_call'"
+    },
+    {
+      "name": "a_different_case",
+      "text": "{\"op\":\"Ping\"}",
+      "error": "unknown control message op 'Ping'"
+    }
+  ],
+  "encode_refused_ops": [
+    "",
+    "hello",
+    "start_call",
+    "Ping",
+    "bound "
+  ],
+  "nested_too_deep": {
+    "text": "an opening bracket repeated depth times (and the same with the closing brackets after it)",
+    "depth": 100000,
+    "frame": "the frame is not JSON",
+    "answer": "the answer is not JSON",
+    "message": "the control message is not JSON"
+  }
+}

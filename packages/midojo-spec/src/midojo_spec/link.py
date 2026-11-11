@@ -176,7 +176,7 @@ def decode_frame(data: str) -> Frame:
     """The frame ``data`` holds, or :class:`LinkFault` when it isn't one."""
     try:
         document = json.loads(data)
-    except (TypeError, ValueError) as e:  # RecursionError: nested past what the parser holds
+    except (TypeError, ValueError, RecursionError) as e:  # RecursionError: nested past what the parser holds
         raise LinkFault(f"the frame is not JSON: {e}") from e
     if not isinstance(document, dict):
         raise LinkFault(f"a frame is a JSON object, not {type(document).__name__}")
@@ -212,7 +212,7 @@ def decode_answer(data: str) -> Answer:
     """The answer ``data`` holds, or :class:`LinkFault` when it isn't one."""
     try:
         document = json.loads(data)
-    except (TypeError, ValueError) as e:
+    except (TypeError, ValueError, RecursionError) as e:
         raise LinkFault(f"the answer is not JSON: {e}") from e
     if not isinstance(document, dict) or "re" not in document:
         raise LinkFault("an answer names the frame it answers in re")
@@ -225,7 +225,9 @@ def decode_answer(data: str) -> Answer:
     if has_ok:
         return Answer(re, ok=document["ok"])
     rejected = document["rejected"]
-    if not isinstance(rejected, dict) or set(rejected) != {"kind", "detail", "late_fact"}:
+    if not isinstance(rejected, dict):
+        raise LinkFault(f"a rejection is an object, not {type(rejected).__name__}")
+    if set(rejected) != {"kind", "detail", "late_fact"}:
         raise LinkFault(f"a rejection holds exactly kind, detail and late_fact, not {sorted(rejected)}")
     if not isinstance(rejected["kind"], str) or not isinstance(rejected["detail"], str):
         raise LinkFault("a rejection's kind and detail are strings")
@@ -292,7 +294,7 @@ def decode_message(data: str) -> Message:
     """The control message ``data`` holds, or :class:`LinkFault` when it isn't one."""
     try:
         document = json.loads(data)
-    except (TypeError, ValueError) as e:
+    except (TypeError, ValueError, RecursionError) as e:
         raise LinkFault(f"the control message is not JSON: {e}") from e
     if not isinstance(document, dict):
         raise LinkFault(f"a control message is a JSON object, not {type(document).__name__}")

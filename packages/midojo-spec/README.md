@@ -48,6 +48,7 @@ distribution, not the wheel.
 | `vectors/rubric/` | `vectors.json`, `fidelity.json`, `turns.json`; see its README |
 | `vectors/snapshot/` | `vectors.json`: snapshots and their digests |
 | `vectors/plan/` | `plans.json` (accepted plans, defaults and refusals; an accepted plan is a fixpoint of decode then encode) and `before_call_arguments.json` (a plan as an older codec wrote it) |
+| `vectors/binding/` | `codec.json`: frames, answers, rejections and messages the link codec accepts and refuses |
 
 ## Tests
 
