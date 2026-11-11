@@ -18,6 +18,13 @@ holds replies of that kind, malformed and plain ones, and the records and texts 
 ``_judge_output`` and ``_strip_code_fence`` give for them, computed at Garak 3e601af3 by
 ``vectors/rubric/generate_fences.py``.
 
+Garak's record also holds the judge's ``model`` and the ``prompt`` it sent (since 3097e41b).
+This record holds neither, by design: the judge's identity lives in the judge exchange row
+(``judge_exchange.Exchange``: ``model``, ``prompt_version`` and the ``messages`` sent), which
+a strict replay reads, and ``judge_messages(record["request"])`` rebuilds the prompt. The
+fixture above pins that the row's ``model`` and ``messages`` are Garak's ``model`` and
+``prompt``.
+
 Three things differ from Garak, each by what MiDojo sends the judge service:
 
 - MiDojo's judge request holds the conversation (each user message and reply) and the
