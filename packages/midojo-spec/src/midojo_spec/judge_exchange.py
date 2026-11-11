@@ -56,7 +56,7 @@ import threading
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -593,18 +593,20 @@ def _messages(value: Any) -> bool:
     )
 
 
-_UTC_SUFFIXES = ("+00:00", "Z")
-"""The two spellings of UTC a ``started_at`` ends with: the one the writer emits, and the ISO 8601 designator."""
+_UTC_TIME = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?(?:\+00:00|Z)")
+"""The shape of ``started_at``: an extended-format date and time, seconds with an optional fraction, and UTC spelled
+``+00:00`` (what the writer emits) or ``Z`` (the ISO 8601 designator)."""
 
 
 def _timestamp(value: Any) -> bool:
     if type(value) is not str:
         return False
-    # UTC is part of the format, and so is how it is spelled: a reader that took any zone would accept a time its
-    # writers never produce, and ``fromisoformat`` reads ``+0000``, ``-00:00`` and ``+00:00:00.1`` as a zero offset too.
-    if not value.endswith(_UTC_SUFFIXES):
+    # The shape is fixed, not whatever ``fromisoformat`` takes: it reads ``+0000``, ``-00:00`` and ``+00:00:00.1`` as a
+    # zero offset, any one character as the separator and a week date as a date. The parse then checks the values.
+    if _UTC_TIME.fullmatch(value) is None:
         return False
     try:
-        return datetime.fromisoformat(value).utcoffset() == timedelta(0)
+        datetime.fromisoformat(value)
     except ValueError:
         return False
+    return True
