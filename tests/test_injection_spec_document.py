@@ -68,7 +68,7 @@ def read_vector(name: str) -> dict[str, Any]:
 
 
 def spec_validator() -> jsonschema.Draft202012Validator:
-    """A standalone validator over the SDK's schema, as the consumer's tests build one."""
+    """A standalone validator over midojo-spec's schema, as the consumer's tests build one."""
     return jsonschema.Draft202012Validator(load_schema())
 
 

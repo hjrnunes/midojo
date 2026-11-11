@@ -16,9 +16,9 @@ classifiers = [
 ]
 requires-python = ">= 3.12"
 dependencies = [
-    # The episode document, the snapshot codec, the plan codec and the host
-    # interceptor's MCP client all live in the SDK, so MiDojo depends on it as
-    # a base package. The mcp extra pins FastMCP, which the interceptor needs.
+    # The host interceptor's MCP client and the link to a driver live in the
+    # SDK, so MiDojo depends on it as a base package. The mcp extra pins
+    # FastMCP, which the interceptor needs.
     "midojo-sdk[mcp]",
     # The contracts every reader shares, on the standard library alone.
     "midojo-spec",
