@@ -8,4 +8,10 @@ imports none of them.
 - ``judge``: the ``midojo.judge.v1`` request and response rules.
 - ``judge_exchange``: the record a judge service keeps of each model request.
 - ``rubric_judge``: the rubric judge, a port of Garak's, and its HTTP call.
+- ``snapshot``: a sealed snapshot's ID and digest.
+- ``injection``: the injection plan and its codec.
+- ``injection_spec_schema``: the injection-spec document's JSON Schema.
+- ``policy``: the tool policy.
+- ``recorder``: the ``Recorder`` and ``WorldState`` seams.
+- ``link``: the ``midojo-binding-v1`` frame and message codec.
 """

@@ -37,9 +37,6 @@ import pytest
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 from midojo_sdk.binding import (
-    ANSWER_DEADLINE_SECONDS,
-    HEARTBEAT_EXPIRY_SECONDS,
-    HEARTBEAT_INTERVAL_SECONDS,
     MAX_FRAME_BYTES,
     WEBSOCKETS_LOGGER,
     Binding,
@@ -47,7 +44,12 @@ from midojo_sdk.binding import (
     binding_url,
 )
 from midojo_spec.injection import Channel, InjectionInstruction, InjectionPlan, InjectionTarget
-from midojo_spec.link import decode_message
+from midojo_spec.link import (
+    ANSWER_DEADLINE_SECONDS,
+    HEARTBEAT_EXPIRY_SECONDS,
+    HEARTBEAT_INTERVAL_SECONDS,
+    decode_message,
+)
 from websockets.asyncio.client import ClientConnection
 
 from midojo.control_plane.inprocess_control import InProcessControlClient

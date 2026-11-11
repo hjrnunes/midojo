@@ -4,6 +4,9 @@
     "api": "midojo-binding-v1",
     "subprotocol": "midojo-binding.v1",
     "heartbeat_interval_seconds": 5.0,
+    "heartbeat_expiry_seconds": 15.0,
+    "answer_deadline_seconds": 10.0,
+    "bind_path": "/v1/bindings",
     "link_lost_reason": "link-lost",
     "invalid_request": "invalid_request",
     "ops": [

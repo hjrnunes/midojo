@@ -21,6 +21,7 @@ python -c "from midojo_spec import judge; print(judge.SCHEMA)"
 | `injection` | The immutable injection plan (`InjectionPlan`, instructions, selectors, targets, outcomes, capability gaps) and its codec, and `MIDOJO_MCP_CAPABILITY`, what MiDojo's MCP interceptor places. |
 | `injection_spec_schema` | The injection-spec document's version and closed JSON Schema (package data), and the plan codec's version. |
 | `recorder` | The two seams an interception layer talks to, `Recorder` and `WorldState`, the facts and dispositions they carry, and the retrying and reporting recorders. |
+| `policy` | The tool policy (`ToolPolicy`): which upstream tools an agent may call and what happens to its writes, in the document form a driver states and the interceptor decodes, and `tool_policy`, the interceptor's view of it. |
 | `link` | The `midojo-binding-v1` frame and message codec: encode and decode of frames, answers, rejections, `bind`, `bound` and `unbind`, and the errors a link raises. |
 
 Import the module you need: the package imports none of them.
@@ -49,6 +50,7 @@ distribution, not the wheel.
 | `vectors/snapshot/` | `vectors.json`: snapshots and their digests |
 | `vectors/plan/` | `plans.json` (accepted plans, defaults and refusals; an accepted plan is a fixpoint of decode then encode) and `before_call_arguments.json` (a plan as an older codec wrote it) |
 | `vectors/binding/` | `codec.json`: frames, answers, rejections and messages the link codec accepts and refuses |
+| `vectors/policy/` | `policy.json`: the tool policy's accepted and refused document data, and the tools it mirrors and blocks |
 
 ## Tests
 

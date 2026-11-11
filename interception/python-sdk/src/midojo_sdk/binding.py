@@ -10,7 +10,7 @@ service's control messages (``unbound``, ``rejected``) for its caller, and
 answers ``unbind`` and ``ping``.
 
 Liveness (design section 2.6, M5b plan rule 6). The three values are the
-binding's wire contract:
+binding's wire contract, and ``midojo_spec.link`` defines them:
 
 - ``HEARTBEAT_INTERVAL_SECONDS`` (5 s): the driver's dispatcher sends
   ``ping`` this often, from the loop that reads the service's frames. It is an
@@ -49,6 +49,7 @@ from urllib.parse import urlsplit, urlunsplit
 from midojo_spec.injection import InjectionPlan
 from midojo_spec.link import (
     API,
+    BIND_PATH,
     HEARTBEAT_INTERVAL_SECONDS,
     SUBPROTOCOL,
     Duplex,
@@ -61,14 +62,8 @@ from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import InvalidStatus
 from websockets.typing import Subprotocol
 
-BIND_PATH = "/v1/bindings"
 MAX_FRAME_BYTES = 16 * 1024 * 1024
 BIND_ANSWER_SECONDS = 10.0
-
-# The three liveness values of the binding's wire contract; see the module docstring.
-# The interval lives in ``.link``, where the driver's dispatcher reads it without this module's socket library.
-HEARTBEAT_EXPIRY_SECONDS = 15.0
-ANSWER_DEADLINE_SECONDS = 10.0
 
 _SCHEMES = {"http": "ws", "https": "wss", "ws": "ws", "wss": "wss"}
 
@@ -321,11 +316,9 @@ class Binding(Duplex):
 
 
 __all__ = [
-    "ANSWER_DEADLINE_SECONDS",
     "API",
     "BIND_ANSWER_SECONDS",
     "BIND_PATH",
-    "HEARTBEAT_EXPIRY_SECONDS",
     "HEARTBEAT_INTERVAL_SECONDS",
     "MAX_FRAME_BYTES",
     "Binding",

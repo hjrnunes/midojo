@@ -1,0 +1,86 @@
+{
+  "about": "The tool policy in its document form (the injection spec's tools, the bind message's policy): the data a reader must accept and what it decodes to, the data a reader must refuse and why, and the interceptor's view of a policy, the tools to mirror and the tools to block",
+  "accepted": [
+    {
+      "name": "no_tools",
+      "data": {"allowed": []},
+      "allowed": [],
+      "write_disposition_default": "forward",
+      "write_disposition": {},
+      "canonical": {"allowed": [], "write_disposition": {"default": "forward", "tools": {}}},
+      "mirrored": [],
+      "blocked": []
+    },
+    {
+      "name": "two_tools_forward_by_default",
+      "data": {"allowed": ["send_email", "get_weather"]},
+      "allowed": ["send_email", "get_weather"],
+      "write_disposition_default": "forward",
+      "write_disposition": {},
+      "canonical": {"allowed": ["send_email", "get_weather"], "write_disposition": {"default": "forward", "tools": {}}},
+      "mirrored": ["get_weather", "send_email"],
+      "blocked": []
+    },
+    {
+      "name": "every_write_blocked_by_default",
+      "data": {"allowed": ["send_email", "get_weather"], "write_disposition": {"default": "block"}},
+      "allowed": ["send_email", "get_weather"],
+      "write_disposition_default": "block",
+      "write_disposition": {},
+      "canonical": {"allowed": ["send_email", "get_weather"], "write_disposition": {"default": "block", "tools": {}}},
+      "mirrored": ["get_weather", "send_email"],
+      "blocked": ["get_weather", "send_email"]
+    },
+    {
+      "name": "one_tool_forwarded_under_a_blocking_default",
+      "data": {"allowed": ["a", "b"], "write_disposition": {"default": "block", "tools": {"a": "forward"}}},
+      "allowed": ["a", "b"],
+      "write_disposition_default": "block",
+      "write_disposition": {"a": "forward"},
+      "canonical": {"allowed": ["a", "b"], "write_disposition": {"default": "block", "tools": {"a": "forward"}}},
+      "mirrored": ["a", "b"],
+      "blocked": ["b"]
+    },
+    {
+      "name": "a_block_names_a_tool_the_policy_does_not_allow",
+      "data": {"allowed": ["a"], "write_disposition": {"tools": {"z": "block"}}},
+      "allowed": ["a"],
+      "write_disposition_default": "forward",
+      "write_disposition": {"z": "block"},
+      "canonical": {"allowed": ["a"], "write_disposition": {"default": "forward", "tools": {"z": "block"}}},
+      "mirrored": ["a"],
+      "blocked": ["z"]
+    },
+    {
+      "name": "an_empty_write_disposition_is_the_default",
+      "data": {"allowed": ["a"], "write_disposition": {}},
+      "allowed": ["a"],
+      "write_disposition_default": "forward",
+      "write_disposition": {},
+      "canonical": {"allowed": ["a"], "write_disposition": {"default": "forward", "tools": {}}},
+      "mirrored": ["a"],
+      "blocked": []
+    }
+  ],
+  "refused": [
+    {"name": "a_list", "data": [], "message": "a tool policy is an object, not list"},
+    {"name": "a_string", "data": "get_weather", "message": "a tool policy is an object, not str"},
+    {"name": "null", "data": null, "message": "a tool policy is an object, not NoneType"},
+    {"name": "unknown_field", "data": {"allowed": [], "extra": 1}, "message": "a tool policy has unknown fields: ['extra']"},
+    {"name": "allowed_missing", "data": {}, "message": "a tool policy names the tools it allows, as a list"},
+    {"name": "allowed_null", "data": {"allowed": null}, "message": "a tool policy names the tools it allows, as a list"},
+    {"name": "allowed_a_string", "data": {"allowed": "get_weather"}, "message": "a tool policy names the tools it allows, as a list"},
+    {"name": "allowed_an_object", "data": {"allowed": {"get_weather": true}}, "message": "a tool policy names the tools it allows, as a list"},
+    {"name": "allowed_repeats_a_tool", "data": {"allowed": ["a", "a"]}, "message": "invalid tool policy data: allowed tool names must not repeat"},
+    {"name": "allowed_names_a_number", "data": {"allowed": ["a", 1]}, "message": "invalid tool policy data: an allowed tool name must be a str, not int"},
+    {"name": "write_disposition_a_list", "data": {"allowed": [], "write_disposition": []}, "message": "a tool policy's write_disposition is an object"},
+    {"name": "write_disposition_unknown_field", "data": {"allowed": [], "write_disposition": {"x": 1}}, "message": "a tool policy's write_disposition has unknown fields: ['x']"},
+    {"name": "write_disposition_tools_a_list", "data": {"allowed": [], "write_disposition": {"tools": ["a"]}}, "message": "a tool policy's write_disposition.tools is an object"},
+    {"name": "default_not_a_disposition", "data": {"allowed": [], "write_disposition": {"default": "drop"}}, "message": "invalid tool policy data: the write disposition default must be 'forward' or 'block', not 'drop'"},
+    {"name": "default_a_number", "data": {"allowed": [], "write_disposition": {"default": 1}}, "message": "invalid tool policy data: the write disposition default must be 'forward' or 'block', not 1"},
+    {"name": "default_null_is_not_absent", "data": {"allowed": [], "write_disposition": {"default": null}}, "message": "invalid tool policy data: the write disposition default must be 'forward' or 'block', not None"},
+    {"name": "override_not_a_disposition", "data": {"allowed": ["a"], "write_disposition": {"tools": {"a": "allow"}}}, "message": "invalid tool policy data: the write disposition of 'a' must be 'forward' or 'block', not 'allow'"},
+    {"name": "override_null", "data": {"allowed": ["a"], "write_disposition": {"tools": {"a": null}}}, "message": "invalid tool policy data: the write disposition of 'a' must be 'forward' or 'block', not None"}
+  ],
+  "no_policy": {"mirrored": null, "blocked": []}
+}

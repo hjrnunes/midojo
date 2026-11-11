@@ -41,14 +41,13 @@ from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 from mcp.types import TextContent
 from midojo_spec.injection import Channel, InjectionInstruction, InjectionPlan, InjectionTarget, payload_digest
-from midojo_spec.link import LinkFault, decode_message
+from midojo_spec.link import BIND_PATH, LinkFault, decode_message
 
 from midojo.control_plane.config import AppConfig
 from midojo.control_plane.link_dispatch import LinkDispatcher
 from midojo.control_plane.service import ById, ControlPlane
 from midojo.injection_spec import InjectionSpec
 from midojo.interception_service import (
-    BIND_PATH,
     CREDENTIAL_ENV,
     LOSS_CLOSE_CODE,
     READY_PREFIX,

@@ -57,6 +57,19 @@ service would never expire an idle binding whose driver stopped applying
 frames. The service's expiry is about three times this interval.
 """
 
+HEARTBEAT_EXPIRY_SECONDS = 15.0
+"""How long a binding may hear nothing from its driver before the service loses it: the service's default."""
+
+ANSWER_DEADLINE_SECONDS = 10.0
+"""How long the service waits for the driver's answer to one frame before the binding is lost: the service's default.
+
+An answer past the deadline loses the binding, so a hung driver fails the call
+rather than keeping it open.
+"""
+
+BIND_PATH = "/v1/bindings"
+"""Where a driver upgrades its binding stream on the service: ``GET`` with the bind credential and the subprotocol."""
+
 LINK_LOST_REASON = "link-lost"
 """Why a handle ends when its binding stream is lost: ``HandleError.reason`` on the driver side."""
 
@@ -305,9 +318,12 @@ def decode_message(data: str) -> Message:
 
 
 __all__ = [
+    "ANSWER_DEADLINE_SECONDS",
     "API",
     "BIND_FIELDS",
+    "BIND_PATH",
     "BOUND_FIELDS",
+    "HEARTBEAT_EXPIRY_SECONDS",
     "HEARTBEAT_INTERVAL_SECONDS",
     "INVALID_REQUEST",
     "LINK_LOST_REASON",

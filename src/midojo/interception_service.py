@@ -54,13 +54,15 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 import uvicorn
-from midojo_sdk.binding import ANSWER_DEADLINE_SECONDS, HEARTBEAT_EXPIRY_SECONDS
 from midojo_sdk.link import Link, LinkRecorder, LinkWorld
 from midojo_sdk.mcp import MidojoMCP
 from midojo_spec.injection import CapabilityError, Channel, InjectionPlan
 from midojo_spec.link import (
+    ANSWER_DEADLINE_SECONDS,
     API,
     BIND_FIELDS,
+    BIND_PATH,
+    HEARTBEAT_EXPIRY_SECONDS,
     SUBPROTOCOL,
     LinkFault,
     LinkLost,
@@ -68,17 +70,14 @@ from midojo_spec.link import (
     decode_message,
     encode_message,
 )
+from midojo_spec.policy import ToolPolicy, tool_policy
 from starlette.applications import Starlette
 from starlette.routing import Mount, WebSocketRoute
 from starlette.types import ASGIApp, Receive, Scope, Send
 from starlette.websockets import WebSocket
 
-from midojo.injection_spec import ToolPolicy, tool_policy
 from midojo.interception_host import _WILDCARD_HOSTS, CREDENTIAL_ENV, _Server
 from midojo.tool_endpoint import TOOL_PATH, bare_host
-
-BIND_PATH = "/v1/bindings"
-"""Where a driver upgrades its binding: ``GET`` with the bind credential and the binding subprotocol."""
 
 FACES_PATH = "/b"
 """Where every binding's faces live: ``/b/<binding id>/mcp`` while that binding exists."""
@@ -774,7 +773,6 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 __all__ = [
-    "BIND_PATH",
     "CREDENTIAL_ENV",
     "DEFAULT_ANSWER_DEADLINE_SECONDS",
     "DEFAULT_HEARTBEAT_EXPIRY_SECONDS",

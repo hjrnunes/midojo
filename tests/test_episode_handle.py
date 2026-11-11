@@ -27,6 +27,7 @@ import pytest
 from fastmcp import Client
 from midojo_sdk.mcp import BLOCKED_REASON
 from midojo_spec.injection import Channel, InjectionInstruction, InjectionPlan, InjectionTarget
+from midojo_spec.policy import ToolPolicy
 
 from midojo import evaluation_handle
 from midojo.capabilities import MissingCapabilityError
@@ -42,7 +43,7 @@ from midojo.evaluation_handle import (
     RepeatWithoutResetError,
     SendTurnUnsupported,
 )
-from midojo.injection_spec import InjectionSpec, InterceptionSettings, ToolPolicy
+from midojo.injection_spec import InjectionSpec, InterceptionSettings
 from midojo.injection_spec_document import InjectionSpecDocumentError
 from midojo.interception_host import HostInterception
 from midojo.runtimes import RuntimeCapabilities, UnmanagedRuntime

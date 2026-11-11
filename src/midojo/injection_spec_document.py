@@ -36,8 +36,9 @@ from typing import Any
 
 from midojo_spec.injection import InjectionPlan
 from midojo_spec.injection_spec_schema import INJECTION_SPEC_DOCUMENT_V1
+from midojo_spec.policy import ToolPolicy
 
-from midojo.injection_spec import InjectionSpec, InterceptionSettings, RuntimeCheckError, ToolPolicy, thaw
+from midojo.injection_spec import InjectionSpec, InterceptionSettings, RuntimeCheckError, thaw
 
 SUPPORTED_DOCUMENT_VERSIONS = (INJECTION_SPEC_DOCUMENT_V1,)
 """The document versions this module writes and reads."""

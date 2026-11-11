@@ -57,12 +57,13 @@ from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from midojo_spec.link import LINK_LOST_REASON
+from midojo_spec.policy import tool_policy
 
 from midojo.control_plane.grading import Verdict
 from midojo.control_plane.grading import grade as grade_snapshot
 from midojo.control_plane.state import Snapshot, Turn
 from midojo.evaluation_context import EvaluationContext, EvaluationResult, EvaluationStep, remote_control_plane
-from midojo.injection_spec import InjectionSpec, InterceptionSettings, tool_policy
+from midojo.injection_spec import InjectionSpec, InterceptionSettings
 from midojo.injection_spec_document import InjectionSpecDocumentError
 from midojo.interception_host import CREDENTIAL_ENV, URL_ENV, HostInterception, RemoteInterception
 from midojo.runtimes import AgentRuntime, RuntimeCapabilities, is_disposable, runtime_capabilities

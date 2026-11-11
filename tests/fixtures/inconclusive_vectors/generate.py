@@ -82,6 +82,7 @@ from typing import Any
 
 from fastmcp import Client, FastMCP
 from fastmcp.client.transports import StreamableHttpTransport
+from midojo_spec.policy import tool_policy
 from midojo_spec.snapshot import verified
 
 import midojo
@@ -93,7 +94,7 @@ from midojo.control_plane.models import SnapshotResponse
 from midojo.control_plane.routers.runs import snapshot_response
 from midojo.control_plane.service import ControlPlane
 from midojo.control_plane.state import snapshot_digest
-from midojo.injection_spec import InjectionSpec, tool_policy
+from midojo.injection_spec import InjectionSpec
 from midojo.injection_spec_document import dump_document
 from midojo.interception_host import HostInterception
 from midojo.runtimes import UnmanagedRuntime

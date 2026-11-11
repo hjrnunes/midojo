@@ -52,8 +52,9 @@ from midojo_spec.injection import (
     SelectorSurface,
     Transformation,
 )
+from midojo_spec.policy import ToolPolicy
 
-from midojo.injection_spec import InjectionSpec, InterceptionSettings, ToolPolicy
+from midojo.injection_spec import InjectionSpec, InterceptionSettings
 from midojo.injection_spec_document import dump_document
 
 HERE = Path(__file__).resolve().parent
