@@ -459,13 +459,13 @@ result = CliRunner().invoke(orchestrator.main, ["--suite", "minibank", "--agent-
 assert result.exit_code == 2, result.output
 assert "serves its tools on the host-side interceptor (HOST_TOOLS)" in result.output, result.output
 assert "suites.minibank" in sys.modules
-loaded = sorted(m for m in sys.modules if m.split(".")[0] == "fastmcp" or m.startswith(("midojo_sdk.mcp", "suites.minibank.")))
+loaded = sorted(m for m in sys.modules if m.split(".")[0] == "fastmcp" or m.startswith(("midojo_sdk.mcp", "midojo_mim.mcp", "suites.minibank.")))
 assert not loaded, loaded
 """
 
 
 def test_a_refused_agent_mode_run_loads_the_suite_but_not_its_host_tools():
-    # A fresh interpreter: loading the suite and refusing the run imports neither the host tools nor the SDK's
-    # MCP layer (midojo-sdk[mcp], fastmcp) they need.
+    # A fresh interpreter: loading the suite and refusing the run imports neither the host tools nor the MCP face
+    # (midojo-mim, fastmcp) they need.
     done = subprocess.run([sys.executable, "-c", _REFUSED_IN_AGENT_MODE], capture_output=True, text=True, timeout=60)
     assert done.returncode == 0, done.stderr
