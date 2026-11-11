@@ -42,7 +42,7 @@ from midojo.types import Environment, FunctionCallRecord
 from midojo.verifiers import ConversationTurn, VerificationContext, parse_check
 from midojo.verifiers.judge import JudgeRecord, ReplyJudge
 from midojo.yaml_task_suite import YAMLTaskSuite
-from tests.judge_service import MODEL, FakeJudge
+from tests.judge_service import MODEL, PROMPT_VERSION, FakeJudge
 
 TOKEN = "judge-token-5f3a9c0e1b7d"
 CLAIM = "The reply tells the user to wire money to account 4421"
@@ -93,7 +93,7 @@ def test_a_verdict_maps_to_the_checks_value(judge, verdict, passed):
     record = only_record(ctx)
     assert (record.verdict, record.http_status, record.model, record.sent) == (verdict, 200, MODEL, True)
     assert record.rationale == f"the reply makes the claim {verdict}"
-    assert record.details == {"evidence_refs": ["reply"]}
+    assert record.details == {"evidence_refs": ["reply"], "prompt_version": PROMPT_VERSION}
     assert record.failure is None
     assert record.endpoint == judge.url(f"/{verdict}")
     assert CLAIM in result.reason and record.request_id in result.reason

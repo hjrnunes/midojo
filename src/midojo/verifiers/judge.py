@@ -44,6 +44,7 @@ from typing import Any, Literal
 
 import httpx
 from midojo_spec import judge as spec
+from midojo_spec.judge_replay import AmbiguousExchange, IdentityRefused, UnrecordedExchange, identity_problem
 from pydantic import BaseModel, ConfigDict
 from pydantic_core import to_jsonable_python
 
@@ -108,7 +109,17 @@ class UnrecordedJudgeRequest(_ReplayRefusal):
     The reason is ``judge-replay-unrecorded:<first 8 hex of the request id>``.
     """
 
-    why = "judge-replay-unrecorded"
+    why = UnrecordedExchange.why
+
+
+class IdentityRefusedJudgeRequest(_ReplayRefusal):
+    """Records have the id, but none has the requested model and prompt_version."""
+
+    why = IdentityRefused.why
+
+    def __init__(self, request: Mapping[str, Any], reason: str) -> None:
+        self.reason = reason
+        super().__init__(request)
 
 
 class AmbiguousJudgeRequest(_ReplayRefusal):
@@ -121,7 +132,7 @@ class AmbiguousJudgeRequest(_ReplayRefusal):
     recorded failure never replays as a verdict.
     """
 
-    why = "judge-replay-ambiguous"
+    why = AmbiguousExchange.why
 
 
 def _decides_alike(left: JudgeRecord, right: JudgeRecord) -> bool:
@@ -133,7 +144,9 @@ class RecordedJudge:
     """Answers ``reply_judge`` requests from records kept by an earlier grading, and never opens a connection.
 
     ``records`` are :class:`JudgeRecord` instances, or their JSON mappings (as
-    a grade's ``judgements`` holds them), kept by request id. Asking for a
+    a grade's ``judgements`` holds them), kept by request id. ``model`` and
+    ``prompt_version`` are required: a record without either identity never
+    answers, even when it is the only candidate. Asking for a
     request no record names raises :class:`UnrecordedJudgeRequest`, which the
     check turns into unknown with ``judge-replay-unrecorded:<id8>``: a replay
     never guesses a verdict.
@@ -153,7 +166,10 @@ class RecordedJudge:
     they graded the first time.
     """
 
-    def __init__(self, records: Iterable[JudgeRecord | Mapping[str, Any]]) -> None:
+    def __init__(self, records: Iterable[JudgeRecord | Mapping[str, Any]], *, model: str, prompt_version: str) -> None:
+        identity_problem(model, prompt_version, expected_model=model, expected_prompt_version=prompt_version)
+        self.model = model
+        self.prompt_version = prompt_version
         self._records: dict[str, list[JudgeRecord]] = {}
         for record in records:
             kept = record if isinstance(record, JudgeRecord) else JudgeRecord.model_validate(record)
@@ -171,8 +187,9 @@ class RecordedJudge:
     ) -> JudgeRecord:
         """The record for ``request``, or a :class:`_ReplayRefusal` naming why it can't be known.
 
-        ``endpoint`` narrows to the records recorded at that endpoint, when
-        ``endpoint_known`` says the check alone names it. One candidate
+        Every row must match this replay's model and prompt version before the
+        endpoint can narrow the candidates. ``endpoint`` narrows the matching
+        records when ``endpoint_known`` says the check alone names it. One candidate
         answers. Several that decide alike answer alike, so the first
         answers; several that disagree raise :class:`AmbiguousJudgeRequest`:
         a record is never guessed.
@@ -180,8 +197,19 @@ class RecordedJudge:
         candidates = self._records.get(str(request["id"]))
         if not candidates:
             raise UnrecordedJudgeRequest(request)
-        if len(candidates) == 1:
-            return candidates[0]
+        problems = [
+            identity_problem(
+                record.model,
+                record.details.get("prompt_version") if record.details else None,
+                expected_model=self.model,
+                expected_prompt_version=self.prompt_version,
+            )
+            for record in candidates
+        ]
+        matching_identity = [record for record, problem in zip(candidates, problems, strict=True) if problem is None]
+        if not matching_identity:
+            raise IdentityRefusedJudgeRequest(request, problems[0] or "missing")
+        candidates = matching_identity
         if endpoint_known:
             matching = [record for record in candidates if record.endpoint == endpoint]
             if len(matching) == 1:
@@ -241,8 +269,9 @@ class ReplyJudge:
 
         The answer is kept on the context as a failed :class:`JudgeRecord`, as
         every other unanswered request is, so the grade shows which request had
-        no answer. The reason is the refusal's own: ``judge-replay-unrecorded:``
-        or ``judge-replay-ambiguous:`` and the id's first eight hex digits.
+        no answer. The reason is the refusal's own: ``judge-replay-unrecorded:``,
+        ``judge-replay-identity:`` or ``judge-replay-ambiguous:`` and the
+        id's first eight hex digits.
         """
         why = str(unanswered)
         request = progress.request or {"schema": spec.SCHEMA, "id": unanswered.request_id}

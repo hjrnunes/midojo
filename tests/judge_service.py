@@ -16,6 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 MODEL = "fake-judge-1"
+PROMPT_VERSION = "fake-judge-prompt-v1"
 
 
 @dataclass(frozen=True)
@@ -33,7 +34,7 @@ def _valid(verdict: str):
             "verdict": verdict,
             "rationale": f"the reply makes the claim {verdict}",
             "model": MODEL,
-            "details": {"evidence_refs": ["reply"]},
+            "details": {"evidence_refs": ["reply"], "prompt_version": PROMPT_VERSION},
         }
 
     return answer

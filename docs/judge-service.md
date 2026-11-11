@@ -134,11 +134,12 @@ The request is sent synchronously. The control plane grades in a worker thread, 
 
 ## Replay
 
-A grade keeps the judgements it made, so you can grade a snapshot again with no judge service: pass them back as `judgements=`. `grade(spec, snapshot, judgements=first.grade.judgements)` answers each `reply_judge` request by its request id and, when the check names one, its endpoint from those records, opens no connection, and two replays of the same snapshot and records give the same grade. The URL and token variables need not be set: a replay reads neither. `InjectionSpec.grade` takes the same argument, and `midojo.verifiers.judge.RecordedJudge` is the client behind it (a `RecordedJudge` in `VerificationContext.judge_replay`, if you assemble a context yourself). The records are a grade's `judgements`: `JudgeRecord` objects, or the JSON mappings a grade dumps.
+A grade keeps the judgements it made. Replay them offline with `grade(spec, snapshot, judgements=first.grade.judgements, judge_model="model-name", judge_prompt_version="prompt-version")`. Supply the model and prompt version you intend to replay, not ones inferred from the records. Alternatively pass `judgements=RecordedJudge(records, model="model-name", prompt_version="prompt-version")`. `InjectionSpec.grade` and `EvaluationHandle.grade` accept the same arguments. Record sequences without both identity keywords raise before grading. The records are a grade's `judgements`: `JudgeRecord` objects, or the JSON mappings a grade dumps. Replay reads neither URL nor token variables and opens no connection.
 
 A replay is fail-closed:
 
 - A request id the records don't hold is unknown: the check is None, never False, its grade is `invalid`, and the reason is `judge-replay-unrecorded:<first 8 hex of the request id>`. Nothing is sent, so a suite or injection spec edited after the recording (a changed claim changes the id) doesn't grade as if it had held.
+- Only records whose `model` and `details["prompt_version"]` both match the requested identity answer. A missing or mismatched identity, even on a sole record or a failed call, makes the check unknown and invalid with `judge-replay-identity:<id8>`. A deliberate re-judge with another model remains a live ask when you omit `judgements`; once it records its own answer, each identity replays only its own records.
 - A request id identifies the request body, not the endpoint. Two checks with the same claim, message and reply ask one id, and their records differ only by `endpoint`. A replay matches the check's endpoint when the check names it with a literal `url`, so each check reads the record of the service it asked and the replayed grade equals the first one. A check that reads its URL from `url_env` is not matched by endpoint, because a replay reads no environment. When several records share the id, disagree, and the replay can't tell them apart, the check is unknown: `security` is None, its grade is `invalid`, and the reason is `judge-replay-ambiguous:<first 8 hex of the request id>`. Records that decide alike (the same verdict, or the same failure) answer alike, so any one of them answers.
 - A record whose `failure` is set replays as unknown too, as it graded the first time: a recorded failure never turns into a verdict.
 - Without `judgements=`, grading is unchanged: the service is asked, as before.
@@ -195,12 +196,19 @@ recorded = JudgeRecord(
     http_status=200,
     verdict="supported",
     model="recorded-judge-1",
+    details={"prompt_version": "recorded-prompt-v1"},
 )
 
-replay = midojo.grade(SPEC, snapshot, judgements=[recorded])  # no service was asked
+replay = midojo.grade(
+    SPEC, snapshot, judgements=[recorded],
+    judge_model="recorded-judge-1", judge_prompt_version="recorded-prompt-v1",
+)  # no service was asked
 assert replay.grade.security is True
 
-missing = midojo.grade(SPEC, snapshot, judgements=[])  # nothing recorded for its request
+missing = midojo.grade(
+    SPEC, snapshot, judgements=[],
+    judge_model="recorded-judge-1", judge_prompt_version="recorded-prompt-v1",
+)  # nothing recorded for its request
 assert missing.grade.security is None  # unknown, never False
 assert "judge-replay-unrecorded:" in missing.grade.security_reason
 assert missing.grade.grade_validity.security.status == "invalid"

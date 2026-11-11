@@ -11,7 +11,8 @@ A ``reply_judge`` check is the exception: it asks a judge service
 as the snapshot's, and grading again may get another answer. The control
 plane grades once and keeps that grade; the grade's ``judgements`` record
 what was asked and answered. Passing those records back as ``judgements=``
-replays the grade offline: each request is answered by request id, no
+with the intended judge model and prompt version replays the grade offline:
+each request is answered by request id and identity, no
 service is asked, and a request the records don't hold is unknown, never
 False (see :func:`grade`).
 """
@@ -26,7 +27,7 @@ from pydantic import ValidationError
 
 from midojo.injection_spec import InjectionSpec
 from midojo.verifiers import ConversationTurn
-from midojo.verifiers.judge import JudgeRecord
+from midojo.verifiers.judge import JudgeRecord, RecordedJudge
 
 from .models import GradeResponse
 from .state import Snapshot
@@ -49,7 +50,12 @@ class UnsupportedVerdictVersion(VerdictDocumentError):  # noqa: N818 - named by 
 
 
 def grade_snapshot(
-    episode: InjectionSpec, snapshot: Snapshot, *, judgements: Sequence[JudgeRecord | Mapping[str, Any]] | None = None
+    episode: InjectionSpec,
+    snapshot: Snapshot,
+    *,
+    judgements: Sequence[JudgeRecord | Mapping[str, Any]] | RecordedJudge | None = None,
+    judge_model: str | None = None,
+    judge_prompt_version: str | None = None,
 ) -> GradeResponse:
     """Grade ``snapshot`` with ``episode``'s checks. Reads nothing else, and changes nothing in ``snapshot``.
 
@@ -60,8 +66,9 @@ def grade_snapshot(
     seal found incomplete) taken from the snapshot.
 
     ``judgements`` replays a judge-graded snapshot instead of asking a judge
-    service: it takes records an earlier grade kept (its ``judgements``) and
-    answers each judge request by request id (:class:`midojo.verifiers.judge.RecordedJudge`).
+    service: it takes records an earlier grade kept (its ``judgements``) with
+    ``judge_model`` and ``judge_prompt_version``, or a ready ``RecordedJudge``.
+    It answers only requests with the matching identity.
 
     It grades only the content ``snapshot.snapshot_id`` names, read once
     (:meth:`Snapshot.verified`): a snapshot changed after it was made (its
@@ -77,6 +84,8 @@ def grade_snapshot(
         turns=[ConversationTurn(message=turn.message, reply=turn.reply) for turn in snapshot.turns],
         evidence=dict(snapshot.evidence_status),
         judgements=judgements,
+        judge_model=judge_model,
+        judge_prompt_version=judge_prompt_version,
     )
     graded = GradeResponse.model_validate(result)
     return graded.model_copy(update={"evidence_status": {**graded.evidence_status, **snapshot.evidence_status}})
@@ -140,13 +149,19 @@ class Verdict:
 
 
 def grade(
-    episode: InjectionSpec, snapshot: Snapshot, *, judgements: Sequence[JudgeRecord | Mapping[str, Any]] | None = None
+    episode: InjectionSpec,
+    snapshot: Snapshot,
+    *,
+    judgements: Sequence[JudgeRecord | Mapping[str, Any]] | RecordedJudge | None = None,
+    judge_model: str | None = None,
+    judge_prompt_version: str | None = None,
 ) -> Verdict:
     """Grade ``snapshot`` with ``episode``'s checks: :func:`grade_snapshot`, naming what was graded.
 
     ``judgements=`` replays a judge-graded snapshot offline from records an
     earlier grade kept (``grade.judgements``, as :class:`JudgeRecord` objects
-    or their JSON): each judge request is answered by request id, no judge
+    or their JSON) with required ``judge_model`` and ``judge_prompt_version``,
+    or a ready ``RecordedJudge``: each judge request is answered by request id and identity, no judge
     service is asked, and a recorded failure replays as unknown. A request the
     records don't hold makes its check unknown, with the reason
     ``judge-replay-unrecorded:<id8>``, never False: the grade is then invalid
@@ -166,5 +181,13 @@ def grade(
     marks ``incomplete``.
     """
     return Verdict(
-        snapshot.evaluation_id, snapshot.snapshot_id, grade_snapshot(episode, snapshot, judgements=judgements)
+        snapshot.evaluation_id,
+        snapshot.snapshot_id,
+        grade_snapshot(
+            episode,
+            snapshot,
+            judgements=judgements,
+            judge_model=judge_model,
+            judge_prompt_version=judge_prompt_version,
+        ),
     )

@@ -68,6 +68,7 @@ from midojo.injection_spec_document import InjectionSpecDocumentError
 from midojo.interception_host import HostInterception, RemoteInterception
 from midojo.runtimes import AgentRuntime, RuntimeCapabilities, is_disposable, runtime_capabilities
 from midojo.tool_endpoint import ToolEndpoint
+from midojo.verifiers.judge import RecordedJudge
 
 logger = logging.getLogger(__name__)
 
@@ -727,7 +728,13 @@ class EvaluationHandle:
                 return self._resource.context.sealed
             return self._resource.loop.call(self._resource.context.seal(agent_output))
 
-    def grade(self, judgements: Sequence[Any] | None = None) -> Verdict:
+    def grade(
+        self,
+        judgements: Sequence[Any] | RecordedJudge | None = None,
+        *,
+        judge_model: str | None = None,
+        judge_prompt_version: str | None = None,
+    ) -> Verdict:
         """Grade the sealed snapshot with the episode's checks, naming what was graded.
 
         This is a pure function of the episode and the sealed snapshot, so it
@@ -738,7 +745,13 @@ class EvaluationHandle:
             if os.getpid() != self._resource.owner_pid:
                 self._resource.usable()  # Raises HandleOwnerError.
             snapshot = self._resource.context.sealed
-            return grade_snapshot(self._resource.episode, snapshot, judgements=judgements)
+            return grade_snapshot(
+                self._resource.episode,
+                snapshot,
+                judgements=judgements,
+                judge_model=judge_model,
+                judge_prompt_version=judge_prompt_version,
+            )
 
     # --- closing ---
 

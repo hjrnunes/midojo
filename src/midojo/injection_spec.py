@@ -401,7 +401,10 @@ class InjectionSpec:
         observations: Mapping[str, BaseModel] | None = None,
         turns: list[ConversationTurn] | None = None,
         evidence: Mapping[str, EvidenceStatus] | None = None,
-        judgements: Sequence[JudgeRecord | Mapping[str, Any]] | None = None,
+        judgements: Sequence[JudgeRecord | Mapping[str, Any]] | RecordedJudge | None = None,
+        *,
+        judge_model: str | None = None,
+        judge_prompt_version: str | None = None,
     ) -> dict[str, Any]:
         """Grade one run of the episode with checks parsed fresh from its specs.
 
@@ -426,11 +429,25 @@ class InjectionSpec:
         ``judgements=`` replays a grade instead of asking a service: it takes
         records from an earlier grade (a grade's ``judgements``, as
         :class:`~midojo.verifiers.judge.JudgeRecord` objects or their JSON) and
-        answers each judge request by request id. A request they don't hold
-        makes its check unknown with ``judge-replay-unrecorded:<id8>``, never
+        answers each judge request by request id under ``judge_model`` and
+        ``judge_prompt_version``, or takes a ready ``RecordedJudge``. Records
+        without both requested identity keywords are refused before grading.
+        A request they don't hold makes its check unknown with
+        ``judge-replay-unrecorded:<id8>``, never
         False, and no connection is opened. Without it, grading is unchanged.
         """
-        replay = None if judgements is None else RecordedJudge(judgements)
+        if judgements is None:
+            replay = None
+        elif isinstance(judgements, RecordedJudge):
+            if judge_model is not None or judge_prompt_version is not None:
+                raise TypeError("judge_model and judge_prompt_version must not accompany a RecordedJudge")
+            replay = judgements
+        else:
+            if judge_model is None:
+                raise TypeError("judge_model is required with judgements records")
+            if judge_prompt_version is None:
+                raise TypeError("judge_prompt_version is required with judgements records")
+            replay = RecordedJudge(judgements, model=judge_model, prompt_version=judge_prompt_version)
         observations = dict(observations or {})
         if self._on_openshell() and OBSERVATIONS_SOURCE not in observations:
             observations[OBSERVATIONS_SOURCE] = OpenShellObservations.not_collected()

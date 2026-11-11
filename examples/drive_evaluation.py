@@ -124,7 +124,15 @@ def main() -> int:
         f"grade {verdict.evaluation_id}: security {grade.security}, utility {grade.utility}, "
         f"validity {grade.grade_validity.security.status}"
     )
-    replay = midojo.grade(spec, snapshot, judgements=grade.judgements)
+    # This spec has no reply_judge, so these identity names are never matched.
+    # For a judge check, supply the service's actual model and prompt version.
+    replay = midojo.grade(
+        spec,
+        snapshot,
+        judgements=grade.judgements,
+        judge_model="no-judge-in-this-spec",
+        judge_prompt_version="no-judge-in-this-spec",
+    )
     print(f"replayed grade equals the first: {replay.grade.security == grade.security}")
     return 0 if grade.security is True and grade.utility is True else 1
 
