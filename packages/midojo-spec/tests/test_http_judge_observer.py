@@ -296,28 +296,42 @@ def test_an_interrupt_after_the_request_was_sent_is_observed_and_raised(
     assert observed.http_status == (None if stage == "_exchange" else 200)
 
 
+@pytest.mark.parametrize("stage", ["_exchange", "_reply"])
+@pytest.mark.parametrize("failure", [OSError, SystemExit, KeyboardInterrupt])
+@pytest.mark.parametrize("ending", [KeyboardInterrupt, SystemExit])
 def test_an_observer_that_fails_during_an_interrupt_leaves_the_interrupt_the_error(
-    model: Model, monkeypatch: pytest.MonkeyPatch
+    model: Model,
+    monkeypatch: pytest.MonkeyPatch,
+    ending: type[BaseException],
+    failure: type[BaseException],
+    stage: str,
 ) -> None:
-    def interrupted(*_args: Any, **_kwargs: Any) -> Any:
-        raise KeyboardInterrupt
+    model.answer(choices=[{"message": {"content": "x"}}])
+    original = ending("sent, then ended")
+
+    def ended(*_args: Any, **_kwargs: Any) -> Any:
+        raise original
 
     def refuse(_messages: Any, _observed: Observed) -> None:
-        raise OSError("disk full")
+        raise failure("observer failed")
 
-    monkeypatch.setattr(rubric_judge, "_exchange", interrupted)
+    monkeypatch.setattr(rubric_judge, stage, ended)
 
-    with pytest.raises(KeyboardInterrupt) as raised:
+    with pytest.raises(BaseException) as raised:
         http_judge(model.url, "judge-model", observer=refuse)(MESSAGES)
 
-    assert raised.value.__notes__ == ["the observer failed too: OSError"]
+    assert raised.value is original
+    assert original.__notes__ == [f"the observer failed too: {failure.__name__}"]
 
 
-def test_an_observer_that_fails_while_a_call_fails_replaces_its_error(model: Model) -> None:
+@pytest.mark.parametrize("failure", [OSError, SystemExit, KeyboardInterrupt])
+def test_an_observer_that_fails_while_a_call_fails_replaces_its_error(
+    model: Model, failure: type[BaseException]
+) -> None:
     model.answer(500, error="down")
 
     def refuse(_messages: Any, _observed: Observed) -> None:
-        raise OSError("disk full")
+        raise failure("observer failed")
 
-    with pytest.raises(OSError, match="disk full"):
+    with pytest.raises(failure, match="observer failed"):
         http_judge(model.url, "judge-model", observer=refuse)(MESSAGES)

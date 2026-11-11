@@ -549,10 +549,11 @@ def http_judge(
         def observe_ending(exc: BaseException, **seen: Any) -> None:
             try:
                 observe(error=type(exc).__name__, **seen)
-            except Exception as failure:
+            except BaseException as failure:
                 if isinstance(exc, Exception):
                     raise
-                # An interrupt, an exit or a cancellation is what the caller must see, not the observer's failure.
+                # An interrupt, an exit or a cancellation is what the caller must see, whatever the
+                # observer's own failure was, an interrupt of its own included.
                 exc.add_note(f"the observer failed too: {type(failure).__name__}")
 
         try:

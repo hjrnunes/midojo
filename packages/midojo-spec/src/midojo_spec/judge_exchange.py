@@ -396,7 +396,7 @@ class ExchangeLog:
         """Write ``exchange`` as the next row and return it with its ``sequence``.
 
         A row that is not valid is refused before anything is written, and so is a file that does
-        not read as a log.
+        not read as a log, or whose last row already holds the largest sequence (``MAX_INTEGER``).
         """
         if (problem := exchange_problem(dataclasses.replace(exchange, sequence=0).to_json())) is not None:
             raise ExchangeFormatError(problem)
@@ -417,6 +417,9 @@ class ExchangeLog:
         size = status.st_size
         if size == 0 or shared.stamp != (size, status.st_mtime_ns):
             shared.next = _continued(descriptor, size)
+        if shared.next > MAX_INTEGER:
+            # The writer makes this one number itself, so it is checked here: the row's own check ran with 0.
+            raise ExchangeFormatError("sequence is not valid: the log holds the last row a 64-bit sequence can number")
         row = dataclasses.replace(exchange, sequence=shared.next)
         line = json.dumps(row.to_json(), ensure_ascii=True, separators=(",", ":")).encode("ascii") + b"\n"
         try:

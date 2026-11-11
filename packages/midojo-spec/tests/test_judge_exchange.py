@@ -630,3 +630,22 @@ def test_an_index_the_file_cannot_hold_is_refused_whole(field: str, tmp_path: Pa
     path.write_text(json.dumps({**VALID[0]["row"], field: 2**63}) + "\n", encoding="utf-8")
     with pytest.raises(ExchangeFormatError, match=rf"line 1: {field} is not valid"):
         record.read_exchanges(path)
+
+
+def test_a_log_whose_last_row_holds_the_largest_sequence_refuses_the_next_row_and_stays_readable(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "log.jsonl"
+    seed = dataclasses.replace(observed_exchange(), sequence=record.MAX_INTEGER - 1)
+    path.write_text(json.dumps(seed.to_json(), ensure_ascii=True, separators=(",", ":")) + "\n")
+    log = ExchangeLog(path)
+
+    last = log.append(observed_exchange())
+    full = path.read_bytes()
+
+    assert last.sequence == record.MAX_INTEGER
+    for _ in range(2):
+        with pytest.raises(ExchangeFormatError, match="sequence is not valid"):
+            log.append(observed_exchange())
+    assert path.read_bytes() == full
+    assert [row.sequence for row in record.read_exchanges(path)] == [record.MAX_INTEGER - 1, record.MAX_INTEGER]
