@@ -57,19 +57,33 @@ def imported_modules(tree: ast.Module) -> set[str]:
     return names
 
 
-DYNAMIC_IMPORTS = {"import_module", "__import__"}
-"""The calls that import a module by name at run time: invisible to a reading of the import statements."""
+DYNAMIC_IMPORTS = {"import_module", "__import__", "exec", "eval"}
+"""The names that import a module, or run source that does, at run time: invisible to a reading of the imports."""
 
 
 def dynamic_import_lines(tree: ast.Module) -> list[int]:
-    """The line of every call that imports a module by name, however it is reached."""
+    """The line of every use of a name in ``DYNAMIC_IMPORTS``, however it is reached.
+
+    A name, an attribute, an alias in an ``import`` and a string all count: ``import_module(...)``,
+    ``importlib.import_module(...)``, ``from importlib import import_module as load`` and
+    ``getattr(importlib, "import_module")`` each read as one. A name built from parts is not found: this reading is a
+    guard on the code as written, and the child process below, which imports every module with the harness
+    unavailable, is the check that nothing needs it when the module loads.
+    """
     lines: list[int] = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.Call):
-            func = node.func
-            name = func.attr if isinstance(func, ast.Attribute) else func.id if isinstance(func, ast.Name) else None
-            if name in DYNAMIC_IMPORTS:
-                lines.append(node.lineno)
+        if isinstance(node, ast.Name):
+            name: object = node.id
+        elif isinstance(node, ast.Attribute):
+            name = node.attr
+        elif isinstance(node, ast.alias):
+            name = node.name.split(".")[-1]
+        elif isinstance(node, ast.Constant):
+            name = node.value
+        else:
+            continue
+        if name in DYNAMIC_IMPORTS:
+            lines.append(node.lineno)
     return sorted(lines)
 
 
@@ -122,10 +136,28 @@ def test_the_import_reader_names_what_an_import_reaches(source: str, reached: se
         "from importlib import import_module\ndef f():\n    return import_module('openai')",
         "__import__('midojo')",
         "import importlib\nimportlib.__import__('midojo')",
+        "import importlib\ndef f():\n    return getattr(importlib, 'import_module')('openai')",
+        "import importlib\nload = importlib.__dict__['import_module']",
+        "from importlib import import_module as load\nload('openai')",
+        "exec('import midojo.verifiers')",
+        "def f(source):\n    return eval(source)",
     ],
 )
-def test_the_dynamic_import_reader_finds_a_call_that_imports_by_name(source: str):
+def test_the_dynamic_import_reader_finds_what_imports_by_name_however_it_is_reached(source: str):
     assert dynamic_import_lines(ast.parse(source)) != []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import importlib.util\nimportlib.util.find_spec('midojo_spec')",
+        "import importlib.metadata\nimportlib.metadata.version('midojo-spec')",
+        "text = 'the tool is executed by the service'",
+        "def execute(): ...",
+    ],
+)
+def test_the_dynamic_import_reader_leaves_alone_what_does_not_import(source: str):
+    assert dynamic_import_lines(ast.parse(source)) == []
 
 
 def test_the_distribution_depends_on_the_spec_and_never_on_the_harness_or_the_sdk():
