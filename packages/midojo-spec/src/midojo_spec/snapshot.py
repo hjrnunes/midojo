@@ -9,8 +9,12 @@ items sorted by their encoding, written compactly (``separators=(",", ":")``) wi
 escapes. Two snapshots share an ID only when their content is equal, and a value JSON does not
 carry (``bytes``, a date, a tuple, a set, a non-finite float, a mapping with a key that is not
 text) is refused with :class:`DigestFault` rather than encoded: nothing JSON holds it back as.
-``NaN`` and the infinities are refused wherever they come from: the bare JSON constants, a
-number past the range of a double (``1e999``), and a ``float`` in an object a caller passes in.
+``NaN`` and the infinities are refused in the snapshot's content wherever they come from: the
+bare JSON constants, a number past the range of a double (``1e999``), and a ``float`` in an
+object a caller passes in. Only :data:`CONTENT_FIELDS` are content. A field outside them is
+named by no ID, so the codec neither reads nor checks it, and :func:`verified` returns the
+snapshot with it as it came: read evidence from :data:`CONTENT_FIELDS` or from
+:class:`SnapshotView`, whose ``content`` holds those fields alone.
 
 A snapshot is the JSON form ``GET /runs/{run_id}/evaluations/{eval_id}/snapshot`` serves, so a
 consumer reads the ID and verifies it (:func:`verified`, :class:`SnapshotView`) without any
@@ -157,7 +161,8 @@ def verified(snapshot: Mapping[str, object]) -> Mapping[str, object]:
 
     A snapshot without an ID, with an ID that is not text, or with content that digests to another
     ID is refused: nothing else holds the content, so a caller that wants it read only once holds
-    what this returned.
+    what this returned. A field outside :data:`CONTENT_FIELDS` is not content: the ID does not
+    name it and this checks nothing about it.
     """
 
     if not isinstance(snapshot, Mapping):

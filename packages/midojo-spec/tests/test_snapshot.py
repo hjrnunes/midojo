@@ -332,6 +332,19 @@ def test_a_json_number_past_the_range_of_a_double_is_refused_like_the_bare_const
         SnapshotView.from_json(text.encode())
 
 
+def test_a_field_outside_the_content_is_named_by_no_id_and_checked_by_nothing():
+    # The boundary the refusals stand on: the ID names CONTENT_FIELDS, so a value beside them (a NaN, an
+    # infinity, anything) changes no ID, is not in the view, and is returned by verified() as it came.
+    entry = vector("minimal")
+    beside = {**entry["snapshot"], "extra": {"reading": float("nan")}, "note": float("inf")}
+
+    assert snapshot_digest(beside) == entry["snapshot_id"]
+    assert verified(beside) is beside
+    view = SnapshotView.from_json(beside)
+    assert tuple(view.content) == CONTENT_FIELDS
+    assert "extra" not in view.content and "note" not in view.content
+
+
 class _NameThatRaises(type):
     """A metaclass whose classes' ``__name__`` raises while ``armed``, so the test runner can still name them."""
 
