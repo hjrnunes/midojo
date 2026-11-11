@@ -136,6 +136,13 @@ The request is sent synchronously. The control plane grades in a worker thread, 
 
 A grade keeps the judgements it made. Replay them offline with `grade(spec, snapshot, judgements=first.grade.judgements, judge_model="model-name", judge_prompt_version="prompt-version")`. Supply the model and prompt version you intend to replay, not ones inferred from the records. Alternatively pass `judgements=RecordedJudge(records, model="model-name", prompt_version="prompt-version")`. `InjectionSpec.grade` and `EvaluationHandle.grade` accept the same arguments. Record sequences without both identity keywords raise before grading. The records are a grade's `judgements`: `JudgeRecord` objects, or the JSON mappings a grade dumps. Replay reads neither URL nor token variables and opens no connection.
 
+Exchange-level `midojo_spec.judge_replay.replay` compares reply text, error and
+response digest, so different replies hidden by the same redaction marker remain
+ambiguous. MiDojo's graded `RecordedJudge` compares verdict and failure instead:
+records with the same verdict but different reply text are ambiguous at the
+exchange level, not at the graded level. Both check model and prompt-version
+identity before deciding whether records agree.
+
 A replay is fail-closed:
 
 - A request id the records don't hold is unknown: the check is None, never False, its grade is `invalid`, and the reason is `judge-replay-unrecorded:<first 8 hex of the request id>`. Nothing is sent, so a suite or injection spec edited after the recording (a changed claim changes the id) doesn't grade as if it had held.

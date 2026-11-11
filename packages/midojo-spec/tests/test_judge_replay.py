@@ -50,6 +50,7 @@ def row(data: dict[str, Any]) -> Exchange:
         model=data["model"],
         prompt_version=data["prompt_version"],
         messages=[{"role": "user", "content": "secret prompt"}],
+        secrets=[data["reply"]] if data.get("redact_reply") else (),
     )
 
 
@@ -107,3 +108,30 @@ def test_refusals_never_quote_recorded_text_or_the_requested_model() -> None:
         with pytest.raises(ReplayRefusal) as caught:
             replay(rows, ID, 0, model=model, prompt_version="v1")
         assert not any(secret in str(caught.value) for secret in secrets)
+
+
+def test_distinct_redacted_replies_remain_ambiguous() -> None:
+    def exchange(reply: str) -> Exchange:
+        return Exchange.observed(
+            Observed(started_at="2026-01-01T00:00:00+00:00", duration_ms=1, content=reply),
+            request_id="sha256:" + "a" * 64,
+            ask=0,
+            model="A",
+            prompt_version="v1",
+            messages=[{"role": "user", "content": "the shared question"}],
+            secrets=[reply],
+        )
+
+    first, second = exchange("private-first"), exchange("private-second")
+    assert first.reply == second.reply == "[redacted]"
+    assert first.response_sha256 != second.response_sha256
+    with pytest.raises(AmbiguousExchange):
+        replay([first, second], first.request_id, 0, model="A", prompt_version="v1")
+
+
+def test_identical_redacted_replies_and_digests_replay_first() -> None:
+    data = {"model": "A", "prompt_version": "v1", "reply": "private-same", "redact_reply": True}
+    first, second = row(data), row(data)
+    assert first.reply == second.reply == "[redacted]"
+    assert first.response_sha256 == second.response_sha256
+    assert replay([first, second], ID, 0, model="A", prompt_version="v1") is first

@@ -43,7 +43,7 @@ class IdentityRefused(ReplayRefusal):
 
 
 class AmbiguousExchange(ReplayRefusal):
-    """Matching rows disagree on reply or error."""
+    """Matching rows disagree on reply, error or the original reply's digest."""
 
     why = "judge-replay-ambiguous"
 
@@ -80,10 +80,12 @@ def replay(
     model: str,
     prompt_version: str,
 ) -> Exchange:
-    """Return the first matching row if matching rows decide alike; otherwise refuse.
+    """Return the first matching row if reply, error and response digest agree; otherwise refuse.
 
     Candidate order is file order. Other models' rows do not participate in the
     decision, including when a deliberate re-judge appended their rows later.
+    The response digest distinguishes different replies hidden by the same
+    redaction marker. Failed calls have no response digest or separate error digest.
     """
     identity_problem(model, prompt_version, expected_model=model, expected_prompt_version=prompt_version)
     found = False
@@ -105,6 +107,9 @@ def replay(
     if not matching:
         raise IdentityRefused(request_id, ask, first_problem or "missing")
     first = matching[0]
-    if any((row.reply, row.error) != (first.reply, first.error) for row in matching[1:]):
+    if any(
+        (row.reply, row.error, row.response_sha256) != (first.reply, first.error, first.response_sha256)
+        for row in matching[1:]
+    ):
         raise AmbiguousExchange(request_id, ask)
     return first

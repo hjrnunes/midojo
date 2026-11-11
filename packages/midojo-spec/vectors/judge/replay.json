@@ -9,5 +9,7 @@
   {"name": "unrecorded key", "rows": [{"model": "A", "prompt_version": "v1", "reply": "yes", "ask": 1}], "model": "A", "prompt_version": "v1", "refusal": "judge-replay-unrecorded"},
   {"name": "rejudge original model", "rows": [{"model": "A", "prompt_version": "v1", "reply": "yes"}, {"model": "B", "prompt_version": "v1", "reply": "no"}], "model": "A", "prompt_version": "v1", "selected": 0},
   {"name": "rejudge new model", "rows": [{"model": "A", "prompt_version": "v1", "reply": "yes"}, {"model": "B", "prompt_version": "v1", "reply": "no"}], "model": "B", "prompt_version": "v1", "selected": 1},
-  {"name": "matching rows agree", "rows": [{"model": "A", "prompt_version": "v1", "reply": "yes"}, {"model": "A", "prompt_version": "v1", "reply": "yes"}], "model": "A", "prompt_version": "v1", "selected": 0}
+  {"name": "matching rows agree", "rows": [{"model": "A", "prompt_version": "v1", "reply": "yes"}, {"model": "A", "prompt_version": "v1", "reply": "yes"}], "model": "A", "prompt_version": "v1", "selected": 0},
+  {"name": "redacted replies with different digests conflict", "rows": [{"model": "A", "prompt_version": "v1", "reply": "private-first", "redact_reply": true}, {"model": "A", "prompt_version": "v1", "reply": "private-second", "redact_reply": true}], "model": "A", "prompt_version": "v1", "refusal": "judge-replay-ambiguous"},
+  {"name": "redacted replies with the same digest agree", "rows": [{"model": "A", "prompt_version": "v1", "reply": "private-same", "redact_reply": true}, {"model": "A", "prompt_version": "v1", "reply": "private-same", "redact_reply": true}], "model": "A", "prompt_version": "v1", "selected": 0}
 ]

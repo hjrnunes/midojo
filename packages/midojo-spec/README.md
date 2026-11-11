@@ -63,8 +63,10 @@ uv run --no-project --python 3.11 --with pytest --with-editable packages/midojo-
 
 `judge_replay.replay(exchanges, request_id, ask, model=..., prompt_version=...)`
 returns the first row with that key and identity if all matching rows agree on
-`reply` and `error`. A matching failed call returns its row with `error`, not a
-reply. The requested model and prompt version must each be a non-empty string.
+`reply`, `error` and `response_sha256`. Redaction can hide different original
+replies behind the same text, but their response digests still differ. An
+`Exchange` has no error digest; a matching failed call returns its row with
+`error`, not a reply. The requested model and prompt version must each be a non-empty string.
 `identity_problem` checks each candidate's model and prompt version in that order:
 missing identity, wrong model, then wrong prompt version. A missing key raises
 `UnrecordedExchange`; a key without the requested identity raises `IdentityRefused`
@@ -74,6 +76,11 @@ raise `AmbiguousExchange`. Their stable `why` values are
 `judge-replay-ambiguous`. The functions read no environment and open no connection.
 A live re-judge with another model remains possible; each model's recorded rows
 replay under its own identity.
+
+Exchange replay compares raw reply text, error and response digest. MiDojo's
+graded `JudgeRecord` replay instead compares verdict and failure: records with
+the same verdict but different reply text are ambiguous here, not in graded
+replay. Both layers apply the same strict model and prompt-version identity check.
 
 ## The judge exchange record
 

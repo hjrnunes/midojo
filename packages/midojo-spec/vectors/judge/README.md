@@ -8,7 +8,7 @@ What the `midojo.judge.v1` rules and the `midojo.judge-exchange.v1` record must 
 | `request.json` | Values and why each is not a judge request, or `null` | `test_judge_vectors.py` |
 | `response.json` | Answers and why each is not a response to the request id `expected_id`, or `null` | `test_judge_vectors.py` |
 | `exchange.json` | Exchange rows that are valid (and whether their digests hold), rows that must be refused (a digest that is not of the row's text included), how a model request becomes a row under redaction, the redactions that are refused (`redaction_refused`), and SHA-256 of texts | `test_judge_exchange.py` |
-| `replay.json` | Rows in file order, requested model and prompt version, and either the selected row index or refusal code and identity reason. Covers sole wrong or missing identity, agreeing wrong identities, conflicting matching rows, a matching row among another model, failed calls, missing keys, and each side of a deliberate re-judge. | `test_judge_replay.py` |
+| `replay.json` | Rows in file order, requested model and prompt version, and either the selected row index or refusal code and identity reason. Covers sole wrong or missing identity, agreeing wrong identities, conflicting matching rows (including different replies hidden by the same redaction marker), matching redacted replies, a matching row among another model, failed calls, missing keys, and each side of a deliberate re-judge. A row with `redact_reply: true` redacts its reply before comparison but keeps the original response digest. | `test_judge_replay.py` |
 
 ## How they were computed
 
@@ -24,6 +24,8 @@ What the `midojo.judge.v1` rules and the `midojo.judge-exchange.v1` record must 
   SHA-256 digests are computed, and `shasum -a 256` agrees with them (a lone surrogate
   hashes as `surrogatepass`, which `shasum` cannot take).
 - `replay.json` lists the expected strict identity and decision rules by hand. Its
-  row indexes refer to file order, not to sorted model or request keys.
+  row indexes refer to file order, not to sorted model or request keys. Distinct
+  original replies retain distinct SHA-256 digests even when redaction makes their
+  visible replies equal.
 
 A change to a rule changes the vector in the same commit, and says why.
