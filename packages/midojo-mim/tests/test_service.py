@@ -43,6 +43,7 @@ from typing import Any
 import httpx
 import pytest
 from fastmcp import Client, FastMCP
+from fastmcp.client.transports import StreamableHttpTransport
 from fastmcp.exceptions import ToolError
 from mcp.types import TextContent
 from midojo_spec.injection import Channel, InjectionInstruction, InjectionPlan, InjectionTarget, payload_digest
@@ -265,6 +266,80 @@ async def test_a_plan_that_targets_a_tool_the_upstream_lacks_is_rejected_as_inva
         # The same service binds a plan whose tool the upstream has: the refusal is the plan's, not the service's.
         driver, _ = await remote.bind(plan=PLAN)
         assert driver.bound.tools == ("get_weather", "list_alerts")
+
+
+# --- agent mode is not served ---
+#
+# The service is the host-mode interceptor: its one face is MCP over a real upstream, and every record it makes crosses
+# the link to the driver. Agent mode (a face that records on the control plane with the agent's own session) belongs
+# to the SDKs, which are parked. A bind that asks for it is refused by name, before any binding exists.
+
+
+async def refused(remote: Remote, **bind: Any) -> RefusedError:
+    """Bind with ``bind`` and return the refusal the service answered; nothing is published, nothing reaches the upstream."""
+    websocket = await upgrade(remote.url, CREDENTIAL)
+    with pytest.raises(RefusedError) as rejected:
+        await send_bind(websocket, upstream_url=remote.upstream_url, **bind)
+    await websocket.wait_closed()
+    assert remote.service.published == ()
+    assert remote.events == []
+    return rejected.value
+
+
+NOT_THE_MCP_FACE: list[Any] = [["a2a"], ["agent"], ["mcp", "agent"], ["MCP"], [], "mcp"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("faces", NOT_THE_MCP_FACE, ids=[repr(faces) for faces in NOT_THE_MCP_FACE])
+async def test_a_bind_for_any_face_but_the_one_mcp_face_is_refused_as_unsupported(faces: Any):
+    async with serving() as remote:
+        answer = await refused(remote, fields={"faces": faces})
+        assert answer.kind == "unsupported"
+        assert "the only face is ['mcp']" in answer.detail
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "field", ["session_token", "session", "control_plane_url", "control_token", "midojo_session_token"]
+)
+async def test_a_bind_that_carries_what_agent_mode_needs_is_refused_as_an_unknown_field(field: str):
+    async with serving() as remote:
+        answer = await refused(remote, fields={field: "http://127.0.0.1:8090"})
+        assert answer.kind == "invalid_bind"
+        assert field in answer.detail
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("host_tools", "kind"),
+    [
+        (["a_host_tool"], "unsupported"),
+        (["a", "b"], "unsupported"),
+        ("a_host_tool", "invalid_bind"),
+        ([1], "invalid_bind"),
+    ],
+)
+async def test_a_bind_that_names_host_tools_is_refused_because_the_service_runs_none(host_tools: Any, kind: str):
+    async with serving() as remote:
+        answer = await refused(remote, fields={"host_tools": host_tools})
+        assert answer.kind == kind
+        assert "host_tools" in answer.detail
+
+
+@pytest.mark.asyncio
+async def test_a_session_header_from_the_agent_changes_nothing_the_service_records():
+    """Every record crosses the link to the driver, whatever the agent's request carries: no header names a recorder."""
+    headers = {"X-Midojo-Session": "an-agents-session", "X-Midojo-Control-Token": "a-control-token"}
+    async with serving() as remote:
+        driver, dispatcher = await remote.bind()
+        transport = StreamableHttpTransport(driver.bound.tool_url, headers=headers, auth=driver.bound.tool_token)
+        async with Client(transport) as target:
+            result = await target.call_tool("get_weather", {"city": "Boston"})
+        assert [block.text for block in result.content if isinstance(block, TextContent)] == ["41F, rain"]
+        assert [application.op for application in dispatcher.applications] == ["start_call", "finish_call_detailed"]
+        [record] = dispatcher.calls
+        assert (record.function, record.complete) == ("get_weather", True)
+        await driver.aclose()
 
 
 # --- one binding ---
