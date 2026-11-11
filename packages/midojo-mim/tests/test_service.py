@@ -640,6 +640,24 @@ async def test_an_answer_no_request_awaits_is_a_loss():
         await driver.aclose()
 
 
+@pytest.mark.asyncio
+async def test_a_call_in_flight_when_the_driver_goes_fails_and_is_not_forwarded_twice():
+    """The driver hangs up with a call waiting on its ``start_call``: the call fails and the upstream is never asked."""
+    async with serving() as remote:
+        driver, dispatcher = await remote.bind()
+        driver.pause()
+        async with Client(driver.bound.tool_url, auth=driver.bound.tool_token) as target:
+            pending = asyncio.create_task(target.call_tool("get_weather", {"city": "Boston"}))
+            await asyncio.sleep(0.1)
+            assert not pending.done()
+            await driver.hang_up()
+            with pytest.raises(ToolError):
+                await asyncio.wait_for(pending, 5)
+        assert remote.events == []
+        assert dispatcher.calls == []
+        await driver.aclose()
+
+
 # --- the command line ---
 
 

@@ -101,6 +101,9 @@ LOSS_CLOSE_CODE = 1011
 RELEASE_CLOSE_CODE = 1000
 """The close code of a binding its driver released: a normal closure."""
 
+LOSS_DRAIN_SECONDS = 2.0
+"""How long a lost binding waits for the calls in flight to deliver their failure before it unmounts."""
+
 READY_PREFIX = "midojo-intercept-serve listening on"
 """The line the service prints once it is listening: what a launcher waits for, then parses."""
 
@@ -159,9 +162,19 @@ class _BindRequest:
         return cls(plan=plan, policy=policy, upstream_url=upstream_url)
 
 
-@dataclass(frozen=True)
+def _set_event() -> asyncio.Event:
+    event = asyncio.Event()
+    event.set()
+    return event
+
+
+@dataclass
 class _Face:
-    """One published binding's endpoint: the ASGI app an agent reaches, behind the binding's own token."""
+    """One published binding's endpoint: the ASGI app an agent reaches, behind the binding's own token.
+
+    ``active`` counts the calls (``POST`` requests) the face is answering, and ``idle`` is set while
+    there are none: a loss waits for them to deliver their failure before it unmounts the app.
+    """
 
     id: str
     token: str
@@ -169,6 +182,22 @@ class _Face:
     path: str
     bound: asyncio.Event = field(default_factory=asyncio.Event)
     gone: asyncio.Event = field(default_factory=asyncio.Event)
+    idle: asyncio.Event = field(default_factory=_set_event)
+    active: int = 0
+
+    async def answer(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Serve one request through the face's app, counting a call while it is answered."""
+        if scope.get("method") != "POST":
+            await self.app(scope, receive, send)
+            return
+        self.active += 1
+        self.idle.clear()
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            self.active -= 1
+            if self.active == 0:
+                self.idle.set()
 
 
 class _Faces:
@@ -227,7 +256,7 @@ class _Faces:
             await respond(send, 401, b"This binding's bearer token is required")
             return
         child_scope = dict(scope, path="/" + rest, root_path=root + "/" + binding_id)
-        await _authorized(face.app, face.token)(child_scope, receive, send)
+        await face.answer(child_scope, receive, send)
 
 
 async def _named(face: _Face) -> None:
@@ -576,6 +605,10 @@ class InterceptorService:
         else:
             link.close(outcome.detail)  # every pending request fails at once, so no call hangs on the loss
             self._faces.remove(mounted.face.id)
+            # A call that was waiting on the link fails now; the app has to stay up long enough to tell the
+            # agent, or its request is left open until the agent's own timeout.
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(mounted.face.idle.wait(), LOSS_DRAIN_SECONDS)
             await mounted.unmount()
             await stream.aclose()
             await _close(websocket, LOSS_CLOSE_CODE, outcome.detail)
