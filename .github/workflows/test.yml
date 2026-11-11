@@ -50,6 +50,20 @@ jobs:
       - name: Type check the PyRIT route
         run: uv run --frozen pyright --project pyright-pyrit.json
 
+  spec-package:
+    # midojo-spec declares Python 3.11 and no dependency; the other jobs run 3.12 with the whole workspace.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Run the package's tests on Python 3.11, with nothing but pytest
+        run: uv run --no-project --python 3.11 --with pytest --with-editable packages/midojo-spec python -m pytest packages/midojo-spec -q -p no:cacheprovider
+
   pi-sdk:
     runs-on: ubuntu-latest
     steps:
