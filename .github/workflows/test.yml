@@ -64,6 +64,56 @@ jobs:
       - name: Run the package's tests on Python 3.11, with nothing but pytest
         run: uv run --no-project --python 3.11 --with pytest --with-editable packages/midojo-spec python -m pytest packages/midojo-spec -q -p no:cacheprovider
 
+  mim-package:
+    # midojo-mim declares Python 3.11 and depends on midojo-spec and FastMCP, never on the harness: the
+    # tests run with those and pytest, and its import-boundary test blocks the harness's modules.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Run the package's tests on Python 3.11, without the harness installed
+        run: >
+          uv run --no-project --python 3.11 --with pytest --with pytest-asyncio
+          --with-editable packages/midojo-spec --with-editable packages/midojo-mim
+          python -m pytest packages/midojo-mim -q -p no:cacheprovider
+
+  mim-image:
+    # The image holds midojo-mim and midojo-spec and no harness code, and starts as an arbitrary user.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the image
+        run: docker build -f packages/midojo-mim/Containerfile -t midojo-intercept-serve .
+
+      - name: Check that the image holds no harness code
+        run: |
+          docker run --rm -i --entrypoint python midojo-intercept-serve - <<'PY'
+          import importlib.util
+
+          import midojo_mim.service  # noqa: F401
+          import midojo_spec  # noqa: F401
+
+          present = [m for m in ("midojo", "midojo_sdk", "suites", "tests", "openai") if importlib.util.find_spec(m)]
+          assert not present, f"the image holds {present}"
+          PY
+
+      - name: Start the service as an arbitrary user
+        run: |
+          docker run -d --user 4242:0 -e MIDOJO_INTERCEPTOR_CREDENTIAL=ci-credential --name mim midojo-intercept-serve
+          trap 'docker rm -f mim' EXIT
+          for _ in $(seq 1 30); do
+            docker logs mim 2>&1 | grep -q "midojo-intercept-serve listening on" && exit 0
+            sleep 1
+          done
+          docker logs mim
+          exit 1
+
   pi-sdk:
     runs-on: ubuntu-latest
     steps:

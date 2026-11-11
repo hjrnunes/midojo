@@ -36,12 +36,13 @@ jobs:
           import tomllib
           from pathlib import Path
 
-          # midojo, midojo-sdk and midojo-spec are released together, at the same version.
+          # midojo, midojo-sdk, midojo-spec and midojo-mim are released together, at the same version.
           tag = os.environ["RELEASE_TAG"]
           for path in (
               "pyproject.toml",
               "interception/python-sdk/pyproject.toml",
               "packages/midojo-spec/pyproject.toml",
+              "packages/midojo-mim/pyproject.toml",
           ):
               project = tomllib.loads(Path(path).read_text())["project"]
               expected = f"v{project['version']}"
