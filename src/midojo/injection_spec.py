@@ -345,7 +345,13 @@ class InjectionSpec:
 
     @classmethod
     def from_document(cls, document: Mapping[str, object]) -> InjectionSpec:
-        """An episode from a v1 document, or from the v0 consumer wrapper with a :class:`DeprecationWarning`."""
+        """An episode from a v1 document. A document of any other version, or with none, is refused.
+
+        A document of another version raises
+        :class:`~midojo.injection_spec_document.UnsupportedDocumentVersion`. The v0 consumer wrapper carries no
+        ``schema_version``, so it is refused as a document without one
+        (:class:`~midojo.injection_spec_document.InjectionSpecDocumentError`), not read with a warning.
+        """
         from midojo.injection_spec_document import from_document
 
         return from_document(cls, document)

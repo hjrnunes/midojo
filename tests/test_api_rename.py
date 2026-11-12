@@ -6,9 +6,13 @@ SDK's ``midojo_sdk.episode_schema`` were deprecated aliases of them; importing
 or naming any of them now fails. Two host-facing keyword arguments, the
 ``episode=`` of ``open_evaluation`` and the ``episode_for_payload=`` of
 ``MidojoInjectionSpecTarget``, keep their pre-rename names for one cycle, with
-a ``DeprecationWarning``. The readers of recorded data keep the old document
-versions, the old schema file and the old notes: those are data, not code
-names.
+a ``DeprecationWarning``. No reader keeps an old document version, the old
+schema file or a legacy loader: the document reader accepts
+``midojo-injection-spec-v1`` only and refuses every other version and the v0
+consumer wrapper (``test_no_reader_keeps_an_old_document_version`` here, and
+``tests/test_injection_spec_document.py``). What the readers of recorded data
+still accept is an old field name: a record made before the rename names the
+slot key ``probe_key``, and it reads as ``slot_key``.
 """
 
 from __future__ import annotations
