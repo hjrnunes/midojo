@@ -588,7 +588,7 @@ def test_an_edit_that_keeps_the_size_but_not_the_time_makes_the_next_append_read
     log = ExchangeLog(tmp_path / "log.jsonl")
     log.append(observed_exchange())
     before = log.path.stat()
-    edit_in_place(log.path, b"midojo.judge-exchange.v1", b"midojo.judge-exchange.v2")
+    edit_in_place(log.path, b"midojo.judge-exchange.v1", b"midojo.judge-exchange.v9")
     os.utime(log.path, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000))
     edited = log.path.read_bytes()
 
@@ -601,7 +601,7 @@ def test_an_edit_that_keeps_the_size_and_the_time_is_not_noticed_until_the_file_
     log = ExchangeLog(tmp_path / "log.jsonl")
     log.append(observed_exchange())
     before = log.path.stat()
-    edit_in_place(log.path, b"midojo.judge-exchange.v1", b"midojo.judge-exchange.v2")
+    edit_in_place(log.path, b"midojo.judge-exchange.v1", b"midojo.judge-exchange.v9")
     os.utime(log.path, ns=(before.st_atime_ns, before.st_mtime_ns))
 
     assert log.append(observed_exchange()).sequence == 1

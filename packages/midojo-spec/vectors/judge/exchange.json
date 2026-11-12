@@ -561,7 +561,7 @@
     {
       "name": "another_schema",
       "row": {
-        "schema": "midojo.judge-exchange.v2",
+        "schema": "midojo.judge-exchange.v9",
         "sequence": 0,
         "request_id": "sha256:abababababababababababababababababababababababababababababababab",
         "ask": 0,

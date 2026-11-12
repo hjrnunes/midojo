@@ -144,7 +144,7 @@
     {
       "name": "wrong_schema",
       "request": {
-        "schema": "midojo.judge.v2",
+        "schema": "midojo.judge.v9",
         "id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
         "claim": "c",
         "rubric": null,
