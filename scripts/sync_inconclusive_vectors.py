@@ -8,9 +8,9 @@
 MiDojo owns the vectors: ``tests/fixtures/inconclusive_vectors`` holds the sealed cases,
 ``generate.py`` that re-seals them from ``recording.json``, and ``MANIFEST.json`` that pins
 every file's sha256. A copy is a byte copy of the pinned cases and of the manifest, at the
-directory named in ``COPIES``. The consumer's MiDojo ``parse``, its Garak report route and
-Garak's ``ipi_episode`` probe and detectors read a copy from their own suites, and no test
-reads MiDojo's tree at run time.
+directory named in ``COPIES``. The consumer's Garak bundle (its ``parse`` and its report
+route) and Garak's detectors read a copy from their own suites, and no test reads MiDojo's
+tree at run time.
 
 ``--check`` verifies the owner's tree against its own manifest and each copy it is given
 against the same manifest, the manifest's own bytes included, writes nothing, and exits 1 on
@@ -32,7 +32,7 @@ SCHEMA_VERSION = "inconclusive-vectors-manifest-v1"
 
 # The copy directory of each repository, relative to the checkout root.
 COPIES = {
-    "consumer": Path("packages/asago-bundle-midojo/tests/fixtures/inconclusive_vectors"),
+    "consumer": Path("packages/asago-bundle-garak/tests/fixtures/inconclusive_vectors"),
     "garak": Path("tests/_assets/detectors/inconclusive_vectors"),
 }
 

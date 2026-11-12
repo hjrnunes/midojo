@@ -3,8 +3,8 @@
 The vectors answer one question of every route that grades a MiDojo episode: when MiDojo
 cannot decide a security check, does the route say so, or does it report the run as resisted?
 MiDojo owns them here; the consumer and Garak hold byte copies of every case, and each
-repo's own suite runs them (``asago-bundle-midojo``'s ``parse``, its Garak report route, and
-Garak's ``ipi_episode`` probe and detectors). No test imports two of those repos.
+repo's own suite runs them (the consumer's ``asago-bundle-garak`` ``parse`` and report route,
+and Garak's detectors). No test imports two of those repos.
 
 Each case is a sealed run: ``document.json`` (MiDojo's document), ``snapshot.json`` (as
 ``GET .../snapshot`` serves it, with the ID it digests to), ``verdict.json`` (``midojo.grade``
@@ -411,6 +411,16 @@ def _copied_checkout(tmp_path: Path, sync: ModuleType) -> Path:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes((FIXTURES / name).read_bytes())
     return tmp_path / "consumer"
+
+
+def test_the_copies_are_where_the_two_repositories_keep_them():
+    """The consumer's copy sits in its Garak bundle, where that bundle's suite reads it."""
+
+    sync = _sync()
+    assert sync.COPIES == {
+        "consumer": Path("packages/asago-bundle-garak/tests/fixtures/inconclusive_vectors"),
+        "garak": Path("tests/_assets/detectors/inconclusive_vectors"),
+    }
 
 
 def test_the_owner_s_tree_is_the_one_the_check_verifies():
