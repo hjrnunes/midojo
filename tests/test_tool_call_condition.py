@@ -17,7 +17,7 @@ from midojo.verifiers.tool_call_condition import DETECTED, NOT_DETECTED, evaluat
 from midojo.yaml_task_suite import YAMLTaskSuite
 
 FIXTURES = Path(__file__).parent / "fixtures" / "tool_call_condition"
-V2 = "tool-call-condition-v2"
+CONTRACT_VERSION = "tool-call-condition-v1"
 # The copy keeps the contract's own layout; CONTRACT.lock is its reference to
 # the producer's contract: it names the version and records every digest.
 
@@ -26,8 +26,8 @@ def _vectors(path: Path) -> list[dict]:
     return json.loads(path.read_text())["vectors"]
 
 
-V2_VALIDATE = _vectors(FIXTURES / V2 / "vectors" / "validate.json")
-V2_EVALUATE = _vectors(FIXTURES / V2 / "vectors" / "evaluate.json")
+VALIDATE_VECTORS = _vectors(FIXTURES / CONTRACT_VERSION / "vectors" / "validate.json")
+EVALUATE_VECTORS = _vectors(FIXTURES / CONTRACT_VERSION / "vectors" / "evaluate.json")
 
 
 def _expected(vector: dict) -> tuple:
@@ -44,9 +44,9 @@ def test_every_fixture_file_matches_the_contract_lock():
     assert (lock["authority"], lock["contract"], lock["version"]) == (
         "asago-scenario-generator",
         "tool-call-condition",
-        V2,
+        CONTRACT_VERSION,
     )
-    assert V2 in (FIXTURES / V2 / "README.md").read_text()
+    assert CONTRACT_VERSION in (FIXTURES / CONTRACT_VERSION / "README.md").read_text()
     on_disk = {
         path.relative_to(FIXTURES).as_posix(): path
         for path in FIXTURES.rglob("*")
@@ -58,19 +58,19 @@ def test_every_fixture_file_matches_the_contract_lock():
 
 
 def test_the_fixtures_hold_every_vector():
-    assert (len(V2_EVALUATE), len(V2_VALIDATE)) == (463, 128)
-    for vectors in (V2_EVALUATE, V2_VALIDATE):
+    assert (len(EVALUATE_VECTORS), len(VALIDATE_VECTORS)) == (463, 128)
+    for vectors in (EVALUATE_VECTORS, VALIDATE_VECTORS):
         assert len({vector["id"] for vector in vectors}) == len(vectors)
 
 
-@pytest.mark.parametrize("vector", V2_VALIDATE, ids=[v["id"] for v in V2_VALIDATE])
+@pytest.mark.parametrize("vector", VALIDATE_VECTORS, ids=[v["id"] for v in VALIDATE_VECTORS])
 def test_validate_vectors(vector):
     problem = validate_condition(vector["condition"])
     assert (problem is None) == vector["valid"]
     assert problem == vector["error"]
 
 
-@pytest.mark.parametrize("vector", V2_EVALUATE, ids=[v["id"] for v in V2_EVALUATE])
+@pytest.mark.parametrize("vector", EVALUATE_VECTORS, ids=[v["id"] for v in EVALUATE_VECTORS])
 def test_evaluate_vectors(vector):
     assert _evaluated(vector) == _expected(vector)
 

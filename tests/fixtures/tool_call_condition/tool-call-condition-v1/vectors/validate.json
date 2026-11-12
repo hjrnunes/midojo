@@ -1,6 +1,6 @@
 {
   "contract": "tool-call-condition",
-  "version": "tool-call-condition-v2",
+  "version": "tool-call-condition-v1",
   "implementation": {"repository": "garak", "revision": "4f4917d666feea947731ec1588739d8427bc15d9", "module": "garak/detectors/toolcall.py", "function": "validate_condition"},
   "vectors": [
     {"id": "valid.value-op-eq", "condition": {"comparisons": [{"kind": "value", "left": {"source": "argument", "operation": "a", "argument": "x"}, "op": "eq", "right": {"source": "literal", "value": 1}}]}, "valid": true, "error": null},

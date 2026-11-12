@@ -1,4 +1,4 @@
-"""Validate and evaluate a tool-call condition as ``tool-call-condition-v2`` states it.
+"""Validate and evaluate a tool-call condition as ``tool-call-condition-v1`` states it.
 
 Conformance is the contract's own vectors, copied unedited into
 ``tests/fixtures/tool_call_condition/`` under the contract's layout; they must

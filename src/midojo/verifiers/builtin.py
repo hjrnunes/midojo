@@ -208,7 +208,7 @@ class ToolCalled:
 
 @dataclass
 class ToolCallCondition:
-    """Passes if a ``tool-call-condition-v2`` condition holds on the agent's tool calls.
+    """Passes if a ``tool-call-condition-v1`` condition holds on the agent's tool calls.
 
     Each call is given to the evaluator with all its recorded facts. A blocked
     call counts as the call the agent attempted, as it does for

@@ -1,9 +1,9 @@
-# tool-call-condition-v2
+# tool-call-condition-v1
 
 A tool-call condition is a declarative test over the tool calls a target made
 while answering one attack. The producer owns this contract.
 
-Version 2 is `tool-call-condition-v1` with three changes to evaluation:
+Evaluation follows three rules that the sections below state in full:
 
 1. An `order` comparison that finds no prior call is inconclusive when the
    capture may lack calls (see `order`).
@@ -12,23 +12,17 @@ Version 2 is `tool-call-condition-v1` with three changes to evaluation:
 3. A captured call can be `blocked`; a blocked call never satisfies
    `requires_prior` (see Inputs).
 
-The condition structure and its validation do not change: a condition is valid
-under v2 exactly when it is valid under v1, and `schema.json` accepts the same
-conditions. A condition does not name its version; an evaluator states the
-version it implements. The vectors were computed by running Garak's
+A condition does not name its version; an evaluator states the version it
+implements. The vectors were computed by running Garak's
 `garak/detectors/toolcall.py` (`validate_condition`, `evaluate_condition`) at
-revision `4f4917d666feea947731ec1588739d8427bc15d9`, where Garak evaluates v2.
-`evaluate_condition_v2` in the producer's
+revision `4f4917d666feea947731ec1588739d8427bc15d9`.
+`evaluate_condition` in the producer's
 `scripts/gen_tool_call_condition_vectors.py` states these rules in code a
 second time and gives the same result on every evaluate vector. Any
 implementation must produce the same results on every vector.
 
-Every v1 evaluate vector is also a v2 evaluate vector with the same id. The v2
-result differs from the v1 result on three of them:
-`completeness.order-clean.complete-false`, `order.same-argument-bool-int`,
-and `order.same-argument-null-both-missing-on-prior`. The remaining surprising
-behaviors of v1 stay; this document says so where they apply and the vectors
-pin them.
+Some behaviors of value comparison are surprising. This document says so where
+they apply and the vectors pin them.
 
 ## Files
 
@@ -36,24 +30,23 @@ pin them.
 | --- | --- |
 | `schema.json` | The structure of a condition, as JSON Schema draft 2020-12, and the shape of a captured call (`$defs.call`). |
 | `vectors/validate.json` | Conditions with the result of `validate_condition`. |
-| `vectors/evaluate.json` | A condition, calls, and completeness, with the result of evaluating the condition under v2. |
+| `vectors/evaluate.json` | A condition, calls, and completeness, with the result of evaluating the condition. |
 
 `../CONTRACT.lock` records the SHA-256 digest of each file. Consumers copy the
 directory byte for byte.
 
 ## Vendoring
 
-To vendor this contract, copy `tool-call-condition-v2/` byte for byte (a
-consumer that keeps the whole contract copies `../VERSIONING.md` and
-`../CONTRACT.lock` too). A vendored version directory needs no other producer
-file.
+To vendor this contract, copy `tool-call-condition-v1/` byte for byte (a
+consumer that keeps the whole contract copies `../CONTRACT.lock` too). A
+vendored version directory needs no other producer file.
 
 Verify a copy in one of two ways:
 
 - compare each file's SHA-256 with the digest `CONTRACT.lock` records for its
   path, or
-- run the producer's `scripts/sync_tool_call_condition.py --check` with the
-  consumer's checkout (`--consumer`, `--midojo`, `--garak`).
+- run the producer's `scripts/sync_tool_call_condition.py --check` with a
+  checkout of the consumer (`--consumer`) or the Garak fork (`--garak`).
 
 `--write` refreshes a copy from the producer. A copy that carries
 `CONTRACT.lock` references the contract: the lock names the version and every
@@ -122,9 +115,8 @@ vectors give the exact text. Reading the text is not part of validation:
 - the problem text and which problem comes first when a condition has several;
 - the result when `kind` or `source` is a list or an object. The schema
   rejects these conditions. Garak at the revision above returns a problem for
-  them (for example `comparisons[0] has unknown kind []`); Garak at the v1
-  revision raised `TypeError`. The vectors do not include them, so that the
-  validate vectors stay those of v1.
+  them (for example `comparisons[0] has unknown kind []`); an earlier Garak
+  revision raised `TypeError`. The vectors do not include them.
 
 Names are not constrained to be non-empty in `schema.json`, because Garak does
 not. The scenario-handoff `tool_call_condition` schema is stricter: it requires
@@ -284,7 +276,7 @@ not change.
 ## Beyond the vectors
 
 Garak's `evaluate_output` wraps `evaluate_condition` for one model output and
-is not covered by the vectors. A v2 wrapper keeps its behavior:
+is not covered by the vectors. A wrapper keeps its behavior:
 
 - No output: `inconclusive`, reason `no output`.
 - Invalid condition: `inconclusive`, reason `invalid condition: <problem>`.
@@ -332,5 +324,5 @@ The ids group vectors: `compare.*` (value comparisons), `unresolved.*`,
 
 Never edit expected values by hand. Recompute them with
 `scripts/gen_tool_call_condition_vectors.py`, which takes every result from
-Garak's functions at the revision above and stops when `evaluate_condition_v2`
+Garak's functions at the revision above and stops when `evaluate_condition`
 disagrees, and change the implementation fields with them.

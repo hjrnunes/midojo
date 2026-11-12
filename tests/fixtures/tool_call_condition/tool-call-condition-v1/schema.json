@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "tool-call-condition-v2",
+  "title": "tool-call-condition-v1",
   "description": "A condition over the tool calls a target emitted. Mirrors the structural rules of validate_condition; the README states what only the vectors check. $defs.call is the shape of one captured call.",
   "type": "object",
   "additionalProperties": false,

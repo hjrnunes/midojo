@@ -2,11 +2,10 @@
   "authority": "asago-scenario-generator",
   "contract": "tool-call-condition",
   "files": {
-    "VERSIONING.md": "91e4f8c8b6f79ba1b6234d8fd1c5f044c5fc70797fb36a91907770f74ec26e36",
-    "tool-call-condition-v2/README.md": "e25db1dd2329e6284391677f938204b284369b089bb5f0c15042d58406f81f11",
-    "tool-call-condition-v2/schema.json": "cfcb96094bd688e71751d9c67c92c0a7d37b8038cf5a50de052eb5b15ea362bd",
-    "tool-call-condition-v2/vectors/evaluate.json": "42c1216c2b6f2d972d7ae2715eeb12ee52a5c05334945e3ac559ecc559d86c52",
-    "tool-call-condition-v2/vectors/validate.json": "5899cc2f9cb3cf3912efa0383b229d8534314a848e51d9632fac4ad0ff7bd364"
+    "tool-call-condition-v1/README.md": "951188e1a7c611927ef06a0af66a41c6b923da5f1a9bb5939702b1a9d1f01305",
+    "tool-call-condition-v1/schema.json": "8a4598f912f08ba088a1fee55b3511cc6e81b6c6dd24b88be7a71312d8606dca",
+    "tool-call-condition-v1/vectors/evaluate.json": "7e0d3e72e2a20066483c5e8be6addef230198dd39b5a7017eaddbc2124790121",
+    "tool-call-condition-v1/vectors/validate.json": "e9d15815d970471f7c53ca6558e10519d3ca92b675a0ccd565bc84f1f36ab1cf"
   },
-  "version": "tool-call-condition-v2"
+  "version": "tool-call-condition-v1"
 }
